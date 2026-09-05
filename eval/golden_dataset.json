@@ -874,5 +874,103 @@
       "top_n": null
     },
     "sql": "SELECT date_trunc('day', r.refund_time) AS \"refund_time\", SUM(r.refund_amount) AS \"refund_amount\"\nFROM fact_orders f\nLEFT JOIN fact_refunds r ON r.order_id = f.order_id\nWHERE r.refund_time >= TIMESTAMP '2024-05-31 00:00:00' AND r.refund_time < TIMESTAMP '2024-06-30 00:00:00'\nGROUP BY date_trunc('day', r.refund_time)\nORDER BY \"refund_time\" ASC\nLIMIT 100"
+  },
+  {
+    "id": "M1",
+    "type": "multi_turn",
+    "scenario": "multi-turn 省略指代继承（地区替换）",
+    "turns": [
+      {
+        "question": "上个月华东地区的GMV是多少？",
+        "dsl": {
+          "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+          "dimensions": [],
+          "time_filter": {
+            "granularity": "month",
+            "range_type": "relative",
+            "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+            "comparison": "none",
+            "reference_date": "2024-06-30"
+          },
+          "filters": [
+            {"field": "province", "operator": "in", "value": ["上海", "江苏", "浙江", "山东"]}
+          ],
+          "order_by": [],
+          "limit": 100,
+          "fill_gaps": false,
+          "top_n": null
+        },
+        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nWHERE u.province IN ('上海', '江苏', '浙江', '山东') AND f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nLIMIT 100"
+      },
+      {
+        "question": "那华南呢？",
+        "dsl": {
+          "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+          "dimensions": [],
+          "time_filter": {
+            "granularity": "month",
+            "range_type": "relative",
+            "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+            "comparison": "none",
+            "reference_date": "2024-06-30"
+          },
+          "filters": [
+            {"field": "province", "operator": "in", "value": ["广东"]}
+          ],
+          "order_by": [],
+          "limit": 100,
+          "fill_gaps": false,
+          "top_n": null
+        },
+        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nWHERE u.province IN ('广东') AND f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nLIMIT 100"
+      }
+    ]
+  },
+  {
+    "id": "M2",
+    "type": "multi_turn",
+    "scenario": "multi-turn 下钻加维（品类展开）",
+    "turns": [
+      {
+        "question": "上个月的GMV是多少？",
+        "dsl": {
+          "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+          "dimensions": [],
+          "time_filter": {
+            "granularity": "month",
+            "range_type": "relative",
+            "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+            "comparison": "none",
+            "reference_date": "2024-06-30"
+          },
+          "filters": [],
+          "order_by": [],
+          "limit": 100,
+          "fill_gaps": false,
+          "top_n": null
+        },
+        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nLIMIT 100"
+      },
+      {
+        "question": "按品类展开",
+        "dsl": {
+          "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+          "dimensions": [{"field": "category", "alias": null}],
+          "time_filter": {
+            "granularity": "month",
+            "range_type": "relative",
+            "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+            "comparison": "none",
+            "reference_date": "2024-06-30"
+          },
+          "filters": [],
+          "order_by": [],
+          "limit": 100,
+          "fill_gaps": false,
+          "top_n": null
+        },
+        "sql": "SELECT p.category AS \"category\", SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_product p ON p.product_id = f.product_id\nWHERE f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nGROUP BY p.category\nLIMIT 100"
+      }
+    ]
   }
 ]

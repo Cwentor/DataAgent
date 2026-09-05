@@ -3,8 +3,8 @@
 > 评审日期：2026-09 · 修复对象：`audit-chatbi-domain-specificity.md` · 验收：324 passed + black + ruff 全绿
 
 **版本**: v1.0-final  
-**范围**: `docs/reviews/audit-chatbi-domain-specificity.md` 全部 P0/P1/P2 项  
-**测试基线**: 324 passed（含 23 条 golden 评测 + 103 条回归单测）  
+**范围**: `docs/reviews/audit-chatbi-domain-specificity.md` 全部 P0/P1/P2 项（含整改指令2-4 多轮 golden 闭环）  
+**测试基线**: 325 passed（含 25 条 golden 评测 + 104 条回归单测）  
 **格式**: `black --check .` ✅ `ruff check .` ✅
 
 ---
@@ -73,6 +73,15 @@
 | P2 | `exec/guards.py:412-431` | 预检后 scan_rows 未复用 | 命中缓存直接回填 `scan_rows = scanned`，跳过 EXPLAIN |
 | P2 | `tests/test_exec.py` | 无缓存单测 | 新增 `test_scan_cache_key_normalizes_whitespace` + `test_execute_sql_reuses_scan_cache`（monkeypatch 拦截 EXPLAIN，验证命中缓存不重复执行） |
 
+#### 3-4：golden 增补多轮对话序列用例（整改指令2-4 闭环）
+
+| 优先级 | 文件:行 | 缺陷 | 修复摘要 |
+|--------|---------|------|----------|
+| P1 | `eval/golden_dataset.json` | golden 仅单轮用例，会话继承（省略指代/下钻加维）不在回归保护网内 | 新增 `type="multi_turn"` 用例 M1（"上个月华东GMV" → "那华南呢？" 地区替换继承）与 M2（"上个月GMV" → "按品类展开" 下钻加维），每轮携带 question/dsl/sql 三元组 |
+| P1 | `eval/eval_runner.py` | `evaluate_all` 仅支持单轮断言，多轮用例会 KeyError | 新增 `evaluate_multi_turn_case`：逐轮经**真实会话链路**（`web.service.run_query`：路由→继承合并→编译→执行→状态写回）执行，断言每轮继承后 DSL 与编译 SQL 均与 golden 一致，并用独立 session_id 隔离；`evaluate_all` 按 `type` 分派 |
+| P1 | `tests/test_eval.py` | 用例数断言 23、无多轮结构校验 | 更新 23→25；新增 `test_multi_turn_cases_present`（校验 M1/M2 的 turns 三元组完整性） |
+| P1 | `tests/test_agent.py` | `test_heuristic_covers_all_golden_questions` 遍历 multi_turn 用例 KeyError | 跳过 `type == "multi_turn"`（由多轮评测单独覆盖） |
+
 ---
 
 ### 4. 启发式兜底规则补全（时间代数）
@@ -93,6 +102,7 @@
 | 优先级 | 文件:行 | 缺陷 | 修复摘要 |
 |--------|---------|------|----------|
 | P2 | `eval/golden_dataset.json:778` | 仅 19 条，缺季度/至今/时间主轴等新功能覆盖 | 新增 Q20（上季度 calendar quarter）/ Q21（本月至今 MTD to_date）/ Q22（6月每日同比 YOY，含 time dimension）/ Q23（近30天退款金额 time_field=refund_time），共 23 条，全通过 |
+| P1 | `eval/golden_dataset.json` | 无多轮对话序列用例 | 新增 M1（省略指代继承）/ M2（下钻加维）多轮用例，经真实会话链路评测，共 25 条，全通过 |
 
 ---
 
@@ -160,9 +170,9 @@ default_tool_agent(registry=registry)  # 传递 registry
 | `tests/test_slotfill.py` | `test_slot_store_sqlite_persists_across_instances`、`test_slot_store_sqlite_clear_removes_persisted`、`test_slot_store_sqlite_ttl_expiry_persists_delete` | ✅ 22 passed |
 | `tests/test_ratelimit.py` | `test_sqlite_limiter_persists_failures`、`test_sqlite_limiter_success_resets_across_instances` | ✅ 10 passed |
 | `tests/test_present.py` | `test_viz_config_shape`、`test_viz_config_line_has_axes`、`test_viz_table_for_non_numeric_y`、`test_viz_pivot_contract`、`test_build_chart_spec_echarts_contract` | ✅ 20 passed |
-| `tests/test_eval.py` | 全部 23 条 golden 评测（含 Q20-Q23） | ✅ 23 passed |
-| `tests/test_agent.py` | 全部 10 条 | ✅ 10 passed |
-| **全量回归** | **324 passed** | ✅ |
+| `tests/test_eval.py` | 全部 25 条 golden 评测（含 Q20-Q23 + M1/M2 多轮序列） | ✅ 25 passed |
+| `tests/test_agent.py` | 全部 10 条（多轮用例跳过启发式单轮断言） | ✅ 10 passed |
+| **全量回归** | **325 passed** | ✅ |
 
 ---
 

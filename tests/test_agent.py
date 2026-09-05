@@ -15,9 +15,11 @@ from semantic.dsl_schema import QueryDSL
 # 启发式兜底
 # --------------------------------------------------------------------------- #
 def test_heuristic_covers_all_golden_questions():
-    """启发式应能复现 golden 中全部问题的预期 DSL。"""
+    """启发式应能复现 golden 中全部**单轮**问题的预期 DSL。"""
     h = DeterministicNL2DSL()
     for item in load_golden():
+        if item.get("type") == "multi_turn":
+            continue  # 多轮用例由 eval.multi_turn 评测单独覆盖
         expected = QueryDSL.model_validate(item["dsl"])
         dsl = h.run(item["question"])
         assert dsl == expected, "未命中: " + str(item["id"])
