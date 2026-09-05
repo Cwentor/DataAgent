@@ -315,7 +315,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT (SUM(f.order_amount)) / (COUNT(DISTINCT f.user_id)) AS \"arpu\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\nLIMIT 100"
+    "sql": "SELECT (SUM(f.order_amount)) / NULLIF(COUNT(DISTINCT f.user_id), 0) AS \"arpu\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\nLIMIT 100"
   },
   {
     "id": "Q10",
@@ -515,7 +515,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT (SUM(r.refund_amount)) / (SUM(f.order_amount)) AS \"refund_rate\"\nFROM fact_orders f\nLEFT JOIN fact_refunds r ON r.order_id = f.order_id\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\nLIMIT 100"
+    "sql": "SELECT (SUM(r.refund_amount)) / NULLIF(SUM(f.order_amount), 0) AS \"refund_rate\"\nFROM fact_orders f\nLEFT JOIN fact_refunds r ON r.order_id = f.order_id\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\nLIMIT 100"
   },
   {
     "id": "Q15",
@@ -774,5 +774,105 @@
       }
     },
     "sql": "SELECT \"province\", \"category\", \"gmv\"\nFROM (\nSELECT u.province AS \"province\", p.category AS \"category\", SUM(f.order_amount) AS \"gmv\",\n         ROW_NUMBER() OVER (PARTITION BY u.province ORDER BY SUM(f.order_amount) DESC) AS __rn\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nJOIN dim_product p ON p.product_id = f.product_id\nWHERE f.pay_status = 'SUCCESS'\nGROUP BY u.province, p.category\n) AS __ranked\nWHERE __rn <= 3\nORDER BY \"province\" ASC, \"gmv\" DESC\nLIMIT 100"
+  },
+  {
+    "id": "Q20",
+    "question": "上季度的成功订单GMV是多少？",
+    "scenario": "时间代数-calendar quarter",
+    "dsl": {
+      "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+      "dimensions": [],
+      "time_filter": {
+        "granularity": "quarter",
+        "range_type": "relative",
+        "relative": {"amount": 1, "unit": "quarter", "mode": "calendar"},
+        "comparison": "none",
+        "reference_date": "2024-06-30"
+      },
+      "filters": [
+        {"field": "pay_status", "operator": "eq", "value": "SUCCESS"}
+      ],
+      "order_by": [],
+      "limit": 100,
+      "fill_gaps": false,
+      "top_n": null
+    },
+    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-01-01 00:00:00' AND f.order_time < TIMESTAMP '2024-04-01 00:00:00'\nLIMIT 100"
+  },
+  {
+    "id": "Q21",
+    "question": "本月至今成功订单GMV是多少？",
+    "scenario": "时间代数-MTD to_date",
+    "dsl": {
+      "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+      "dimensions": [],
+      "time_filter": {
+        "granularity": "day",
+        "range_type": "relative",
+        "relative": {"amount": 1, "unit": "month", "mode": "to_date"},
+        "comparison": "none",
+        "reference_date": "2024-06-30"
+      },
+      "filters": [
+        {"field": "pay_status", "operator": "eq", "value": "SUCCESS"}
+      ],
+      "order_by": [],
+      "limit": 100,
+      "fill_gaps": false,
+      "top_n": null
+    },
+    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-30 00:00:00'\nLIMIT 100"
+  },
+  {
+    "id": "Q22",
+    "question": "6月每日成功订单GMV同比是多少？",
+    "scenario": "时间维度×comparison按位配对",
+    "dsl": {
+      "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+      "dimensions": [{"field": "order_time"}],
+      "time_filter": {
+        "granularity": "day",
+        "range_type": "absolute",
+        "relative": null,
+        "absolute": {"start": "2024-06-01", "end": "2024-07-01"},
+        "comparison": "yoy",
+        "reference_date": null
+      },
+      "filters": [
+        {"field": "pay_status", "operator": "eq", "value": "SUCCESS"}
+      ],
+      "order_by": [
+        {"field": "order_time", "direction": "asc"}
+      ],
+      "limit": 100,
+      "fill_gaps": false,
+      "top_n": null
+    },
+    "sql": "WITH cur AS (\n  SELECT date_trunc('day', f.order_time) AS \"order_time\", SUM(f.order_amount) AS \"gmv\"\n  FROM fact_orders f\n  WHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\n  GROUP BY date_trunc('day', f.order_time)\n),\nprev AS (\n  SELECT date_add(date_trunc('day', f.order_time), INTERVAL 1 YEAR) AS \"order_time\", SUM(f.order_amount) AS \"gmv\"\n  FROM fact_orders f\n  WHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2023-06-01 00:00:00' AND f.order_time < TIMESTAMP '2023-07-01 00:00:00'\n  GROUP BY date_add(date_trunc('day', f.order_time), INTERVAL 1 YEAR)\n)\nSELECT cur.\"order_time\" AS \"order_time\", cur.\"gmv\" AS \"gmv\", prev.\"gmv\" AS \"gmv_prev\", (cur.\"gmv\" - prev.\"gmv\") / NULLIF(prev.\"gmv\", 0) AS \"gmv_yoy\"\nFROM cur LEFT JOIN prev USING (\"order_time\")\nORDER BY \"order_time\" ASC\nLIMIT 100"
+  },
+  {
+    "id": "Q23",
+    "question": "近30天每日退款金额是多少？",
+    "scenario": "时间主轴解绑-time_field=refund_time",
+    "dsl": {
+      "metrics": [{"kind": "aggregate", "field": "refund_amount", "agg": "sum", "alias": "refund_amount"}],
+      "dimensions": [{"field": "refund_time"}],
+      "time_filter": {
+        "granularity": "day",
+        "range_type": "relative",
+        "relative": {"amount": 30, "unit": "day", "mode": "trailing"},
+        "comparison": "none",
+        "reference_date": "2024-06-30",
+        "time_field": "refund_time"
+      },
+      "filters": [],
+      "order_by": [
+        {"field": "refund_time", "direction": "asc"}
+      ],
+      "limit": 100,
+      "fill_gaps": false,
+      "top_n": null
+    },
+    "sql": "SELECT date_trunc('day', r.refund_time) AS \"refund_time\", SUM(r.refund_amount) AS \"refund_amount\"\nFROM fact_orders f\nLEFT JOIN fact_refunds r ON r.order_id = f.order_id\nWHERE r.refund_time >= TIMESTAMP '2024-05-31 00:00:00' AND r.refund_time < TIMESTAMP '2024-06-30 00:00:00'\nGROUP BY date_trunc('day', r.refund_time)\nORDER BY \"refund_time\" ASC\nLIMIT 100"
   }
 ]

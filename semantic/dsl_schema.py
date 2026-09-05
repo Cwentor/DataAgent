@@ -24,6 +24,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # 必须严格限制为 ASCII 字母数字下划线（<=64 字符），从 Pydantic 校验层杜绝标识符注入（P0-1）。
 IDENTIFIER_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
 
+# 时间维度逻辑字段白名单（时间主轴 / 窗口函数 / 补零排序所依赖）。
+# TimeFilter.time_field 只能取这些字段之一，防止把任意列当作时间轴（越权/语义错误）。
+TIME_FIELDS: frozenset[str] = frozenset({"order_time", "refund_time", "register_time"})
+
 
 # --------------------------------------------------------------------------- #
 # 时间相关枚举
@@ -32,6 +36,7 @@ class Granularity(StrEnum):
     DAY = "day"
     WEEK = "week"
     MONTH = "month"
+    QUARTER = "quarter"
 
 
 class Comparison(StrEnum):
@@ -51,6 +56,7 @@ class RelativeUnit(StrEnum):
     DAY = "day"
     WEEK = "week"
     MONTH = "month"
+    QUARTER = "quarter"
     YEAR = "year"
 
 
@@ -59,10 +65,13 @@ class RelativeMode(StrEnum):
 
     - trailing：相对锚点向前滚动 N 个时间单位，窗口为 [锚点-N单位, 锚点)。
     - calendar：自然日历周期，例如 "上个月" 为整个上一个自然月。
+    - to_date：自然周期起点至今（MTD/QTD/YTD），窗口为 [周期起点, reference_date)，
+      例如 "本月至今" 为 [当月1日, 锚点日期)。
     """
 
     TRAILING = "trailing"
     CALENDAR = "calendar"
+    TO_DATE = "to_date"
 
 
 class RelativeTime(BaseModel):
@@ -98,6 +107,13 @@ class TimeFilter(BaseModel):
         default=None,
         description="相对时间窗口的锚点日期；为空时回退到 config.AS_OF_DATE",
     )
+    time_field: str = Field(
+        default="order_time",
+        description=(
+            "时间窗口锚定的时间字段（时间主轴），必须是 TIME_FIELDS 白名单中的逻辑字段；"
+            "例如退款时序分析可声明 refund_time，解除 order_time 硬编码封锁"
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_range(self) -> TimeFilter:
@@ -105,6 +121,19 @@ class TimeFilter(BaseModel):
             raise ValueError("range_type=relative 时必须提供 relative 对象")
         if self.range_type == TimeRangeType.ABSOLUTE and self.absolute is None:
             raise ValueError("range_type=absolute 时必须提供 absolute 对象")
+        if self.time_field not in TIME_FIELDS:
+            raise ValueError(f"time_field={self.time_field!r} 不在时间字段白名单 TIME_FIELDS 内")
+        if (
+            self.range_type == TimeRangeType.RELATIVE
+            and self.relative is not None
+            and self.relative.mode == RelativeMode.TO_DATE
+        ):
+            if self.relative.unit not in (
+                RelativeUnit.MONTH,
+                RelativeUnit.QUARTER,
+                RelativeUnit.YEAR,
+            ):
+                raise ValueError("to_date 模式仅支持 month/quarter/year 单位（MTD/QTD/YTD）")
         return self
 
 

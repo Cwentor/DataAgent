@@ -212,4 +212,58 @@ def test_viz_window_metric_is_line():
 def test_viz_config_shape():
     dsl = _dsl(dimensions=[{"field": "category"}])
     cfg = viz_config(dsl, ("category", "gmv"), (("a",),))
-    assert cfg == {"chart": "pie", "x": "category", "y": "gmv"}
+    assert cfg["chart"] == "pie"
+    assert cfg["x"] == "category"
+    assert cfg["y"] == "gmv"
+    # ECharts 级渲染契约：series/axis/legend/tooltip 齐全（报告整改指令3-1）
+    e = cfg["echarts"]
+    assert e["tooltip"]["trigger"] == "item"
+    assert e["legend"]["data"] == ["gmv"]
+    assert e["series"][0]["type"] == "pie"
+    assert e["series"][0]["encode"]["value"] == 1
+
+
+def test_viz_config_line_has_axes():
+    """时间趋势：折线契约包含 x/y 轴与平滑配置。"""
+    dsl = _dsl(dimensions=[{"field": "order_time"}])
+    cfg = viz_config(dsl, ("order_time", "gmv"), (("2024-06-01", 1),))
+    assert cfg["chart"] == "line"
+    e = cfg["echarts"]
+    assert e["xAxis"]["type"] == "category"
+    assert e["yAxis"]["type"] == "value"
+    assert e["series"][0]["type"] == "line"
+    assert e["series"][0]["smooth"] is True
+    assert e["series"][0]["encode"] == {"x": 0, "y": 1}
+
+
+def test_viz_table_for_non_numeric_y():
+    """数值类型信号：y 列显著非数值（占比 < 0.5）时强制降级明细表。"""
+    dsl = _dsl(dimensions=[{"field": "category"}])
+    rows = (("数码", "高"), ("家电", "中"), ("服饰", "低"))
+    assert recommend_viz(dsl, ("category", "gmv"), rows) == "table"
+
+
+def test_viz_pivot_contract():
+    """多维结果：pivot 契约提供列结构标注（前端表格渲染依据）。"""
+    dsl = _dsl(dimensions=[{"field": "category"}, {"field": "brand"}])
+    cfg = viz_config(dsl, ("category", "brand", "gmv"), (("a", "b", 1),))
+    assert cfg["chart"] == "pivot"
+    e = cfg["echarts"]
+    assert e["columns"] == [
+        {"name": "category", "index": 0},
+        {"name": "brand", "index": 1},
+        {"name": "gmv", "index": 2},
+    ]
+
+
+def test_build_chart_spec_echarts_contract():
+    """ChartSpec 复合契约：携带 echarts option 且 to_dict 可序列化。"""
+    from present.viz import build_chart_spec
+
+    dsl = _dsl(dimensions=[{"field": "category"}])
+    spec = build_chart_spec(dsl, ("category", "gmv"), (("a", 1),))
+    assert spec.chart == "pie"
+    payload = spec.to_dict()
+    assert payload["echarts"]["series"][0]["type"] == "pie"
+    assert payload["columns"] == ["category", "gmv"]
+    assert payload["rows"] == [["a", 1]]

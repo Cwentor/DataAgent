@@ -419,6 +419,8 @@ def run_query(
                         rewriter=rewrite_dsl,
                         request_id=rid,
                         base_dsl=base_dsl,  # 会话上下文继承注入（None 时行为不变）
+                        history=state.history if state is not None else None,
+                        last_dsl=state.last_dsl if state is not None else None,
                     )
             finally:
                 if own_conn and pool is not None:

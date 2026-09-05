@@ -225,7 +225,30 @@
     else if (chart === "bar") { box.innerHTML = bars(viz, columns, rows); }
     else if (chart === "pie") { box.innerHTML = pie(viz, columns, rows); }
     else if (chart === "line") { box.innerHTML = line(viz, columns, rows); }
+    else if (chart === "pivot") { renderPivot(viz, columns, rows); }
     else { box.textContent = "该结果以表格形式展示"; }
+  }
+
+  // 透视表（pivot）真实渲染：完整分组表格 + 维度/指标说明提示（报告整改指令3-1）
+  function renderPivot(viz, columns, rows) {
+    var box = $("chart");
+    box.innerHTML = "";
+    var html = "<div class='pivot-note'>多维结果以分组表格展示（维度："
+      + esc((viz.x || "—")) + "；指标：" + esc((viz.y || "—")) + "）</div>";
+    html += "<div class='table-wrap'><table><thead><tr>";
+    for (var i = 0; i < columns.length; i++) html += "<th>" + esc(columns[i]) + "</th>";
+    html += "</tr></thead><tbody>";
+    for (var r = 0; r < rows.length; r++) {
+      html += "<tr>";
+      for (var c = 0; c < rows[r].length; c++) {
+        var v = rows[r][c];
+        var cls = typeof v === "number" ? ' class="num"' : "";
+        html += "<td" + cls + ">" + esc(fmt(v)) + "</td>";
+      }
+      html += "</tr>";
+    }
+    html += "</tbody></table></div>";
+    box.innerHTML = html;
   }
 
   // ---------------------------------------------------------------- 意图路由结果

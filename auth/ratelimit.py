@@ -1,4 +1,8 @@
-"""登录失败指数退避限流（用户名 + IP）。"""
+"""登录失败指数退避限流（用户名 + IP）。
+
+整改指令3-2：配置 db_path（默认取 settings.STATE_STORE_DB）时，失败计数
+落盘 SQLite，使多 worker / 重启后限流状态一致，避免绕过限流。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ import threading
 import time
 
 from config import settings
+from persistence.kvstore import SqliteKVStore
 
 
 class LoginRateLimitError(RuntimeError):
@@ -18,35 +23,59 @@ class LoginRateLimitError(RuntimeError):
 
 class LoginRateLimiter:
     def __init__(
-        self, max_failures: int = 5, base_seconds: float = 2.0, max_seconds: float = 300.0
+        self,
+        max_failures: int = 5,
+        base_seconds: float = 2.0,
+        max_seconds: float = 300.0,
+        db_path: str | None = None,
     ) -> None:
         self.max_failures = max_failures
         self.base_seconds = base_seconds
         self.max_seconds = max_seconds
         self._failures: dict[str, tuple[int, float]] = {}
         self._lock = threading.Lock()
+        # 持久化层：配置路径时失败计数落盘（多 worker 一致）
+        self._kv = SqliteKVStore(db_path, table="login_failures") if db_path else None
+
+    def _persist(self, key: str, failures: int, last_failure: float) -> None:
+        if self._kv is not None:
+            self._kv.set(key, {"failures": failures, "last_failure": last_failure})
+
+    def _load(self, key: str) -> tuple[int, float] | None:
+        if self._kv is None:
+            return None
+        raw = self._kv.get(key)
+        if raw is None:
+            return None
+        return int(raw["failures"]), float(raw["last_failure"])
 
     def check(self, key: str) -> None:
         with self._lock:
-            entry = self._failures.get(key)
+            entry = self._failures.get(key) or self._load(key)
             if entry is None:
                 return
             failures, last_failure = entry
             delay = min(
                 self.base_seconds * (2 ** max(0, failures - self.max_failures)), self.max_seconds
             )
-            remaining = delay - (time.monotonic() - last_failure)
+            # 跨进程持久化后必须使用墙钟时间（monotonic 不可跨进程比较）
+            remaining = delay - (time.time() - last_failure)
             if failures >= self.max_failures and remaining > 0:
                 raise LoginRateLimitError(max(1, int(remaining + 0.999)))
 
     def record_failure(self, key: str) -> None:
         with self._lock:
-            failures, _ = self._failures.get(key, (0, 0.0))
-            self._failures[key] = (failures + 1, time.monotonic())
+            failures, _ = self._failures.get(key, (0, 0.0)) or (0, 0.0)
+            failures += 1
+            now = time.time()
+            self._failures[key] = (failures, now)
+            self._persist(key, failures, now)
 
     def record_success(self, key: str) -> None:
         with self._lock:
             self._failures.pop(key, None)
+            if self._kv is not None:
+                self._kv.delete(key)
 
 
 _default_limiter: LoginRateLimiter | None = None
@@ -63,5 +92,6 @@ def default_login_limiter() -> LoginRateLimiter:
                     max_failures=settings.AUTH_LOGIN_MAX_FAILURES,
                     base_seconds=settings.AUTH_LOGIN_BASE_SECONDS,
                     max_seconds=settings.AUTH_LOGIN_MAX_SECONDS,
+                    db_path=settings.STATE_STORE_DB,
                 )
     return _default_limiter

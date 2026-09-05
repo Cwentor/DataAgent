@@ -247,3 +247,39 @@ def test_unsafe_sql_allows_normal_statements(big_conn):
         elif 'AS "read_csv"' in sql:
             assert cols == ["read_csv"]
         assert len(result.rows) == 1
+
+
+# --------------------------------------------------------------------------- #
+# EXPLAIN 预检缓存（整改指令3-3）：同一 SQL 自愈重试不重复预检
+# --------------------------------------------------------------------------- #
+def test_scan_cache_key_normalizes_whitespace():
+    """SQL 规范化哈希：空白折叠 + 小写，等价 SQL 命中同一缓存键。"""
+    from exec.guards import _scan_cache_key
+
+    sql_a = "SELECT grp, sum(id) AS s FROM big GROUP BY grp"
+    sql_b = "  select   grp, SUM(id) as s\nfrom big group by grp  "
+    assert _scan_cache_key(sql_a) == _scan_cache_key(sql_b)
+    assert _scan_cache_key("SELECT 1") != _scan_cache_key("SELECT 2")
+
+
+def test_execute_sql_reuses_scan_cache(big_conn, monkeypatch):
+    """命中缓存后不再重复 EXPLAIN ANALYZE（预检降本），scan_rows 仍正确回填。"""
+    from exec.guards import _run_with_timeout, cache_scan_rows, cached_scan_rows
+
+    sql = "SELECT grp, sum(id) AS s FROM big GROUP BY grp"
+    # 预填缓存（等价于首次预检的结果）
+    cache_scan_rows(sql, 200000)
+    assert cached_scan_rows(sql) == 200000
+
+    # 若再次出现 EXPLAIN ANALYZE 预检（缓存未命中）则视为回归缺陷；真实执行不受影响
+    real_run = _run_with_timeout
+
+    def guarded_run(conn, s, timeout):
+        if s.startswith("EXPLAIN ANALYZE"):
+            raise AssertionError("预检缓存未命中，重复执行了 EXPLAIN ANALYZE")
+        return real_run(conn, s, timeout)
+
+    monkeypatch.setattr("exec.guards._run_with_timeout", guarded_run)
+    result = execute_sql(big_conn, sql, max_scan_rows=500000)
+    assert result.scan_rows == 200000  # 缓存值回填
+    assert len(result.rows) == 7

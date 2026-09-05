@@ -18,6 +18,8 @@ def default_compare_window(
         amount, unit = 12, "month"
     elif comparison == Comparison.MOM:
         amount, unit = 6, "month"
+    elif granularity == Granularity.QUARTER:
+        amount, unit = 4, "quarter"
     elif granularity == Granularity.MONTH:
         amount, unit = 6, "month"
     elif granularity == Granularity.WEEK:

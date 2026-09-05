@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
@@ -296,6 +297,47 @@ def parse_scan_rows(plan_text: str) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 扫描行预算缓存（整改指令3-3：同一 SQL 自愈重试不重复 EXPLAIN 预检降本）
+# --------------------------------------------------------------------------- #
+_SCAN_CACHE: dict[str, int] = {}
+_SCAN_CACHE_LOCK = threading.Lock()
+_SCAN_CACHE_MAX = 512
+
+
+def _scan_cache_key(sql: str) -> str:
+    """SQL 规范化哈希（空白折叠后 sha256），同一编译产物只预检一次。"""
+    normalized = " ".join(sql.strip().lower().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def cached_scan_rows(sql: str, cache: dict[str, int] | None = None) -> int | None:
+    """读取 SQL 的已缓存扫描行数；未命中返回 None。"""
+    store = cache if cache is not None else _SCAN_CACHE
+    key = _scan_cache_key(sql)
+    lock = None if cache is not None else _SCAN_CACHE_LOCK
+    if lock is not None:
+        with lock:
+            return store.get(key)
+    return store.get(key)
+
+
+def cache_scan_rows(sql: str, scan_rows: int, cache: dict[str, int] | None = None) -> None:
+    """写入 SQL 的扫描行数缓存（容量上限 _SCAN_CACHE_MAX，超限清空防膨胀）。"""
+    store = cache if cache is not None else _SCAN_CACHE
+    key = _scan_cache_key(sql)
+    lock = None if cache is not None else _SCAN_CACHE_LOCK
+    if lock is not None:
+        with lock:
+            store[key] = scan_rows
+            if len(store) > _SCAN_CACHE_MAX:
+                store.clear()
+        return
+    store[key] = scan_rows
+    if len(store) > _SCAN_CACHE_MAX:
+        store.clear()
+
+
+# --------------------------------------------------------------------------- #
 # 超时看门狗
 # --------------------------------------------------------------------------- #
 
@@ -368,21 +410,25 @@ def execute_sql(
     scan_rows = 0
 
     # 1) 扫描行预算预检（EXPLAIN ANALYZE 在超时看门狗内运行）
+    #    整改指令3-3：同一 SQL（自愈重试同编译产物）命中缓存则跳过重复预检降本
     if max_scan_rows is not None:
-        plan_sql = "EXPLAIN ANALYZE " + sql
-        try:
-            _, plan_rows = _run_with_timeout(conn, plan_sql, statement_timeout_ms)
-        except QueryTimeoutError:
-            raise
-        except duckdb.Error as exc:
-            # 预检阶段暴露的引擎错误同样视为执行失败（可自愈）
-            raise SqlExecutionError(f"{type(exc).__name__}: {exc}") from exc
-        plan_text = (
-            str(plan_rows[0][1])
-            if plan_rows and len(plan_rows[0]) > 1
-            else (str(plan_rows[0][0]) if plan_rows else "")
-        )
-        scanned = parse_scan_rows(plan_text)
+        scanned = cached_scan_rows(sql)
+        if scanned is None:
+            plan_sql = "EXPLAIN ANALYZE " + sql
+            try:
+                _, plan_rows = _run_with_timeout(conn, plan_sql, statement_timeout_ms)
+            except QueryTimeoutError:
+                raise
+            except duckdb.Error as exc:
+                # 预检阶段暴露的引擎错误同样视为执行失败（可自愈）
+                raise SqlExecutionError(f"{type(exc).__name__}: {exc}") from exc
+            plan_text = (
+                str(plan_rows[0][1])
+                if plan_rows and len(plan_rows[0]) > 1
+                else (str(plan_rows[0][0]) if plan_rows else "")
+            )
+            scanned = parse_scan_rows(plan_text)
+            cache_scan_rows(sql, scanned)
         scan_rows = scanned
         if scanned > max_scan_rows:
             raise MaxRowsScannedExceeded(

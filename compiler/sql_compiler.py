@@ -26,6 +26,7 @@ from config import settings
 from semantic import catalog
 from semantic.catalog import JoinRule
 from semantic.dsl_schema import (
+    TIME_FIELDS,
     AggFunc,
     AggregateMetric,
     Comparison,
@@ -52,8 +53,10 @@ class CompileError(ValueError):
     """DSL 合法但无法编译为 SQL（例如引用了未登记字段）。"""
 
 
-# 时间维度逻辑字段（窗口函数 / 补零排序所依赖）
-TIME_FIELDS = frozenset({"order_time", "refund_time", "register_time"})
+# 时间窗口锚定的时间列（由 TimeFilter.time_field 解析，白名单在 dsl_schema.TIME_FIELDS）
+def _time_field_qualify(tf: TimeFilter) -> str:
+    """把 time_filter.time_field 解析为限定 SQL 列（如 f.order_time / r.refund_time）。"""
+    return _qualify(tf.time_field)
 
 
 def _quote_ident(name: str) -> str:
@@ -85,19 +88,31 @@ def _sub_years(d: date, n: int) -> date:
     return date(y, d.month, min(d.day, last_day))
 
 
+def _quarter_start(d: date) -> date:
+    """给定日期所在季度的第一天。"""
+    q = (d.month - 1) // 3  # 0, 1, 2, 3
+    return date(d.year, q * 3 + 1, 1)
+
+
 def _shift_window(
-    start: datetime, end: datetime, comparison: Comparison
+    start: datetime,
+    end: datetime,
+    comparison: Comparison,
+    granularity: Granularity = Granularity.DAY,
 ) -> tuple[datetime, datetime]:
     """将当前窗口整体平移一个对比周期，得到基准窗口。
 
-    - MOM：窗口整体前移一个月；
+    - MOM：窗口整体前移一个月（granularity=quarter 时前移一个季度）；
     - YOY：窗口整体前移一年。
     平移后仍为半开区间 [new_start, new_end)。
     """
+    shift_months = 1
+    if comparison == Comparison.MOM and granularity == Granularity.QUARTER:
+        shift_months = 3
     if comparison == Comparison.MOM:
         return (
-            datetime.combine(_sub_months(start.date(), 1), start.time()),
-            datetime.combine(_sub_months(end.date(), 1), end.time()),
+            datetime.combine(_sub_months(start.date(), shift_months), start.time()),
+            datetime.combine(_sub_months(end.date(), shift_months), end.time()),
         )
     if comparison == Comparison.YOY:
         return (
@@ -118,6 +133,18 @@ def _resolve_window(tf: TimeFilter) -> tuple[datetime, datetime]:
     ref_date: date = tf.reference_date or settings.AS_OF_DATE
     ref = datetime.combine(ref_date, dtime.min)
 
+    # to_date 模式（MTD/QTD/YTD）：窗口为 [周期起点, reference_date)
+    if rel.mode == RelativeMode.TO_DATE:
+        if rel.unit == RelativeUnit.MONTH:
+            start = ref_date.replace(day=1)
+        elif rel.unit == RelativeUnit.QUARTER:
+            start = _quarter_start(ref_date)
+        elif rel.unit == RelativeUnit.YEAR:
+            start = date(ref_date.year, 1, 1)
+        else:
+            raise CompileError(f"to_date 模式不支持 unit={rel.unit!r}")
+        return datetime.combine(start, dtime.min), ref
+
     if rel.mode == RelativeMode.CALENDAR:
         if rel.unit == RelativeUnit.MONTH:
             start_month = _sub_months(ref_date.replace(day=1), rel.amount)
@@ -126,11 +153,17 @@ def _resolve_window(tf: TimeFilter) -> tuple[datetime, datetime]:
                 datetime.combine(start_month, dtime.min),
                 datetime.combine(end_month, dtime.min),
             )
+        if rel.unit == RelativeUnit.QUARTER:
+            # calendar quarter：过去 N 个完整季度（不含当前季度的部分）
+            cur_q_start = _quarter_start(ref_date)
+            start = _sub_months(cur_q_start, rel.amount * 3)
+            end = _sub_months(cur_q_start, (rel.amount - 1) * 3)
+            return datetime.combine(start, dtime.min), datetime.combine(end, dtime.min)
         if rel.unit == RelativeUnit.YEAR:
             start = date(ref_date.year - rel.amount, 1, 1)
             end = date(ref_date.year - rel.amount + 1, 1, 1)
             return datetime.combine(start, dtime.min), datetime.combine(end, dtime.min)
-        raise CompileError("calendar 模式目前仅支持 unit=month/year")
+        raise CompileError(f"calendar 模式不支持 unit={rel.unit!r}")
 
     # trailing 模式
     if rel.unit == RelativeUnit.DAY:
@@ -139,6 +172,8 @@ def _resolve_window(tf: TimeFilter) -> tuple[datetime, datetime]:
         start = ref - timedelta(days=rel.amount * 7)
     elif rel.unit == RelativeUnit.MONTH:
         start = datetime.combine(_sub_months(ref_date, rel.amount), dtime.min)
+    elif rel.unit == RelativeUnit.QUARTER:
+        start = datetime.combine(_sub_months(ref_date, rel.amount * 3), dtime.min)
     elif rel.unit == RelativeUnit.YEAR:
         start = datetime.combine(
             date(ref_date.year - rel.amount, ref_date.month, ref_date.day), dtime.min
@@ -226,7 +261,7 @@ def _filter_sql(f: Filter) -> str:
 
 def _time_window_sql(tf: TimeFilter) -> str:
     start, end = _resolve_window(tf)
-    col = "f.order_time"
+    col = _time_field_qualify(tf)
     s = start.strftime("%Y-%m-%d %H:%M:%S")
     e = end.strftime("%Y-%m-%d %H:%M:%S")
     return f"{col} >= TIMESTAMP '{s}' AND {col} < TIMESTAMP '{e}'"
@@ -267,7 +302,8 @@ def _metric_expr(m: Metric) -> tuple[str, str]:
     if isinstance(m, RatioMetric):
         num = _aggregate_expr(m.numerator)
         den = _aggregate_expr(m.denominator)
-        return f"({num}) / ({den})", m.alias
+        # 除零防护：分母为 0 时产出 NULL 而非 inf/NaN，与 comparison 列的 NULLIF 口径对齐
+        return f"({num}) / NULLIF({den}, 0)", m.alias
     return _aggregate_expr(m), m.alias
 
 
@@ -291,7 +327,7 @@ def _dimension_expr(d: Dimension, granularity: Granularity) -> tuple[str, str]:
         raise CompileError(f"未登记的维度字段: {d.field!r}")
     alias = d.alias or d.field
     qual = f"{catalog.ALIASES[meta.table]}.{meta.column}"
-    if d.field == "order_time":
+    if d.field in TIME_FIELDS:
         expr = f"date_trunc('{granularity.value}', {qual})"
     else:
         expr = qual
@@ -368,56 +404,92 @@ def _compile_with_comparison(dsl: QueryDSL) -> str:
 
     支持非时间维度（品类/品牌/省份等）：cur/prev 两个 CTE 各自按维度分组，
     外层以维度列 LEFT JOIN 配对，输出 维度列 + 当前值 + 基准值 + 增长率。
-    时间维度（order_time 等）与对比的组合需要"按位配对"（如 6月1日 对 5月1日），
-    该语义未定义，显式抛 CompileError 而非静默丢弃维度（正确性缺陷修复）。
+
+    支持时间维度（order_time/refund_time/register_time）的**按位配对**：
+    prev CTE 的时间列经 date_add(时间列, 间隔) 对齐到当前窗口（MOM +1 month、
+    YOY +1 year），外层以对齐后的时间列 JOIN —— 使"6月每日 GMV 同比"这类
+    最常见问法可编译，而非抛 CompileError（历史缺陷修复）。
     """
     tf = dsl.time_filter
     assert tf is not None and tf.comparison != Comparison.NONE
     granularity = tf.granularity
-
-    if any(d.field in TIME_FIELDS for d in dsl.dimensions):
-        raise CompileError(
-            "comparison 暂不支持时间维度（order_time/refund_time/register_time）："
-            "时间维度需要按位配对（当前日期 vs 基准周期对应日期），"
-            "请改用品类/品牌/省份等分组维度"
-        )
+    time_col = _time_field_qualify(tf)
 
     cur_start, cur_end = _resolve_window(tf)
-    prev_start, prev_end = _shift_window(cur_start, cur_end, tf.comparison)
+    prev_start, prev_end = _shift_window(cur_start, cur_end, tf.comparison, granularity)
     cmp_suffix = "_mom" if tf.comparison == Comparison.MOM else "_yoy"
+
+    # 时间维度（至多一个）与普通维度分离
+    time_dim: Dimension | None = None
+    plain_dims: list[Dimension] = []
+    for d in dsl.dimensions:
+        if d.field in TIME_FIELDS:
+            time_dim = d
+        else:
+            plain_dims.append(d)
+    if any(d.field in TIME_FIELDS for d in dsl.dimensions) and time_dim is None:
+        time_dim = next(d for d in dsl.dimensions if d.field in TIME_FIELDS)
+
+    # 对齐间隔：prev 时间列平移到当前窗口所需步长
+    if tf.comparison == Comparison.MOM:
+        align_interval = (
+            "INTERVAL 3 MONTH" if granularity == Granularity.QUARTER else "INTERVAL 1 MONTH"
+        )
+    else:
+        align_interval = "INTERVAL 1 YEAR"
+
+    time_alias: str | None = time_dim.alias or time_dim.field if time_dim else None
+    if time_dim is not None:
+        trunc_expr = _dimension_expr(time_dim, granularity)[0]  # date_trunc(g, col)
+        time_expr_cur = trunc_expr
+        time_expr_prev = f"date_add({trunc_expr}, {align_interval})"
 
     # 维度表达式与别名（cur/prev 两 CTE 共用，保证可配对）
     dim_exprs: list[str] = []
     dim_aliases: list[str] = []
-    for d in dsl.dimensions:
+    for d in plain_dims:
         expr, alias = _dimension_expr(d, granularity)
         dim_exprs.append(expr)
         dim_aliases.append(alias)
 
-    def _window_block(label: str, start: datetime, end: datetime) -> str:
+    def _window_block(
+        label: str,
+        start: datetime,
+        end: datetime,
+        time_expr: str | None = None,
+    ) -> str:
         select_items: list[str] = []
         for expr, alias in zip(dim_exprs, dim_aliases, strict=False):
             select_items.append(f"{expr} AS {_quote_ident(alias)}")
+        if time_expr is not None:
+            select_items.append(f"{time_expr} AS {_quote_ident(time_alias)}")
         for m in dsl.metrics:
-            select_items.append(f"{_metric_expr(m)[0]} AS {_quote_ident(_metric_expr(m)[1])}")
+            expr, alias = _metric_expr(m)
+            select_items.append(f"{expr} AS {_quote_ident(alias)}")
         where = [_filter_sql(f) for f in dsl.filters]
         s = start.strftime("%Y-%m-%d %H:%M:%S")
         e = end.strftime("%Y-%m-%d %H:%M:%S")
-        where.append(f"f.order_time >= TIMESTAMP '{s}' AND f.order_time < TIMESTAMP '{e}'")
+        where.append(f"{time_col} >= TIMESTAMP '{s}' AND {time_col} < TIMESTAMP '{e}'")
         block = (
             f"{label} AS (\n"
             f"  SELECT {', '.join(select_items)}\n"
             f"  {_from_clause(dsl)}\n"
             "  WHERE " + " AND ".join(where) + "\n"
         )
-        if dim_exprs:
-            block += "  GROUP BY " + ", ".join(dim_exprs) + "\n"
+        group_exprs = list(dim_exprs)
+        if time_expr is not None:
+            group_exprs.append(time_expr)
+        if group_exprs:
+            block += "  GROUP BY " + ", ".join(group_exprs) + "\n"
         block += ")"
         return block
 
     selects: list[str] = []
     for alias in dim_aliases:
         q = _quote_ident(alias)
+        selects.append(f"cur.{q} AS {q}")
+    if time_alias is not None:
+        q = _quote_ident(time_alias)
         selects.append(f"cur.{q} AS {q}")
     for m in dsl.metrics:
         alias = m.alias
@@ -428,20 +500,23 @@ def _compile_with_comparison(dsl: QueryDSL) -> str:
         selects.append(f"prev.{q} AS {q_prev}")
         selects.append(f"(cur.{q} - prev.{q}) / NULLIF(prev.{q}, 0) AS {q_cmp}")
 
-    sql = "WITH " + _window_block("cur", cur_start, cur_end)
-    sql += ",\n" + _window_block("prev", prev_start, prev_end)
+    sql = "WITH " + _window_block("cur", cur_start, cur_end, time_expr_cur if time_dim else None)
+    sql += ",\n" + _window_block("prev", prev_start, prev_end, time_expr_prev if time_dim else None)
     sql += "\nSELECT " + ", ".join(selects)
-    if dim_aliases:
+    join_keys = list(dim_aliases) + ([time_alias] if time_alias is not None else [])
+    if join_keys:
         sql += (
             "\nFROM cur LEFT JOIN prev USING ("
-            + ", ".join(_quote_ident(a) for a in dim_aliases)
+            + ", ".join(_quote_ident(a) for a in join_keys)
             + ")"
         )
     else:
         sql += "\nFROM cur, prev"
 
-    # 排序字段：允许引用维度列 / 当前值 / 基准值 / 增长率列
+    # 排序字段：允许引用维度列 / 时间列 / 当前值 / 基准值 / 增长率列
     allowed = set(dim_aliases)
+    if time_alias is not None:
+        allowed.add(time_alias)
     for m in dsl.metrics:
         allowed.add(m.alias)
         allowed.add(m.alias + "_prev")
@@ -570,11 +645,19 @@ def _compile_with_fill_gaps(dsl: QueryDSL) -> str:
     if granularity == Granularity.DAY:
         step = "INTERVAL 1 DAY"
         end_incl = end - timedelta(days=1)
+    elif granularity == Granularity.WEEK:
+        step = "INTERVAL 1 WEEK"
+        end_incl = end - timedelta(days=7)
     elif granularity == Granularity.MONTH:
         step = "INTERVAL 1 MONTH"
         end_incl = datetime.combine(_sub_months(end.date(), 1), end.time())
+    elif granularity == Granularity.QUARTER:
+        step = "INTERVAL 3 MONTH"
+        end_incl = datetime.combine(_sub_months(end.date(), 3), end.time())
     else:
-        raise CompileError(f"fill_gaps 暂不支持 granularity={granularity.value}（仅 day/month）")
+        raise CompileError(
+            f"fill_gaps 暂不支持 granularity={granularity.value}（仅 day/week/month/quarter）"
+        )
 
     # 内层聚合：时间维度 + 指标（聚合/比率均可）
     inner_selects: list[str] = [f"{time_expr} AS {_quote_ident(time_alias)}"]

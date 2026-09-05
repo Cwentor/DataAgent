@@ -35,6 +35,7 @@ from agent.errors import PipelineError
 from agent.glossary import METRIC_TERMS
 from agent.heuristic import CATEGORIES, PROVINCES, REGIONS, DeterministicNL2DSL
 from config import settings
+from persistence.kvstore import SqliteKVStore
 from security.policy import POLICIES, PRINCIPAL_ATTRS
 from semantic.dsl_schema import Dimension, Filter, FilterOperator, QueryDSL, TimeFilter
 
@@ -119,6 +120,7 @@ class SessionStore:
         ttl_seconds: int | None = None,
         max_sessions: int | None = None,
         history_turns: int | None = None,
+        db_path: str | None = None,
     ) -> None:
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.SESSION_MEMORY_TTL
         self._max = (
@@ -129,19 +131,60 @@ class SessionStore:
         )
         self._items: OrderedDict[str, SessionState] = OrderedDict()  # 最近访问在队尾（LRU）
         self._lock = threading.Lock()
+        # 持久化层（整改指令3-2）：配置 db_path 时落盘 SQLite，多 worker/重启一致
+        self._kv: SqliteKVStore | None = None
+        if db_path:
+            self._kv = SqliteKVStore(db_path, table="sessions")
+
+    # ------------------------------------------------------------------ #
+    # 持久化扩展点（整改指令3-2）：子类可覆写接入 Redis 等外部后端
+    # ------------------------------------------------------------------ #
+    def _persist(self, state: SessionState) -> None:
+        """把会话状态写入持久层（默认实现：SQLite；子类可覆写为 Redis 等）。"""
+        if self._kv is not None:
+            self._kv.set(state.session_id, state.model_dump(mode="json"))
+
+    def _load(self, session_id: str) -> SessionState | None:
+        """从持久层读取会话状态；未命中返回 None。"""
+        if self._kv is None:
+            return None
+        raw = self._kv.get(session_id, ttl_seconds=self._ttl)
+        if raw is None:
+            return None
+        return SessionState.model_validate(raw)
+
+    def _delete_persisted(self, session_id: str) -> None:
+        """从持久层删除会话状态（TTL 失效 / 主动清除 / LRU 淘汰时调用）。"""
+        if self._kv is not None:
+            self._kv.delete(session_id)
 
     # ------------------------------------------------------------------ #
     def get(self, session_id: str, user_id: str | None) -> SessionState | None:
-        """按 (session_id, user_id) 读取会话状态；跨用户 / 过期返回 None。"""
+        """按 (session_id, user_id) 读取会话状态；跨用户 / 过期返回 None。
+
+        内存未命中时尝试从持久层加载（重启后首次访问可恢复会话）。
+        """
         owner = user_id or _ANONYMOUS
         with self._lock:
             state = self._items.get(session_id)
             if state is None:
+                state = self._load(session_id)
+                if state is not None:
+                    # 跨用户强隔离同样作用于持久层恢复的会话
+                    if state.user_id != owner:
+                        return None
+                    if time.time() - state.updated_at.timestamp() > self._ttl:
+                        self._delete_persisted(session_id)
+                        return None
+                    self._items[session_id] = state
+                    self._items.move_to_end(session_id)
+                    return state
                 return None
             if state.user_id != owner:
                 return None  # 跨用户强隔离：拒绝继承，不删除原用户状态
             if time.time() - state.updated_at.timestamp() > self._ttl:
                 self._items.pop(session_id, None)
+                self._delete_persisted(session_id)
                 return None
             self._items.move_to_end(session_id)
             return state
@@ -159,7 +202,9 @@ class SessionStore:
             self._items[session_id] = state
             self._items.move_to_end(session_id)
             while len(self._items) > self._max:
-                self._items.pop(next(iter(self._items)))  # 最久未访问（队首）
+                evicted = self._items.pop(next(iter(self._items)))  # 最久未访问（队首）
+                self._delete_persisted(evicted.session_id)
+        self._persist(state)  # 持久化扩展点（写入 SQLite / Redis）
         return state
 
     def clear(self, session_id: str, user_id: str | None) -> bool:
@@ -170,6 +215,7 @@ class SessionStore:
             if state is None or state.user_id != owner:
                 return False
             self._items.pop(session_id, None)
+            self._delete_persisted(session_id)
             return True
 
     def prune(self) -> int:
@@ -181,6 +227,7 @@ class SessionStore:
             ]
             for sid in expired:
                 self._items.pop(sid, None)
+                self._delete_persisted(sid)
             return len(expired)
 
     def clear_all(self) -> int:
@@ -200,12 +247,16 @@ _store_lock = threading.Lock()
 
 
 def default_session_store() -> SessionStore:
-    """进程内复用的默认会话记忆存储。"""
+    """进程内复用的默认会话记忆存储。
+
+    配置 ``STATE_STORE_DB`` 时自动接入 SQLite 持久化（多 worker/重启一致）；
+    未配置时保持纯内存实现（本地开发/演示）。
+    """
     global _default_store
     if _default_store is None:
         with _store_lock:
             if _default_store is None:
-                _default_store = SessionStore()
+                _default_store = SessionStore(db_path=settings.STATE_STORE_DB)
     return _default_store
 
 
@@ -282,12 +333,59 @@ def _has_metric_term(query: str) -> bool:
 
 
 def _expand_dimension(query: str) -> str | None:
-    """下钻语句中要追加的维度字段（如「按品类展开」-> category）。"""
-    if any(k in query for k in _ADD_DIM_KEYWORDS):
-        if "品类" in query or "类别" in query:
-            return "category"
-        if "品牌" in query:
-            return "brand"
+    """下钻语句中要追加的维度字段（如「按品类展开」-> category）。
+
+    维度候选集从语义目录 + present.labels 的中文标签派生（与 field_label 同源），
+    使"按省份/按品牌/按支付状态/按性别/按类目"等维度均可被识别为下钻目标；
+    候选字段全部受语义目录 COLUMNS 白名单约束，绝不引入未登记字段。
+    """
+    if not any(k in query for k in _ADD_DIM_KEYWORDS):
+        return None
+
+    # (中文关键词 -> 逻辑字段) 维度映射：以 labels 中文标签为底，补充常用问法同义词
+    try:
+        from present.labels import FIELD_LABELS
+        from semantic import catalog
+    except ImportError:  # pragma: no cover - 依赖缺失时走硬编码回退
+        return _expand_dimension_fallback(query)
+
+    dim_keywords: dict[str, str] = {}
+    for col in catalog.COLUMNS:
+        label = FIELD_LABELS.get(col, col)
+        # 只登记"看起来像维度"的字段：非主事实表聚合数值列（用 dtype 粗筛）
+        meta = catalog.COLUMNS[col]
+        if meta.table == "fact_orders" and col in ("order_id", "product_id", "user_id"):
+            continue  # 明细键/事实键不做下钻维度
+        if meta.dtype in ("int", "float") and col != "order_id":
+            continue  # 数值列不做维度
+        dim_keywords[label] = col
+        # 为中文标签补充"按X展开"最常用问法同义词（与启发式解析器同源）
+        for alias_word in _DIMENSION_SYNONYMS.get(col, ()):
+            dim_keywords[alias_word] = col
+
+    for keyword, target_field in dim_keywords.items():
+        if keyword in query:
+            return target_field
+    return _expand_dimension_fallback(query)
+
+
+# 维度字段 -> 常用中文问法同义词（与 heuristic._dimensions 的问法对齐）
+_DIMENSION_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "category": ("品类", "类别", "类目"),
+    "brand": ("品牌",),
+    "province": ("省份", "省", "地区"),
+    "pay_status": ("支付状态", "支付方式"),
+    "gender": ("性别",),
+    "refund_status": ("退款状态",),
+}
+
+
+def _expand_dimension_fallback(query: str) -> str | None:
+    """硬编码回退（依赖缺失 / 未命中映射时保持向后兼容）。"""
+    if "品类" in query or "类别" in query:
+        return "category"
+    if "品牌" in query:
+        return "brand"
     return None
 
 
@@ -369,7 +467,14 @@ def _compose_summary(deltas: _Deltas, *, expand: str | None = None, trend: bool 
     if deltas.time_filter is not None:
         parts.append("按你的要求调整了时间范围")
     if expand is not None:
-        parts.append("追加商品品类维度" if expand == "category" else "追加品牌维度")
+        # 维度中文标签与 present.labels 同源（"按省份展开" 显示为 追加省份维度）
+        try:
+            from present.labels import FIELD_LABELS
+
+            label = FIELD_LABELS.get(expand, expand)
+        except ImportError:
+            label = expand
+        parts.append(f"追加{label}维度")
     if trend:
         parts.append("按趋势展开分析")
     return "，".join(parts) + "。"
@@ -405,7 +510,8 @@ def resolve_context(
 
     expand = _expand_dimension(query)
     if expand is not None:
-        dims = list(merged.dimensions)
+        # 归一化维度对象（兼容 dict 输入，防御 model_copy 不做 revalidate）
+        dims = [Dimension.model_validate(d) for d in merged.dimensions]
         if not any(d.field == expand for d in dims):
             dims.append(Dimension(field=expand))
         merged = merged.model_copy(update={"dimensions": dims})

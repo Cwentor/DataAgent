@@ -27,7 +27,7 @@ from typing import Any
 from agent.agent import extract_json
 from agent.clarify import Clarification, detect_clarifications
 from agent.errors import PipelineError
-from agent.intent import Intent, classify_intent
+from agent.intent import Intent
 from agent.llm import OpenAICompatClient
 from audit.logging import get_logger
 from config import settings
@@ -177,7 +177,15 @@ class Planner(ABC):
     """规划器抽象：决定本轮调度调用哪些工具（或直接回答/反问）。"""
 
     @abstractmethod
-    def plan(self, query: str, principal: str | None, registry: ToolRegistry) -> PlanResult: ...
+    def plan(
+        self,
+        query: str,
+        principal: str | None,
+        registry: ToolRegistry,
+        *,
+        history: Any = None,
+        last_dsl: Any = None,
+    ) -> PlanResult: ...
 
     def correct(
         self,
@@ -191,19 +199,47 @@ class Planner(ABC):
 
 
 class DeterministicPlanner(Planner):
-    """确定性规划：意图路由（RAG/闲聊/澄清）+ 关键词（趋势/导出）-> 工具。"""
+    """确定性规划：消费统一五分类意图判决（IntentRouter）+ 关键词（趋势/导出）-> 工具。
 
-    def plan(self, query: str, principal: str | None, registry: ToolRegistry) -> PlanResult:
-        intent = classify_intent(query)
-        if intent == Intent.CHITCHAT:
+    双路由合并（历史缺陷修复）：不再使用旧的独立三分类 classify_intent，
+    而是复用 agent.router.intent_router 的五分类判决中心（Fast-Path -> LLM -> 规则
+    兜底），保证 Agent 内部分派与 web.service 的分流决策完全一致，杜绝"两层路由
+    结论打架"导致的意图漂移。
+    """
+
+    def plan(
+        self,
+        query: str,
+        principal: str | None,
+        registry: ToolRegistry,
+        *,
+        history: Any = None,
+        last_dsl: Any = None,
+    ) -> PlanResult:
+        from agent.router import IntentType, route_decision
+
+        # 与 web.service 分流共用同一五分类判决中心：携带会话状态（history/last_dsl），
+        # 使"那华南呢"这类上下文追问被正确判为 DATA_QUERY（而非孤立输入误判 CLARIFY）
+        decision = route_decision(query, history=history, last_dsl=last_dsl, principal=principal)
+        intent = decision.intent
+
+        if intent == IntentType.CHITCHAT:
             return PlanResult(answer=CHITCHAT_REPLY)
-        if intent == Intent.RAG:
+        if intent == IntentType.SYSTEM_ACTION:
+            # 系统控制动作由 web.service 白名单执行；Agent 层不触达数仓引擎
+            return PlanResult(answer="系统操作已由上层安全处理，无需查询数据。")
+        if intent == IntentType.GLOSSARY_EXPLAIN:
             return PlanResult(calls=[ToolCall("explain_glossary", {"query": query})])
+        if intent == IntentType.CLARIFY:
+            # 澄清反问：优先使用路由判决预提取的澄清问题（缺失时间 / 未定义指标 / 信息不足）
+            clarifications = decision.extracted_entities.get("clarifications") or []
+            if not clarifications:
+                clarifications = [c.to_dict() for c in detect_clarifications(query)]
+            return PlanResult(
+                clarifications=[Clarification(**c) for c in clarifications if isinstance(c, dict)]
+            )
 
-        clarifications = detect_clarifications(query)
-        if clarifications:
-            return PlanResult(clarifications=clarifications)
-
+        # DATA_QUERY：关键词分派（趋势 / 导出 / 即时点查）
         ql = query.lower()
         if any(k in ql for k in _EXPORT_KEYWORDS):
             # 组合调用：先查询（复用 query_metric），再把结果交给导出工具
@@ -230,11 +266,25 @@ class LLMPlanner(Planner):
     任何非法工具名 / 非法参数都会被校验拦截并反馈 LLM 重试（max_retries 次）。
     """
 
-    def __init__(self, client: OpenAICompatClient, max_retries: int = 2):
+    def __init__(
+        self,
+        client: OpenAICompatClient,
+        registry: ToolRegistry | None = None,
+        max_retries: int = 2,
+    ):
         self.client = client
+        self.registry = registry  # 构造注入：correct() 自愈路径依赖工具注册表校验
         self.max_retries = max_retries
 
-    def plan(self, query: str, principal: str | None, registry: ToolRegistry) -> PlanResult:
+    def plan(
+        self,
+        query: str,
+        principal: str | None,
+        registry: ToolRegistry,
+        *,
+        history: Any = None,
+        last_dsl: Any = None,
+    ) -> PlanResult:
         tools_json = json.dumps(registry.tool_definitions(), ensure_ascii=False)
         messages = [
             {
@@ -293,7 +343,21 @@ class LLMPlanner(Planner):
         failed: ToolCall,
         record: ToolInvocationRecord,
     ) -> ToolCall | None:
-        """自愈修复：把工具失败原因喂回 LLM，重新规划一次。"""
+        """自愈修复：把工具失败原因喂回 LLM，重新规划一次。
+
+        依赖构造注入的 ``registry`` 校验修正后的工具调用（get_tool + validate_args），
+        未注入注册表时无法自愈，安全返回 None（绝不静默吞掉内部错误）。
+        """
+        if self.registry is None:
+            logger.warning(
+                "llm_correct_skipped",
+                extra={
+                    "event": "llm_correct_skipped",
+                    "reason": "missing_registry",
+                    "tool": failed.tool,
+                },
+            )
+            return None
         messages = [
             {
                 "role": "system",
@@ -318,7 +382,16 @@ class LLMPlanner(Planner):
             tool = self.registry.get_tool(name)
             tool.validate_args(args)
             return ToolCall(name, dict(args), reason="LLM 自愈修复")
-        except Exception:
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            # 收窄异常范围：仅捕获可预期的解析/校验错误，杜绝"静默吞 AttributeError"类死代码
+            logger.warning(
+                "llm_correct_failed",
+                extra={
+                    "event": "llm_correct_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "tool": failed.tool,
+                },
+            )
             return None
 
 
@@ -456,6 +529,8 @@ class ToolAgent:
         if not 3 <= max_steps <= 5:
             raise ValueError("max_steps 必须在 3~5 之间（受控调度，杜绝无限循环）")
         self.max_steps = max_steps
+        self._history: Any = None
+        self._last_dsl: Any = None
 
     # ------------------------------------------------------------------ #
     def run(
@@ -468,16 +543,28 @@ class ToolAgent:
         rewriter: Any = None,
         request_id: str | None = None,
         base_dsl: Any = None,
+        history: Any = None,
+        last_dsl: Any = None,
     ) -> AgentResult:
         """执行一次完整的多工具调度，返回复合结果 AgentResult（不抛异常）。
 
         base_dsl：会话上下文继承注入的结构化 DSL（agent.memory 合并产物），
         非 None 时数据工具以其为基础执行，仍走安全守卫 + 编译 + 执行护栏。
+        history / last_dsl：本轮会话状态透传给规划器（与 web.service 分流
+        共用同一意图判决中心，保证"上下文追问"不被误判为澄清）。
         """
         result = AgentResult(query=query)
+        self._history = history
+        self._last_dsl = last_dsl
 
         try:
-            plan = self.planner.plan(query, principal, self.registry)
+            plan = self.planner.plan(
+                query,
+                principal,
+                self.registry,
+                history=self._history,
+                last_dsl=self._last_dsl,
+            )
         except Exception as exc:
             result.error = f"{type(exc).__name__}: {exc}"
             result.error_type = type(exc).__name__
@@ -687,7 +774,7 @@ def default_tool_agent() -> ToolAgent:
                 temperature=settings.LLM_TEMPERATURE,
                 timeout=settings.LLM_TIMEOUT,
             )
-            planner = LLMPlanner(client, max_retries=settings.LLM_MAX_RETRIES)
+            planner = LLMPlanner(client, registry=registry, max_retries=settings.LLM_MAX_RETRIES)
             synthesizer = LLMSynthesizer(client)
         else:
             planner = DeterministicPlanner()

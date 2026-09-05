@@ -122,3 +122,10 @@ AUTH_SESSION_TTL: int = int(os.getenv("AUTH_SESSION_TTL", "86400"))
 # 会话共享存储（P0-4）：配置为 SQLite 路径时启用持久化（重启不丢、多 worker 可共享）；
 # 留空则使用进程内存储（本地开发/演示）。
 AUTH_SESSION_DB: str | None = os.getenv("AUTH_SESSION_DB") or None
+
+# --------------------------------------------------------------------------- #
+# 会话记忆 / 澄清槽位 / 登录限流 外置化存储（整改指令3-2）
+# --------------------------------------------------------------------------- #
+# 配置为 SQLite 文件路径时，SessionStore / ClarifySlotStore / LoginRateLimiter
+# 通过统一持久化后端落盘，使多 worker / 重启后状态一致；留空则进程内存储。
+STATE_STORE_DB: str | None = os.getenv("STATE_STORE_DB") or None

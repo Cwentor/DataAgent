@@ -65,7 +65,8 @@ def test_ratio_metric(conn):
         }
     )
     sql = compile_sql(dsl)
-    assert '(SUM(f.order_amount)) / (COUNT(DISTINCT f.user_id)) AS "arpu"' in sql
+    # 除零防护：分母统一包裹 NULLIF(..., 0)，分母为 0 时产出 NULL 而非 inf/NaN
+    assert '(SUM(f.order_amount)) / NULLIF(COUNT(DISTINCT f.user_id), 0) AS "arpu"' in sql
     assert conn.execute(sql).fetchone()[0] > 0
 
 
@@ -409,8 +410,8 @@ def test_comparison_with_dimension_groups_and_pairs(conn):
             assert yoy is None
 
 
-def test_comparison_rejects_time_dimension():
-    """时间维度 + 对比需要按位配对语义，显式报错而非静默丢弃。"""
+def test_comparison_with_time_dimension_aligned_pairing(conn):
+    """时间维度 + 环比：按位配对（prev 时间列 date_add 对齐后 JOIN），不再抛错。"""
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
@@ -423,7 +424,41 @@ def test_comparison_rejects_time_dimension():
                 "absolute": {"start": "2024-06-01", "end": "2024-07-01"},
                 "comparison": "mom",
             },
+            "order_by": [{"field": "order_time", "direction": "asc"}],
         }
     )
-    with pytest.raises(CompileError, match="时间维度"):
-        compile_sql(dsl)
+    sql = compile_sql(dsl)
+    # prev CTE 时间列经 date_add 平移到当前窗口（按位配对）
+    assert "date_add(date_trunc('day', f.order_time), INTERVAL 1 MONTH) AS \"order_time\"" in sql
+    assert 'LEFT JOIN prev USING ("order_time")' in sql
+    assert 'cur."order_time" AS "order_time"' in sql
+    assert 'ORDER BY "order_time" ASC' in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) > 0
+    for _t, cur, prev, mom in rows:
+        if prev:
+            assert abs(mom - (cur - prev) / prev) < 1e-6
+        else:
+            assert mom is None
+
+
+def test_comparison_yoy_time_dimension_pairing():
+    """时间维度 + 同比：prev 时间列 date_add +1 year 对齐（6月每日 GMV 同比场景）。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": [{"field": "order_time"}],
+            "time_filter": {
+                "granularity": "day",
+                "range_type": "absolute",
+                "absolute": {"start": "2024-06-01", "end": "2024-07-01"},
+                "comparison": "yoy",
+            },
+        }
+    )
+    sql = compile_sql(dsl)
+    assert "date_add(date_trunc('day', f.order_time), INTERVAL 1 YEAR) AS \"order_time\"" in sql
+    assert 'LEFT JOIN prev USING ("order_time")' in sql
+    assert 'AS "gmv_yoy"' in sql

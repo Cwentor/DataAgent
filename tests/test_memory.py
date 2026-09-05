@@ -64,6 +64,50 @@ def test_store_get_update_clear():
     assert store.get("s1", "alice") is None
 
 
+# --------------------------------------------------------------------------- #
+# SessionStore 持久化（整改指令3-2）：db_path 落盘 SQLite，跨实例一致
+# --------------------------------------------------------------------------- #
+def test_store_sqlite_persists_across_instances(tmp_path):
+    """新实例（模拟重启/多 worker）从同一 SQLite 恢复会话状态。"""
+    db = str(tmp_path / "sessions.db")
+    store1 = SessionStore(db_path=db)
+    state = SessionState(session_id="s-persist", user_id="alice")
+    state.last_dsl = _last_dsl()
+    append_message(state, "user", "上个月华东GMV")
+    append_message(state, "assistant", "已查询")
+    store1.update("s-persist", "alice", state)
+
+    # 新实例（内存为空）从持久层恢复，含 last_dsl 与历史
+    store2 = SessionStore(db_path=db)
+    restored = store2.get("s-persist", "alice")
+    assert restored is not None
+    assert restored.user_id == "alice"
+    assert restored.last_dsl is not None
+    assert [m.alias for m in restored.last_dsl.metrics] == ["gmv"]
+    assert [c.content for c in restored.history] == ["上个月华东GMV", "已查询"]
+
+
+def test_store_sqlite_cross_user_isolation_persisted(tmp_path):
+    """跨用户隔离同样作用于持久层恢复的会话。"""
+    db = str(tmp_path / "sessions2.db")
+    store1 = SessionStore(db_path=db)
+    store1.update("s-persist2", "alice", SessionState(session_id="s-persist2", user_id="alice"))
+
+    store2 = SessionStore(db_path=db)
+    assert store2.get("s-persist2", "bob") is None  # 跨用户拒绝继承
+    assert store2.get("s-persist2", "alice") is not None
+
+
+def test_store_sqlite_clear_removes_persisted(tmp_path):
+    db = str(tmp_path / "sessions3.db")
+    store1 = SessionStore(db_path=db)
+    store1.update("s-persist3", "alice", SessionState(session_id="s-persist3", user_id="alice"))
+    assert store1.clear("s-persist3", "alice") is True
+
+    store2 = SessionStore(db_path=db)
+    assert store2.get("s-persist3", "alice") is None
+
+
 def test_store_cross_user_isolation():
     """跨用户同一 session_id：get 返回 None（拒绝继承），不删除原用户状态。"""
     store = SessionStore()
@@ -181,6 +225,28 @@ def test_resolve_drilldown_dimension():
     """下钻语句：追加品类维度。"""
     res = resolve_context("按品类展开", _last_dsl(), None)
     assert res.mode == "drilldown" and res.reason == "drilldown_dim"
+    assert [d.field for d in res.dsl.dimensions] == ["category"]
+
+
+def test_resolve_drilldown_generic_dimensions():
+    """维度通用化（回归）：按省份 / 按支付状态 / 按性别 / 按品牌展开均被识别。"""
+    cases = {
+        "按省份展开": "province",
+        "按品牌展开": "brand",
+        "按支付状态展开": "pay_status",
+        "按性别展开": "gender",
+    }
+    for query, expected in cases.items():
+        res = resolve_context(query, _last_dsl(), None)
+        assert res.mode == "drilldown" and res.reason == "drilldown_dim", query
+        assert [d.field for d in res.dsl.dimensions] == [expected], query
+
+
+def test_resolve_drilldown_dimension_no_duplicate():
+    """同一维度已存在时不重复追加（维度置换：仅一次）。"""
+    base = _last_dsl().model_copy(update={"dimensions": [{"field": "category"}]})
+    res = resolve_context("再按品类展开", base, None)
+    assert res.mode == "drilldown"
     assert [d.field for d in res.dsl.dimensions] == ["category"]
 
 

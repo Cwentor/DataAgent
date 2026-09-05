@@ -24,6 +24,7 @@ from agent.clarify import (
     _has_time_expression,
 )
 from config import settings
+from persistence.kvstore import SqliteKVStore
 
 # 待填槽位 kind（与 agent.clarify.Clarification.kind 对齐）
 SLOT_MISSING_TIME = "missing_time_window"
@@ -44,36 +45,68 @@ class ClarifyContext:
 
 
 class ClarifySlotStore:
-    """线程安全的会话级澄清上下文缓存（随 TTL 惰性失效）。"""
+    """线程安全的会话级澄清上下文缓存（随 TTL 惰性失效）。
 
-    def __init__(self, ttl_seconds: int | None = None) -> None:
+    配置 db_path 时通过 SqliteKVStore 落盘（整改指令3-2：多 worker/重启一致）。
+    """
+
+    def __init__(self, ttl_seconds: int | None = None, db_path: str | None = None) -> None:
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.CLARIFY_SLOT_TTL
         self._items: dict[str, ClarifyContext] = {}
         self._lock = threading.Lock()
+        self._kv = SqliteKVStore(db_path, table="clarify_slots") if db_path else None
 
     def get(self, session_id: str) -> ClarifyContext | None:
         with self._lock:
             ctx = self._items.get(session_id)
+            if ctx is None and self._kv is not None:
+                raw = self._kv.get(session_id, ttl_seconds=self._ttl)
+                if raw is not None:
+                    ctx = ClarifyContext(
+                        original_query=raw["original_query"],
+                        pending=tuple(raw["pending"]),
+                        created_at=float(raw["created_at"]),
+                    )
+                    if not ctx.expired(self._ttl):
+                        self._items[session_id] = ctx
+                    else:
+                        self._kv.delete(session_id)
+                        ctx = None
             if ctx is None:
                 return None
             if ctx.expired(self._ttl):
                 self._items.pop(session_id, None)
+                if self._kv is not None:
+                    self._kv.delete(session_id)
                 return None
             return ctx
 
     def set(self, session_id: str, ctx: ClarifyContext) -> None:
         with self._lock:
             self._items[session_id] = ctx
+            if self._kv is not None:
+                self._kv.set(
+                    session_id,
+                    {
+                        "original_query": ctx.original_query,
+                        "pending": list(ctx.pending),
+                        "created_at": ctx.created_at,
+                    },
+                )
 
     def clear(self, session_id: str) -> None:
         with self._lock:
             self._items.pop(session_id, None)
+            if self._kv is not None:
+                self._kv.delete(session_id)
 
     def clear_all(self) -> int:
         """清空全部槽位上下文（管理 / 测试用），返回清理条数。"""
         with self._lock:
             n = len(self._items)
             self._items.clear()
+            if self._kv is not None:
+                self._kv.clear()
             return n
 
 
@@ -82,12 +115,12 @@ _store_lock = threading.Lock()
 
 
 def default_slot_store() -> ClarifySlotStore:
-    """进程内复用的默认澄清槽位存储。"""
+    """进程内复用的默认澄清槽位存储（配置 STATE_STORE_DB 时自动落盘）。"""
     global _default_store
     if _default_store is None:
         with _store_lock:
             if _default_store is None:
-                _default_store = ClarifySlotStore()
+                _default_store = ClarifySlotStore(db_path=settings.STATE_STORE_DB)
     return _default_store
 
 

@@ -20,11 +20,12 @@ _STRUCT_BLOCK = """QueryDSL JSON 结构（所有字段必须严格符合）：
   ],
   "dimensions": [{"field": "<逻辑字段>", "alias": "<可选>"}],
   "time_filter": {
-    "granularity": "day|week|month",
+    "granularity": "day|week|month|quarter",
     "range_type": "relative|absolute",
-    "relative": {"amount": 1, "unit": "day|week|month|year", "mode": "trailing|calendar"},
+    "relative": {"amount": 1, "unit": "day|week|month|quarter|year", "mode": "trailing|calendar|to_date"},
     "absolute": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"},
-    "comparison": "none|yoy|mom"
+    "comparison": "none|yoy|mom",
+    "time_field": "order_time|refund_time|register_time"
   },
   "filters": [{"field": "<逻辑字段>", "operator": "eq|ne|in|gt|gte|lt|lte|between", "value": <标量或列表>}],
   "order_by": [{"field": "<指标别名或维度名>", "direction": "asc|desc"}],
@@ -57,8 +58,25 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("refund_amount", "order_amount"),
     ),
     (
-        '时间："上个月" -> relative {amount:1, unit:month, mode:calendar}；"过去N天" -> relative {amount:N, unit:day, mode:trailing}；"2024年6月" -> absolute {start:"2024-06-01", end:"2024-07-01"}（end 为下月第一天，半开区间）',
+        '时间表达（基本）："上个月" -> relative {amount:1, unit:month, mode:calendar}；'
+        '"过去N天" -> relative {amount:N, unit:day, mode:trailing}；'
+        '"2024年6月" -> absolute {start:"2024-06-01", end:"2024-07-01"}（end 为下月第一天，半开区间）',
         ("order_time",),
+    ),
+    (
+        '时间表达（季度/至今语义）："上季度/上个季度" -> relative {amount:1, unit:quarter, mode:calendar}；'
+        '"本季度" -> absolute 完整自然季度（[季初, 下季初)）；'
+        '"本月至今/MTD" -> relative {amount:1, unit:month, mode:"to_date"}（窗口 [月首1日, 锚点)）；'
+        '"本季度至今/QTD" -> relative {amount:1, unit:quarter, mode:"to_date"}（窗口 [季初, 锚点)）；'
+        '"今年至今/YTD" -> relative {amount:1, unit:year, mode:"to_date"}（窗口 [年初1日, 锚点)）；'
+        '"过去N个季度" -> relative {amount:N, unit:quarter, mode:trailing}；'
+        "to_date 模式的 granularity 分别为 day/month/quarter（按 QTD/MTD 适当选择）",
+        ("order_time",),
+    ),
+    (
+        '时间主轴（time_field）：默认 "order_time"；退款时序分析（"每日退款金额/退款趋势"）'
+        '应声明 time_field: "refund_time"，解除 order_time 硬编码',
+        ("refund_time", "order_time"),
     ),
     (
         '支付口径：问句中出现"成功/成交"时，filters 中加 {field:pay_status, operator:eq, value:SUCCESS}',
@@ -77,7 +95,7 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("order_time",),
     ),
     (
-        '日期补零：问句含"补零/补齐" -> fill_gaps=true（需时间维度 order_time 与明确时间窗口）',
+        '日期补零：问句含"补零/补齐" -> fill_gaps=true（需时间维度与明确时间窗口，支持 day/week/month/quarter 粒度）',
         ("order_time",),
     ),
     (
@@ -87,6 +105,11 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         '数值过滤："金额100到5000元" -> filters 中 {field:order_amount, operator:between, value:[100,5000]}',
         ("order_amount",),
+    ),
+    (
+        '同比/环比（comparison）："环比" -> comparison:mom；"同比" -> comparison:yoy；'
+        "可与时间维度组合（按位配对）：prev CTE 时间列经 date_add 平移后 JOIN",
+        (),
     ),
 )
 

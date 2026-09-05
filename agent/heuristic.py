@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
 from agent.clarify import undefined_metric_terms
@@ -39,6 +40,19 @@ REGIONS: dict[str, list[str]] = {
     "华中": ["湖北"],
     "西南": ["四川"],
 }
+
+
+def _quarter_start(d: date) -> date:
+    """给定日期所在季度的第一天。"""
+    q = (d.month - 1) // 3
+    return date(d.year, q * 3 + 1, 1)
+
+
+def _current_quarter_bounds(ref: date) -> tuple[date, date]:
+    """当前自然季度半开区间 [季初, 下季初)。"""
+    start = _quarter_start(ref)
+    y, m = (start.year + 1, 1) if start.month == 10 else (start.year, start.month + 3)
+    return start, date(y, m, 1)
 
 
 class DeterministicNL2DSL:
@@ -101,6 +115,10 @@ class DeterministicNL2DSL:
                     )
                     dsl["time_filter"] = time_filter.model_dump()
                 dsl["time_filter"]["comparison"] = comparison
+            # 时间主轴解绑（报告缺陷修复）：按问句语义设置 time_field
+            # （退款时序用 refund_time；其余默认 order_time）
+            if "time_filter" in dsl:
+                dsl["time_filter"]["time_field"] = self._time_dim_field(q)
             if self._fill_gaps(q):
                 dsl["fill_gaps"] = True
             if top_n:
@@ -279,6 +297,32 @@ class DeterministicNL2DSL:
     # ------------------------------------------------------------------ #
     # 维度
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _time_dim_field(q: str) -> str:
+        """时间主轴字段推断（解除 order_time 硬编码）。
+
+        规则：仅当问句是**退款时间序列**（含时间维度词 + 退款金额/退款总额）时才
+        切换到 refund_time；"退款率"是比率指标，时间维度保持 order_time。
+        """
+        is_refund_amount = any(k in q for k in ("退款金额", "退款总额"))
+        is_time_series = any(
+            k in q
+            for k in (
+                "每日",
+                "按天",
+                "每天",
+                "趋势",
+                "累计",
+                "移动平均",
+                "滑动平均",
+                "补零",
+                "补齐",
+            )
+        )
+        if is_refund_amount and is_time_series:
+            return "refund_time"
+        return "order_time"
+
     def _dimensions(self, q: str) -> list[dict[str, str]]:
         dims: list[dict[str, str]] = []
         seen: set[str] = set()
@@ -302,7 +346,7 @@ class DeterministicNL2DSL:
                 "补齐",
             )
         ):
-            add("order_time")
+            add(self._time_dim_field(q))  # 时间主轴：退款场景用 refund_time
         if any(k in q for k in ("各品类", "按品类", "分品类", "品类分布", "每品类", "品类")):
             add("category")
         if "品牌" in q:
@@ -314,7 +358,7 @@ class DeterministicNL2DSL:
         # 明细/清单：逐订单下钻
         if any(k in q for k in ("明细", "清单")):
             add("order_id")
-            add("order_time")
+            add(self._time_dim_field(q))
         return dims
 
     # ------------------------------------------------------------------ #
@@ -391,12 +435,59 @@ class DeterministicNL2DSL:
                 "absolute": {"start": f"{year:04d}-01-01", "end": f"{year + 1:04d}-01-01"},
             }
 
-        # 相对：上个月 / 这个月 / 过去N天 / 过去N个月 / 过去半年
+        # 相对：上个月 / 这个月 / 过去N天 / 过去N个月 / 过去半年 / 季度 / 至今（MTD/QTD/YTD）
         if "上个月" in q or "上月" in q:
             return {
                 "granularity": "month",
                 "range_type": "relative",
                 "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+                "reference_date": settings.AS_OF_DATE.isoformat(),
+            }
+        if "上季度" in q or "上个季度" in q or "上一季度" in q:
+            # 上季度：完整上一个自然季度（calendar quarter）
+            return {
+                "granularity": "quarter",
+                "range_type": "relative",
+                "relative": {"amount": 1, "unit": "quarter", "mode": "calendar"},
+                "reference_date": settings.AS_OF_DATE.isoformat(),
+            }
+        if "本季度至今" in q or "本季度到目前" in q or "本qtd" in q.lower():
+            # QTD：本季度起点至锚点日期
+            return {
+                "granularity": "quarter",
+                "range_type": "relative",
+                "relative": {"amount": 1, "unit": "quarter", "mode": "to_date"},
+                "reference_date": settings.AS_OF_DATE.isoformat(),
+            }
+        if "本季度" in q or "这个季度" in q or "当季" in q:
+            # 本季度（完整）：[季初, 下季初)；沿用 to_date 会截断到当前日，这里完整给整季
+            # 为保持确定性，以 AS_OF_DATE 所在季度为"当前季度"，输出整个自然季度
+            start, end = _current_quarter_bounds(settings.AS_OF_DATE)
+            return {
+                "granularity": "quarter",
+                "range_type": "absolute",
+                "absolute": {"start": start.isoformat(), "end": end.isoformat()},
+            }
+        if "本月至今" in q or "本月到目前" in q or "本月初至今" in q or "月至今" in q:
+            # MTD：本月 1 日至锚点日期
+            return {
+                "granularity": "day",
+                "range_type": "relative",
+                "relative": {"amount": 1, "unit": "month", "mode": "to_date"},
+                "reference_date": settings.AS_OF_DATE.isoformat(),
+            }
+        if (
+            "本年度至今" in q
+            or "本年至今" in q
+            or "年初至今" in q
+            or "今年至今" in q
+            or "ytd" in q.lower()
+        ):
+            # YTD：本年 1 月 1 日至锚点日期
+            return {
+                "granularity": "month",
+                "range_type": "relative",
+                "relative": {"amount": 1, "unit": "year", "mode": "to_date"},
                 "reference_date": settings.AS_OF_DATE.isoformat(),
             }
         if "这个月" in q or "本月" in q:
@@ -421,6 +512,18 @@ class DeterministicNL2DSL:
                 "relative": {
                     "amount": int(m.group(1)),
                     "unit": "month",
+                    "mode": "trailing",
+                },
+                "reference_date": settings.AS_OF_DATE.isoformat(),
+            }
+        m = re.search(r"(?:过去|最近|近)\s*(\d+)\s*个?季度", q)
+        if m:
+            return {
+                "granularity": "quarter",
+                "range_type": "relative",
+                "relative": {
+                    "amount": int(m.group(1)),
+                    "unit": "quarter",
                     "mode": "trailing",
                 },
                 "reference_date": settings.AS_OF_DATE.isoformat(),
@@ -451,6 +554,21 @@ class DeterministicNL2DSL:
                 "range_type": "relative",
                 "relative": {"amount": int(m.group(1)), "unit": "day", "mode": "trailing"},
                 "reference_date": settings.AS_OF_DATE.isoformat(),
+                "time_field": self._time_dim_field(q),
+            }
+        # 无年份的月份（如 "6月GMV" / "6月每日"）：锚定 AS_OF_DATE 所在年份
+        m = re.search(r"(?<![\d])(\d{1,2})\s*月", q)
+        if m:
+            year, month = settings.AS_OF_DATE.year, int(m.group(1))
+            end_year, end_month = (year + 1, 1) if month == 12 else (year, month + 1)
+            return {
+                "granularity": "day",
+                "range_type": "absolute",
+                "absolute": {
+                    "start": f"{year:04d}-{month:02d}-01",
+                    "end": f"{end_year:04d}-{end_month:02d}-01",
+                },
+                "time_field": self._time_dim_field(q),
             }
         return None
 
@@ -500,7 +618,7 @@ class DeterministicNL2DSL:
     # 排序 / 截断
     # ------------------------------------------------------------------ #
     def _order_by(self, q: str) -> list[dict[str, Any]]:
-        # 趋势/窗口/补零 -> 按时间升序
+        # 趋势/窗口/补零 -> 按时间主轴升序（退款时序用 refund_time）
         if any(
             k in q
             for k in (
@@ -515,7 +633,7 @@ class DeterministicNL2DSL:
                 "补齐",
             )
         ):
-            return [{"field": "order_time", "direction": "asc"}]
+            return [{"field": self._time_dim_field(q), "direction": "asc"}]
         # 最高/前N -> 按主指标降序
         if any(k in q for k in ("最高", "排名", "前")):
             return [{"field": self._primary_alias(q), "direction": "desc"}]

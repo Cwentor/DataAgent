@@ -221,7 +221,7 @@ def test_llm_synthesizer_uses_llm_answer(conn):
 # --------------------------------------------------------------------------- #
 def test_max_steps_cap_enforced(conn):
     class ManyCallsPlanner(DeterministicPlanner):
-        def plan(self, query, principal, registry):
+        def plan(self, query, principal, registry, **kwargs):
             return PlanResult(calls=[ToolCall("query_metric", {"query": query})] * 6)
 
     agent = ToolAgent(planner=ManyCallsPlanner(), max_steps=4)
@@ -260,7 +260,7 @@ def test_self_correction_retries_failed_tool(conn):
     reg.register(FlakyQueryTool())
 
     class RetryPlanner(DeterministicPlanner):
-        def plan(self, query, principal, registry):
+        def plan(self, query, principal, registry, **kwargs):
             return PlanResult(calls=[ToolCall("query_metric", {"query": query})])
 
         def correct(self, query, principal, failed, record):
@@ -293,7 +293,7 @@ def test_no_retry_on_permanent_error(conn):
     reg.register(DeniedTool())
 
     class RetryPlanner(DeterministicPlanner):
-        def plan(self, query, principal, registry):
+        def plan(self, query, principal, registry, **kwargs):
             return PlanResult(calls=[ToolCall("query_metric", {"query": query})])
 
         def correct(self, query, principal, failed, record):
@@ -327,3 +327,62 @@ def test_agent_result_to_dict(conn):
     d = result.to_dict()
     assert d["steps"][0]["tool"] == "explain_glossary"
     assert d["intent"] == "text2sql"
+
+
+# --------------------------------------------------------------------------- #
+# LLMPlanner.correct 自愈修复（回归：死代码缺陷修复后必须可用）
+# --------------------------------------------------------------------------- #
+def test_llm_planner_correct_with_registry(conn):
+    """LLM 规划器自愈：工具首次失败 -> correct() 借助注入的 registry 产出修正调用。"""
+    from tools.builtins.query_metric_tool import QueryMetricArgs, QueryMetricTool
+
+    calls = {"n": 0}
+
+    class FlakyQueryTool(QueryMetricTool):
+        def execute(self, validated_args: QueryMetricArgs, ctx=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ToolResult(
+                    success=False,
+                    data=None,
+                    display_type=DisplayType.TEXT,
+                    error_msg="PipelineError: 首次执行失败（模拟）",
+                    meta={"error_type": "PipelineError"},
+                )
+            return super().execute(validated_args, ctx)
+
+    reg = ToolRegistry()
+    reg.register(FlakyQueryTool())
+
+    # FakeLLM：先规划 query_metric，再响应 correct() 的修复请求（仍调用 query_metric）
+    llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "本月GMV"}}),
+            json.dumps({"tool": "query_metric", "args": {"query": "本月GMV"}}),
+        ]
+    )
+    planner = LLMPlanner(llm, registry=reg, max_retries=1)
+    assert planner.registry is reg  # 回归：registry 已构造注入（旧死代码无此属性）
+
+    agent = ToolAgent(registry=reg, planner=planner, max_steps=5)
+    result = agent.run("本月GMV", conn=conn)
+    assert result.error is None
+    assert [s.success for s in result.steps] == [False, True]
+    assert calls["n"] == 2
+    # 第二步为自愈修复调用（reason 标注）
+    assert result.steps[1].args == {"query": "本月GMV"}
+
+
+def test_llm_planner_correct_without_registry_safe(conn):
+    """未注入 registry 时 correct() 安全返回 None（绝不 AttributeError / 静默吞错）。"""
+    llm = FakeLLM([json.dumps({"tool": "query_metric", "args": {"query": "本月GMV"}})])
+    planner = LLMPlanner(llm, max_retries=1)  # 不注入 registry
+    assert planner.registry is None
+    failed = ToolCall("query_metric", {"query": "x"})
+    record = type(
+        "Rec",
+        (),
+        {"error_msg": "PipelineError: 模拟失败", "tool": "query_metric"},
+    )()
+    corrected = planner.correct("本月GMV", None, failed, record)
+    assert corrected is None  # 安全降级：不修复，交由上层透传错误
