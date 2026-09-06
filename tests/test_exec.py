@@ -283,3 +283,22 @@ def test_execute_sql_reuses_scan_cache(big_conn, monkeypatch):
     result = execute_sql(big_conn, sql, max_scan_rows=500000)
     assert result.scan_rows == 200000  # 缓存值回填
     assert len(result.rows) == 7
+
+
+def test_scan_cache_capacity_from_settings(monkeypatch):
+    """容量上限读自 settings.MAX_SCAN_CACHE_SIZE（原硬编码 512 配置化）。
+
+    写入条数超过容量即触发"清空防膨胀"，且容量阈值在运行时可由配置调整。
+    """
+    from config import settings
+    from exec.guards import _SCAN_CACHE, cache_scan_rows, cached_scan_rows
+
+    _SCAN_CACHE.clear()  # 隔离其他用例预填的全局缓存，保证容量计数从零开始
+    monkeypatch.setattr(settings, "MAX_SCAN_CACHE_SIZE", 3)
+    for i in range(3):
+        cache_scan_rows(f"SELECT {i}", i)
+    assert cached_scan_rows("SELECT 0") == 0  # 未超限时正常命中
+
+    cache_scan_rows("SELECT 3", 3)  # 第 4 条写入超出容量 3，触发清空
+    for i in range(4):
+        assert cached_scan_rows(f"SELECT {i}") is None

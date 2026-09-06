@@ -37,6 +37,8 @@ import duckdb
 import sqlglot
 from sqlglot import exp
 
+from config import settings
+
 # --------------------------------------------------------------------------- #
 # 异常体系
 # --------------------------------------------------------------------------- #
@@ -301,7 +303,6 @@ def parse_scan_rows(plan_text: str) -> int:
 # --------------------------------------------------------------------------- #
 _SCAN_CACHE: dict[str, int] = {}
 _SCAN_CACHE_LOCK = threading.Lock()
-_SCAN_CACHE_MAX = 512
 
 
 def _scan_cache_key(sql: str) -> str:
@@ -322,18 +323,19 @@ def cached_scan_rows(sql: str, cache: dict[str, int] | None = None) -> int | Non
 
 
 def cache_scan_rows(sql: str, scan_rows: int, cache: dict[str, int] | None = None) -> None:
-    """写入 SQL 的扫描行数缓存（容量上限 _SCAN_CACHE_MAX，超限清空防膨胀）。"""
+    """写入 SQL 的扫描行数缓存（容量上限读 settings.MAX_SCAN_CACHE_SIZE，超限清空防膨胀）。"""
     store = cache if cache is not None else _SCAN_CACHE
     key = _scan_cache_key(sql)
     lock = None if cache is not None else _SCAN_CACHE_LOCK
+    max_size = settings.MAX_SCAN_CACHE_SIZE
     if lock is not None:
         with lock:
             store[key] = scan_rows
-            if len(store) > _SCAN_CACHE_MAX:
+            if len(store) > max_size:
                 store.clear()
         return
     store[key] = scan_rows
-    if len(store) > _SCAN_CACHE_MAX:
+    if len(store) > max_size:
         store.clear()
 
 
