@@ -161,3 +161,43 @@ def test_deterministic_agent_rewrite_rejects():
     dsl = h.run("2024年6月GMV多少")
     with pytest.raises(PipelineError, match="不支持"):
         h.rewrite("2024年6月GMV多少", dsl, "Binder Error: x")
+
+
+# --------------------------------------------------------------------------- #
+# 维度成员词汇表数据驱动（审计 §3.2-4）：识别能力跟随 catalog.DIMENSION_MEMBERS
+# --------------------------------------------------------------------------- #
+def test_heuristic_vocabulary_data_driven(monkeypatch):
+    """新增维度成员后离线启发式即可识别，无需改代码；成员移除后不再被识别。"""
+    from semantic import catalog
+
+    h = DeterministicNL2DSL()
+    monkeypatch.setitem(
+        catalog.DIMENSION_MEMBERS,
+        "province",
+        catalog.DIMENSION_MEMBERS["province"] + ("西藏",),
+    )
+    dsl = h.run("西藏的GMV是多少")
+    assert any(f.field == "province" and f.value == "西藏" for f in dsl.filters)
+
+    monkeypatch.setitem(
+        catalog.DIMENSION_MEMBERS,
+        "province",
+        tuple(p for p in catalog.DIMENSION_MEMBERS["province"] if p != "广东"),
+    )
+    dsl = h.run("广东的GMV是多少")
+    assert not any(f.field == "province" for f in dsl.filters)
+
+
+def test_heuristic_region_expansion_intersects_warehouse(monkeypatch):
+    """大区展开与数仓省份成员取交集：库中裁撤的省份不产出无效过滤。"""
+    from semantic import catalog
+
+    h = DeterministicNL2DSL()
+    monkeypatch.setitem(catalog.DIMENSION_MEMBERS, "province", ("北京",))
+    dsl = h.run("华东的GMV是多少")  # 华东四省均不在库 -> 不产出省份过滤
+    assert not any(f.field == "province" for f in dsl.filters)
+
+    monkeypatch.setitem(catalog.DIMENSION_MEMBERS, "province", ("上海", "江苏"))
+    dsl = h.run("华东的GMV是多少")
+    prov = [f for f in dsl.filters if f.field == "province"]
+    assert len(prov) == 1 and set(prov[0].value) == {"上海", "江苏"}

@@ -26,13 +26,13 @@ from agent.errors import PipelineError
 from config import settings
 from security.errors import SecurityError
 from security.scope import scoped_fields
+from semantic import catalog
 from semantic.dsl_schema import Comparison, Granularity, QueryDSL, RatioMetric, WindowMetric
 
-PROVINCES = ["广东", "浙江", "江苏", "北京", "上海", "四川", "湖北", "山东"]
-CATEGORIES = ["数码", "家电", "服饰", "美妆", "食品", "家居"]
-
 # 大区 -> 省份列表（行政区划映射，仅收录 mock 数仓实际存在的省份，供"地区"类
-# 提问与会话上下文继承共用；与 mock.init_duckdb.PROVINCES 保持同步）。
+# 提问与会话上下文继承共用）。行政区划归属是业务知识（保留常量），但展开值域
+# 经 region_provinces() 与语义目录的省份成员词汇表取交集——库中裁撤的省份
+# 不会产出无效过滤（成员词汇表由 catalog_loader 从数仓 distinct 值重建）。
 REGIONS: dict[str, list[str]] = {
     "华北": ["北京"],
     "华东": ["上海", "江苏", "浙江", "山东"],
@@ -40,6 +40,22 @@ REGIONS: dict[str, list[str]] = {
     "华中": ["湖北"],
     "西南": ["四川"],
 }
+
+
+def dimension_members(field: str) -> tuple[str, ...]:
+    """维度成员词汇表：语义目录数据驱动，catalog_loader 启动时从数仓 distinct 重建。
+
+    审计 §3.2-4：原 PROVINCES/CATEGORIES 模块常量与数仓硬绑定，新增维度成员后
+    LLM 路径可用、离线路径失明；改为每次动态读取 catalog.DIMENSION_MEMBERS，
+    与编译器消费 catalog.COLUMNS 同模式，目录刷新即时生效。
+    """
+    return catalog.DIMENSION_MEMBERS.get(field, ())
+
+
+def region_provinces(region: str) -> list[str]:
+    """大区 -> 数仓实际存在的省份列表（行政区划映射 ∩ 成员词汇表）。"""
+    members = set(dimension_members("province"))
+    return [p for p in REGIONS.get(region, ()) if p in members]
 
 
 def _quarter_start(d: date) -> date:
@@ -376,7 +392,7 @@ class DeterministicNL2DSL:
             filters.append({"field": "pay_status", "operator": "ne", "value": "SUCCESS"})
 
         # 省份（单个或多个 -> in）
-        provinces = [p for p in PROVINCES if p in q]
+        provinces = [p for p in dimension_members("province") if p in q]
         if provinces:
             if len(provinces) == 1:
                 filters.append({"field": "province", "operator": "eq", "value": provinces[0]})
@@ -385,15 +401,15 @@ class DeterministicNL2DSL:
 
         # 大区（华东/华南等）-> 省份 in 过滤（与省份过滤互斥，先命中大区）
         if not provinces:
-            for region, region_provinces in REGIONS.items():
+            for region, region_list in REGIONS.items():
                 if region in q:
-                    filters.append(
-                        {"field": "province", "operator": "in", "value": region_provinces}
-                    )
-                    break
+                    in_region = [p for p in region_list if p in dimension_members("province")]
+                    if in_region:
+                        filters.append({"field": "province", "operator": "in", "value": in_region})
+                        break
 
         # 类目
-        cats = [c for c in CATEGORIES if c in q]
+        cats = [c for c in dimension_members("category") if c in q]
         if cats:
             filters.append({"field": "category", "operator": "eq", "value": cats[0]})
 

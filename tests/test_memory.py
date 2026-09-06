@@ -449,3 +449,21 @@ def test_e2e_rls_injected_once_after_inherit(conn):
     assert len(prov) == 2
     assert ["广东"] in [f["value"] for f in prov]
     assert len([f for f in prov if f["value"] == ["广东", "浙江", "江苏", "北京", "上海"]]) == 1
+
+
+def test_collect_deltas_vocabulary_data_driven(monkeypatch):
+    """多轮继承的维度增量抽取跟随数据驱动词汇表（审计 §3.2-4）。
+
+    词汇表已由 catalog_loader 从数仓 distinct 重建，新增成员后省略指代
+    追问（"那西藏呢"）即可被结构化合并，无需改代码。
+    """
+    from agent import memory
+    from semantic import catalog
+
+    monkeypatch.setitem(
+        catalog.DIMENSION_MEMBERS,
+        "province",
+        catalog.DIMENSION_MEMBERS["province"] + ("西藏",),
+    )
+    d = memory._collect_deltas("那西藏呢")
+    assert d.provinces == ["西藏"]

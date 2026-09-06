@@ -33,7 +33,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agent.errors import PipelineError
 from agent.glossary import METRIC_TERMS
-from agent.heuristic import CATEGORIES, PROVINCES, REGIONS, DeterministicNL2DSL
+from agent.heuristic import (
+    REGIONS,
+    DeterministicNL2DSL,
+    dimension_members,
+    region_provinces,
+)
 from config import settings
 from persistence.kvstore import SqliteKVStore
 from security.policy import POLICIES, PRINCIPAL_ATTRS
@@ -305,7 +310,7 @@ class _Deltas:
 def _collect_deltas(query: str) -> _Deltas:
     """从省略指代语句中提取语义增量（确定性规则，与启发式解析同源）。"""
     d = _Deltas()
-    provinces = [p for p in PROVINCES if p in query]
+    provinces = [p for p in dimension_members("province") if p in query]
     if provinces:
         d.provinces = provinces
     else:
@@ -313,7 +318,7 @@ def _collect_deltas(query: str) -> _Deltas:
             if region in query:
                 d.region = region
                 break
-    cats = [c for c in CATEGORIES if c in query]
+    cats = [c for c in dimension_members("category") if c in query]
     if cats:
         d.category = cats[0]
     time_dict = _h._time_filter(query)
@@ -431,13 +436,11 @@ def _apply_deltas(base: QueryDSL, deltas: _Deltas) -> QueryDSL:
     if deltas.region is not None or deltas.provinces:
         filters = [f for f in filters if f.field != "province"]
         if deltas.region is not None:
-            filters.append(
-                Filter(
-                    field="province",
-                    operator=FilterOperator.IN,
-                    value=REGIONS[deltas.region],
+            in_region = region_provinces(deltas.region)
+            if in_region:  # 大区展开值域与数仓省份取交集，空集时不产出无效 IN 过滤
+                filters.append(
+                    Filter(field="province", operator=FilterOperator.IN, value=in_region)
                 )
-            )
         elif len(deltas.provinces) == 1:
             filters.append(
                 Filter(field="province", operator=FilterOperator.EQ, value=deltas.provinces[0])

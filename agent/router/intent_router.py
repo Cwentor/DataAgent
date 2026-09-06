@@ -38,7 +38,7 @@ from typing import Any
 from agent.agent import extract_json
 from agent.clarify import detect_clarifications
 from agent.glossary import METRIC_TERMS
-from agent.heuristic import CATEGORIES, PROVINCES, REGIONS, DeterministicNL2DSL
+from agent.heuristic import REGIONS, DeterministicNL2DSL, dimension_members
 from agent.intent import _CHITCHAT_PATTERNS, _RAG_PATTERNS
 from agent.llm import LLMError, OpenAICompatClient
 from audit.logging import get_logger
@@ -291,8 +291,8 @@ def extract_entities(query: str) -> dict[str, Any]:
 
     # 地区 / 品类
     regions = [r for r in REGIONS if r in query]
-    provinces = [p for p in PROVINCES if p in query]
-    categories = [c for c in CATEGORIES if c in query]
+    provinces = [p for p in dimension_members("province") if p in query]
+    categories = [c for c in dimension_members("category") if c in query]
     if regions:
         entities["region"] = regions[0]
     if provinces:
