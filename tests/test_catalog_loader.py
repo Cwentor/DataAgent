@@ -177,8 +177,20 @@ def test_build_catalog_without_db_falls_back_to_defaults(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "DB_PATH", tmp_path / "missing.duckdb")
     cat = build_catalog(db_path=tmp_path / "missing.duckdb")
     assert set(cat.dimension_members["province"]) == {
-        "广东", "浙江", "江苏", "北京", "上海", "四川", "湖北", "山东",
+        "广东",
+        "浙江",
+        "江苏",
+        "北京",
+        "上海",
+        "四川",
+        "湖北",
+        "山东",
     }
     assert set(cat.dimension_members["category"]) == {
-        "数码", "家电", "服饰", "美妆", "食品", "家居",
+        "数码",
+        "家电",
+        "服饰",
+        "美妆",
+        "食品",
+        "家居",
     }

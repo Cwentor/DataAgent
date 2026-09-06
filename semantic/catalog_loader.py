@@ -124,7 +124,7 @@ def _load_dimension_members(
             continue
         rows = conn.execute(
             f'SELECT DISTINCT "{meta.column}" FROM "{meta.table}" '
-            f"WHERE \"{meta.column}\" IS NOT NULL ORDER BY 1 LIMIT {_DIMENSION_MEMBER_CAP}"
+            f'WHERE "{meta.column}" IS NOT NULL ORDER BY 1 LIMIT {_DIMENSION_MEMBER_CAP}'
         ).fetchall()
         members[name] = tuple(str(r[0]) for r in rows)
     return members
@@ -338,10 +338,7 @@ def main() -> None:
         m = cat.columns[name]
         print(f"  - {name}: {m.table}.{m.column} ({m.dtype})")
     print(f"表别名: {cat.aliases}")
-    print(
-        f"维度成员词汇表: "
-        f"{ {k: len(v) for k, v in cat.dimension_members.items()} }"
-    )
+    print(f"维度成员词汇表: " f"{ {k: len(v) for k, v in cat.dimension_members.items()} }")
     print(f"维度连接: { {t: (r.join_type, r.on) for t, r in cat.join_rules.items()} }")
     print(f"事实表连接: { {t: (r.join_type, r.on) for t, r in cat.fact_join_rules.items()} }")
 
