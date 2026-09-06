@@ -41,7 +41,7 @@ from exec.guards import (
     UnsafeSqlError,
     execute_sql,
 )
-from exec.pool import ReadOnlyConnectionPool
+from exec.pool import default_pool
 from security.errors import SecurityError
 from semantic import catalog
 from semantic.dsl_schema import QueryDSL, RatioMetric, WindowMetric
@@ -170,19 +170,6 @@ _store_lock = threading.Lock()
 
 # P0-6 并发闸：全局信号量限制同时执行的查询数（超配额排队等待，配合连接池）
 _query_gate = threading.BoundedSemaphore(settings.MAX_CONCURRENT_QUERIES)
-
-_default_pool: ReadOnlyConnectionPool | None = None
-_pool_lock = threading.Lock()
-
-
-def _default_db_pool() -> ReadOnlyConnectionPool:
-    """进程内复用的只读连接池（惰性初始化，容量取 settings.DB_POOL_SIZE）。"""
-    global _default_pool
-    if _default_pool is None:
-        with _pool_lock:
-            if _default_pool is None:
-                _default_pool = ReadOnlyConnectionPool(settings.DB_PATH, settings.DB_POOL_SIZE)
-    return _default_pool
 
 
 def _default_audit_store() -> AuditStore | None:
@@ -355,7 +342,13 @@ def run_query(
             # 口径文档检索：经 explain_glossary_tool 执行，记录调度轨迹（不触达 SQL 引擎）
             if slot_store is not None:
                 slot_store.clear(session_id, owner)
-            agent_result = default_tool_agent().run(effective_query, principal, request_id=rid)
+            # R3 处置：与 DATA_QUERY 共用同一并发闸——LLM 规划器可能把口径问题
+            # 调度到数据工具（此时工具层从统一连接池取连接执行），持闸避免绕过
+            # MAX_CONCURRENT_QUERIES 并发上限；纯 RAG 检索持闸耗时忽略不计。
+            with _query_gate:
+                agent_result = default_tool_agent().run(
+                    effective_query, principal, request_id=rid
+                )
             result["steps"] = [s.to_dict() for s in agent_result.steps]
             result["answer"] = agent_result.answer
             result["documents"] = agent_result.documents
@@ -404,12 +397,13 @@ def run_query(
                     state.last_dsl = None
                     context_summary = resolution.summary or None
 
-            # P0-6：未显式注入连接时，从只读连接池取用（用完归还），
-            # 并用全局信号量限制并发查询数（超配额排队，避免打满单机实例）。
+            # P0-6 + R3 处置：未显式注入连接时，从进程级统一只读连接池取用
+            # （用完归还，与工具层 _query_core 共享 exec.pool.default_pool 同一
+            # 单例，杜绝双池），并用全局信号量限制并发查询数（超配额排队）。
             own_conn = conn is None
             pool = None
             if own_conn:
-                pool = _default_db_pool()
+                pool = default_pool()
                 conn = pool.acquire()
             try:
                 with _query_gate:

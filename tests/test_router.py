@@ -296,7 +296,7 @@ def test_e2e_chitchat_no_db_connection(conn, monkeypatch):
         def release(self, c):
             pass
 
-    monkeypatch.setattr(svc, "_default_db_pool", lambda: _CountingPool())
+    monkeypatch.setattr(svc, "default_pool", lambda: _CountingPool())
 
     def _raise_if_executed(c, sql, **kwargs):
         raise AssertionError(f"闲聊轮绝不允许执行 SQL: {sql}")
@@ -352,6 +352,29 @@ def test_e2e_glossary_explain(conn):
     assert result["documents"]
     assert result["documents"][0]["key"] == "avg_order_amount"
     assert result.get("sql") is None  # 不执行数据库查询
+
+
+def test_e2e_glossary_branch_holds_query_gate(conn, monkeypatch):
+    """就绪度评审 R3：GLOSSARY_EXPLAIN 分支与 DATA_QUERY 共用同一并发闸——
+    LLM 规划器把口径问题调度到数据工具时不得绕过 MAX_CONCURRENT_QUERIES。"""
+    import web.service as svc
+
+    class _CountingGate:
+        def __init__(self):
+            self.entered = 0
+
+        def __enter__(self):
+            self.entered += 1
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    gate = _CountingGate()
+    monkeypatch.setattr(svc, "_query_gate", gate)
+    result = run_query("客单价是怎么定义的", conn=conn, session_id="r3-gate", user="alice")
+    assert result["detected_intent"] == "glossary_explain"
+    assert gate.entered == 1
 
 
 def test_e2e_data_query_compiles(conn):

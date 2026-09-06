@@ -531,3 +531,33 @@ def test_export_admin_role_can_download_foreign(warehouse):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_query_shares_tool_layer_connection_pool(warehouse, monkeypatch):
+    """就绪度评审 R3：service 与工具层消费同一连接池单例——未注入连接的
+    DATA_QUERY 实际从 exec.pool.default_pool 取用连接（双池并存的旁路面消除）。"""
+    import web.service as svc
+    from exec import pool as pool_mod
+    from web.service import run_query
+
+    # service 导入的正是工具层单例工厂（同一函数对象）
+    assert svc.default_pool is pool_mod.default_pool
+
+    acquired = {"n": 0}
+    real_pool = pool_mod.default_pool()
+
+    class _CountingPool:
+        def acquire(self):
+            acquired["n"] += 1
+            return real_pool.acquire()
+
+        def release(self, c):
+            real_pool.release(c)
+
+    monkeypatch.setattr(pool_mod, "_default_pool", _CountingPool())
+    result = run_query(
+        "2024年6月成功订单的GMV是多少？", session_id="r3-pool", user="alice"
+    )
+    assert "error" not in result, result.get("error_detail")
+    assert result["columns"] == ["gmv"]
+    assert acquired["n"] == 1
