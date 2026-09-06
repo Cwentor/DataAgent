@@ -83,7 +83,19 @@ _TREND_KEYWORDS = (
 # --------------------------------------------------------------------------- #
 # R2 对比型问题（确定性分解）：触发词 / 脚手架词 / 实体候选池
 # --------------------------------------------------------------------------- #
-_COMPARATIVE_TRIGGERS = ("哪个", "哪方", "谁更", "谁高", "对比", "比较", "相比", "更高", "更低", "更多", "更少")
+_COMPARATIVE_TRIGGERS = (
+    "哪个",
+    "哪方",
+    "谁更",
+    "谁高",
+    "对比",
+    "比较",
+    "相比",
+    "更高",
+    "更低",
+    "更多",
+    "更少",
+)
 _COMPARATIVE_SCAFFOLD = re.compile(
     r"哪个|哪方|谁|更(高|低|多|少|大|小|好|差)|相比|对比|比较|分别|各自"
 )
@@ -251,6 +263,8 @@ class AgentResult:
     scan_rows: int = 0
     # R1 观察驱动重规划：执行后基于轨迹追加的调度轮数（0 = 单批调度）
     replans: int = 0
+    # R3 反思层：调度终止后的结果充分性自检留痕（None = 未启用/未触发）
+    reflection: dict[str, Any] | None = None
 
     def step_tools(self) -> list[str]:
         return [s.tool for s in self.steps]
@@ -268,6 +282,8 @@ class AgentResult:
             "download_urls": self.download_urls,
             "documents": self.documents,
             "clarifications": self.clarifications,
+            "replans": self.replans,
+            "reflection": self.reflection,
         }
 
 
@@ -458,9 +474,7 @@ class LLMPlanner(Planner):
     ) -> PlanResult:
         """观察驱动重规划：携带完整执行轨迹再次决策（R1 核心入口）。"""
         tools_json = json.dumps(registry.tool_definitions(), ensure_ascii=False)
-        trajectory = json.dumps(
-            self._trajectory_view(steps, outputs), ensure_ascii=False
-        )
+        trajectory = json.dumps(self._trajectory_view(steps, outputs), ensure_ascii=False)
         messages = [
             {
                 "role": "system",
@@ -468,7 +482,7 @@ class LLMPlanner(Planner):
                     "你是数据分析 Agent 的规划器。已经执行过若干工具调用，"
                     "执行轨迹（含结果摘要）如下，请判断当前信息是否足以回答问题：\n"
                     + trajectory
-                    + "\n\n若信息已足够 -> 输出 {\"answer\": \"基于轨迹的最终中文洞察\"}；"
+                    + '\n\n若信息已足够 -> 输出 {"answer": "基于轨迹的最终中文洞察"}；'
                     "若还差数据（如对比类问题只查了一个对象）-> 继续调用工具补齐；"
                     "若需用户补充 -> 输出 clarify；若无需继续 -> 输出 done。\n"
                     "可用的工具清单（OpenAI Function Calling 规范）：\n"
@@ -726,7 +740,7 @@ class DeterministicSynthesizer(Synthesizer):
         metric = _metric_label(outputs)
         parts = "，".join(f"{label} {metric}={value}" for label, value in rendered)
         hi_label, hi = max(rendered, key=lambda p: p[1])
-        lo_label, lo = min(rendered, key=lambda p: p[1])
+        _, lo = min(rendered, key=lambda p: p[1])
         if hi == lo:
             tail = "两者持平"
         else:
@@ -797,6 +811,163 @@ class LLMSynthesizer(Synthesizer):
 
 
 # --------------------------------------------------------------------------- #
+# 反思器（R3）：调度终止后的结果充分性自检
+# --------------------------------------------------------------------------- #
+@dataclass
+class ReflectionVerdict:
+    """一次充分性反思的判定结果。
+
+    - ``sufficient``：现有轨迹是否足以回答问题；
+    - ``reason``：判定理由（审计与前端展示）；
+    - ``follow_up``：判不充分时建议的一次追加调用（仅 LLM 反思器会给出，
+      确定性反思器只判定留痕、不生成调用；是否执行由 ToolAgent 按剩余
+      预算决定，全程工具执行总数仍受 max_steps 硬约束）。
+    """
+
+    sufficient: bool
+    reason: str = ""
+    follow_up: ToolCall | None = None
+
+
+class Reflector(ABC):
+    """反思器抽象：审计执行轨迹，判定结果充分性（可选择性给出追加调用）。"""
+
+    @abstractmethod
+    def reflect(
+        self,
+        query: str,
+        principal: str | None,
+        registry: ToolRegistry,
+        *,
+        steps: list[ToolInvocationRecord],
+        outputs: list[ToolResult],
+        remaining_steps: int,
+    ) -> ReflectionVerdict: ...
+
+
+class DeterministicReflector(Reflector):
+    """确定性充分性自检（零 LLM，离线可用）：只判定与留痕，不生成追加调用。
+
+    判不充分的三类规则（全部可确定性复现）：
+    1. 轨迹存在失败步骤；
+    2. 数据查询全部成功但无匹配数据（0 行，或聚合空集产出的单行 NULL）；
+    3. 对比型问题的数据点不足（单值结果 <2 组且总有效行数 <2，对比维度不完整）。
+    """
+
+    @staticmethod
+    def _is_no_data(rows: list) -> bool:
+        """无数据判定：0 行，或聚合查询在空区间上的单行 NULL（SUM 空集 = [[None]]）。"""
+        if not rows:
+            return True
+        return all(len(r) == 0 or (len(r) == 1 and r[0] is None) for r in rows)
+
+    def reflect(
+        self,
+        query: str,
+        principal: str | None,
+        registry: ToolRegistry,
+        *,
+        steps: list[ToolInvocationRecord],
+        outputs: list[ToolResult],
+        remaining_steps: int,
+    ) -> ReflectionVerdict:
+        failed = [s for s in steps if not s.success]
+        if failed:
+            return ReflectionVerdict(False, f"存在失败步骤：{failed[-1].error_type or 'unknown'}")
+        data_rows = [
+            (o.data or {}).get("rows") for o in outputs if o.success and isinstance(o.data, dict)
+        ]
+        data_rows = [r for r in data_rows if isinstance(r, list)]
+        if data_rows and all(self._is_no_data(r) for r in data_rows):
+            return ReflectionVerdict(False, "查询成功但无匹配数据（结果为空）")
+        single_value = [r for r in data_rows if len(r) == 1]
+        total_rows = sum(len(r) for r in data_rows)
+        if _is_comparative_question(query) and len(single_value) < 2 and total_rows < 2:
+            return ReflectionVerdict(False, "对比型问题仅获得一组数据，对比维度不完整")
+        return ReflectionVerdict(True, "轨迹完整，结果足以支撑回答")
+
+
+class LLMReflector(Reflector):
+    """LLM 充分性反思：审计轨迹缺口（数据完整性/对比完整性/答非所问），
+    判不充分时可给出一次追加工具调用（经注册表校验，非法即丢弃只留痕）。
+    """
+
+    def __init__(
+        self,
+        client: OpenAICompatClient,
+        registry: ToolRegistry | None = None,
+        max_retries: int = 1,
+    ):
+        self.client = client
+        self.registry = registry  # 注入后追加调用才可能产出（未注入只判定不追加）
+        self.max_retries = max_retries
+
+    def reflect(
+        self,
+        query: str,
+        principal: str | None,
+        registry: ToolRegistry,
+        *,
+        steps: list[ToolInvocationRecord],
+        outputs: list[ToolResult],
+        remaining_steps: int,
+    ) -> ReflectionVerdict:
+        trajectory = json.dumps(LLMPlanner._trajectory_view(steps, outputs), ensure_ascii=False)
+        tools_json = json.dumps(registry.tool_definitions(), ensure_ascii=False)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是数据分析 Agent 的反思器。请审计以下工具执行轨迹，判断"
+                    "结果是否足以回答用户问题（数据完整性 / 对比完整性 / 答非所问）。\n"
+                    "可用的工具清单（OpenAI Function Calling 规范）：\n"
+                    + tools_json
+                    + "\n已执行轨迹（含结果摘要）：\n"
+                    + trajectory
+                    + "\n剩余可用步数："
+                    + str(remaining_steps)
+                    + "（追加调用必须在预算内）。\n"
+                    "输出要求：只输出一个 JSON 对象，二选一：\n"
+                    '{ "sufficient": true, "reason": "判定理由" }\n'
+                    '{ "sufficient": false, "reason": "缺口说明", "tool": "<工具名>", "args": {...} }\n'
+                    "判定充分时禁止携带 tool 字段；禁止输出解释或多余文字。"
+                ),
+            },
+            {"role": "user", "content": f"问题：{query}"},
+        ]
+        last_error: Exception | None = None
+        for _ in range(self.max_retries + 1):
+            raw = self.client.chat(messages)
+            try:
+                obj = extract_json(raw)
+                sufficient = bool(obj.get("sufficient"))
+                reason = str(obj.get("reason", ""))
+                if sufficient:
+                    return ReflectionVerdict(True, reason)
+                follow_up: ToolCall | None = None
+                name = str(obj.get("tool", ""))
+                if name and self.registry is not None:
+                    args = obj.get("args") or {}
+                    tool = self.registry.get_tool(name)  # 未注册 -> UnknownToolError
+                    tool.validate_args(args)  # 非法参数 -> ValidationError
+                    follow_up = ToolCall(name, dict(args), reason="LLM 反思追加")
+                return ReflectionVerdict(False, reason, follow_up=follow_up)
+            except Exception as exc:
+                last_error = exc
+                messages = [
+                    *messages[:2],
+                    {"role": "assistant", "content": raw},
+                    {
+                        "role": "user",
+                        "content": f"你上次的输出无效：{str(exc)[:400]}\n请重新输出合法 JSON。",
+                    },
+                ]
+        raise PipelineError(
+            f"LLM 反思器重试 {self.max_retries} 次后仍无法产出合法判定: {last_error}"
+        ) from last_error
+
+
+# --------------------------------------------------------------------------- #
 # Agent 调度循环
 # --------------------------------------------------------------------------- #
 class ToolAgent:
@@ -808,6 +979,7 @@ class ToolAgent:
         planner: Planner | None = None,
         synthesizer: Synthesizer | None = None,
         max_steps: int = 5,
+        reflector: Reflector | None = None,
     ) -> None:
         self.registry = registry or default_registry()
         self.planner = planner or DeterministicPlanner()
@@ -815,6 +987,8 @@ class ToolAgent:
         if not 3 <= max_steps <= 5:
             raise ValueError("max_steps 必须在 3~5 之间（受控调度，杜绝无限循环）")
         self.max_steps = max_steps
+        # R3 反思层：None 表示关闭（默认工厂按 AGENT_REFLECTION_ENABLED 装配）
+        self.reflector = reflector
         self._history: Any = None
         self._last_dsl: Any = None
 
@@ -938,6 +1112,61 @@ class ToolAgent:
                 )
                 if stopped:
                     break
+
+        # R3 反思层：调度终止后自检结果充分性。仅在预算有余时触发（预算耗尽
+        # 说明已全力调度）；重规划已作答时跳过（规划器已做过充分性判断）。
+        # 追加查询受同一硬预算约束：全程工具执行总数仍 <= max_steps。
+        if (
+            self.reflector is not None
+            and result.steps
+            and replan_answer is None
+            and len(result.steps) < self.max_steps
+        ):
+            verdict: ReflectionVerdict | None = None
+            try:
+                verdict = self.reflector.reflect(
+                    query,
+                    principal,
+                    self.registry,
+                    steps=result.steps,
+                    outputs=outputs,
+                    remaining_steps=self.max_steps - len(result.steps),
+                )
+            except Exception as exc:
+                # 反思器自身失效不阻塞已有结果作答：记录告警，无留痕即视为未反思
+                logger.warning(
+                    "reflect_failed",
+                    extra={
+                        "event": "reflect_failed",
+                        "error": f"{type(exc).__name__}: {exc}"[:300],
+                    },
+                )
+            if verdict is not None:
+                result.reflection = {"sufficient": verdict.sufficient, "reason": verdict.reason}
+                if (
+                    not verdict.sufficient
+                    and verdict.follow_up is not None
+                    and len(result.steps) < self.max_steps
+                ):
+                    rec3, res3 = self._execute_once(
+                        verdict.follow_up,
+                        query,
+                        principal,
+                        conn,
+                        executor,
+                        rewriter,
+                        request_id,
+                        len(result.steps) + 1,
+                        outputs,
+                        base_dsl,
+                    )
+                    outputs.append(res3)
+                    result.steps.append(rec3)
+                    result.reflection["follow_up"] = {
+                        "tool": verdict.follow_up.tool,
+                        "args": verdict.follow_up.args,
+                        "success": rec3.success,
+                    }
 
         if replan_answer is not None:
             # 预置规划器洞察：合成器据此跳过重复 LLM 调用，仅回填数据字段
@@ -1144,7 +1373,9 @@ _agent_lock = threading.Lock()
 def default_tool_agent() -> ToolAgent:
     """进程内复用的默认 ToolAgent（LLM 已配置 -> LLM 规划 + 总结；否则确定性）。
 
-    双检锁保护并发首调（就绪度评审 P3 卫生项处置：原工厂无锁且 _agent_lock
+    反思层（R3）：AGENT_REFLECTION_ENABLED 开启时装配——LLM 模式用 LLMReflector
+    （判不充分可追加一次受控查询），确定性模式用 DeterministicReflector（只判定
+    留痕）。双检锁保护并发首调（就绪度评审 P3 卫生项处置：原工厂无锁且 _agent_lock
     为死变量，并发首调可能重复构造）。
     """
     global _default_agent
@@ -1152,6 +1383,7 @@ def default_tool_agent() -> ToolAgent:
         with _agent_lock:
             if _default_agent is None:
                 registry = default_registry()
+                reflector: Reflector | None = None
                 if settings.LLM_API_KEY:
                     client = OpenAICompatClient(
                         base_url=settings.LLM_BASE_URL,
@@ -1164,14 +1396,21 @@ def default_tool_agent() -> ToolAgent:
                         client, registry=registry, max_retries=settings.LLM_MAX_RETRIES
                     )
                     synthesizer = LLMSynthesizer(client)
+                    if settings.AGENT_REFLECTION_ENABLED:
+                        reflector = LLMReflector(
+                            client, registry=registry, max_retries=settings.LLM_MAX_RETRIES
+                        )
                 else:
                     planner = DeterministicPlanner()
                     synthesizer = DeterministicSynthesizer()
+                    if settings.AGENT_REFLECTION_ENABLED:
+                        reflector = DeterministicReflector()
                 _default_agent = ToolAgent(
                     registry=registry,
                     planner=planner,
                     synthesizer=synthesizer,
                     max_steps=int(getattr(settings, "MAX_AGENT_STEPS", 5)),
+                    reflector=reflector,
                 )
     return _default_agent
 
@@ -1185,16 +1424,20 @@ def set_default_tool_agent(agent: ToolAgent | None) -> None:
 __all__ = [
     "AgentResult",
     "DeterministicPlanner",
+    "DeterministicReflector",
     "DeterministicSynthesizer",
     "LLMPlanner",
+    "LLMReflector",
     "LLMSynthesizer",
     "PlanResult",
     "Planner",
+    "ReflectionVerdict",
+    "Reflector",
     "Synthesizer",
     "ToolAgent",
     "ToolCall",
     "ToolInvocationRecord",
-    "default_tool_agent",
     "decompose_comparison",
+    "default_tool_agent",
     "set_default_tool_agent",
 ]

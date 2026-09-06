@@ -15,14 +15,18 @@ import pytest
 
 from agent.tool_agent import (
     DeterministicPlanner,
+    DeterministicReflector,
     LLMPlanner,
+    LLMReflector,
     LLMSynthesizer,
     PlanResult,
     ToolAgent,
     ToolCall,
+    ToolInvocationRecord,
+    decompose_comparison,
 )
 from tools.base import DisplayType, ToolContext, ToolResult
-from tools.registry import ToolRegistry
+from tools.registry import ToolRegistry, default_registry
 
 
 # --------------------------------------------------------------------------- #
@@ -542,7 +546,6 @@ def test_deterministic_planner_skips_replan_loop(conn):
 # --------------------------------------------------------------------------- #
 def test_decompose_comparison_regions():
     """对比分解：『A 和 B 哪个更 X』-> 两个保留时间窗口的单实体子查询。"""
-    from agent.tool_agent import decompose_comparison
 
     pairs = decompose_comparison("上个月华南和华北哪个GMV更高")
     assert pairs is not None
@@ -552,7 +555,6 @@ def test_decompose_comparison_regions():
 
 def test_decompose_comparison_negative_cases():
     """非对比 / 无双实体的问题不分解（保持整问单查，绝不冒险猜测）。"""
-    from agent.tool_agent import decompose_comparison
 
     assert decompose_comparison("查看上个月的销售总额") is None  # 非对比型
     assert decompose_comparison("上个月哪个品类GMV最高") is None  # 有触发词但无双实体
@@ -588,7 +590,6 @@ def test_comparison_synthesis_skipped_for_non_comparison(conn):
 
 def test_llm_planner_plan_prompt_carries_decomposition_guidance():
     """用 RecordingLLM 断言首轮规划提示含对比分解指引。"""
-    from tools.registry import default_registry
 
     llm = RecordingLLM([json.dumps({"done": "无需工具"})])
     planner = LLMPlanner(llm, max_retries=1)
@@ -596,3 +597,211 @@ def test_llm_planner_plan_prompt_carries_decomposition_guidance():
     system = llm.seen_messages[0][0]["content"]
     assert "对比类问题" in system
     assert "分别查询每个对比对象" in system
+
+
+# --------------------------------------------------------------------------- #
+# R3 反思层：调度终止后的结果充分性自检
+# --------------------------------------------------------------------------- #
+def test_deterministic_reflector_rules():
+    """确定性反思三规则：失败步 / 全空结果 / 对比数据不足 -> 判不充分。"""
+
+    reflector = DeterministicReflector()
+    ok_step = ToolInvocationRecord(step=1, tool="query_metric", args={}, success=True)
+    ok_out = ToolResult(success=True, data={"rows": [[100.0]]})
+    # 成功轨迹 -> 充分
+    verdict = reflector.reflect(
+        "上个月GMV", None, None, steps=[ok_step], outputs=[ok_out], remaining_steps=4
+    )
+    assert verdict.sufficient is True
+    assert verdict.follow_up is None
+    # 失败步骤 -> 不充分
+    bad_step = ToolInvocationRecord(
+        step=1, tool="query_metric", args={}, success=False, error_type="PipelineError"
+    )
+    verdict = reflector.reflect(
+        "上个月GMV",
+        None,
+        None,
+        steps=[bad_step],
+        outputs=[ToolResult(success=False)],
+        remaining_steps=4,
+    )
+    assert verdict.sufficient is False and "失败" in verdict.reason
+    # 对比型问题只有一组单值数据 -> 不充分
+    verdict = reflector.reflect(
+        "华南和华北哪个更高", None, None, steps=[ok_step], outputs=[ok_out], remaining_steps=4
+    )
+    assert verdict.sufficient is False and "对比" in verdict.reason
+
+
+def test_reflection_empty_rows_annotated(conn):
+    """空结果查询 -> 确定性反思判不充分并留痕（不阻塞作答）。"""
+
+    agent = ToolAgent(max_steps=5, reflector=DeterministicReflector())
+    result = agent.run("2099年GMV是多少", conn=conn)
+    assert result.error is None
+    assert result.reflection is not None
+    assert result.reflection["sufficient"] is False
+    assert "空" in result.reflection["reason"]
+
+
+def test_reflection_comparison_incomplete_annotated(conn):
+    """对比型问题仅获一组数据（分解未触发）-> 反思留痕对比维度不完整。"""
+
+    agent = ToolAgent(max_steps=5, reflector=DeterministicReflector())
+    result = agent.run("上个月华南GMV更高吗", conn=conn)
+    assert result.error is None
+    assert result.reflection is not None
+    assert result.reflection["sufficient"] is False
+    assert "对比" in result.reflection["reason"]
+
+
+def test_llm_reflector_follow_up_executed(conn):
+    """LLM 反思判不充分并给出合法追加调用 -> 执行追加步并完整留痕。"""
+
+    planner_llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
+            json.dumps({"done": "信息已充分"}),
+        ]
+    )
+    reflect_llm = FakeLLM(
+        [
+            json.dumps(
+                {
+                    "sufficient": False,
+                    "reason": "缺少华北数据",
+                    "tool": "query_metric",
+                    "args": {"query": "上个月华北GMV"},
+                }
+            )
+        ]
+    )
+    agent = ToolAgent(
+        registry=default_registry(),
+        planner=LLMPlanner(planner_llm, max_retries=1),
+        reflector=LLMReflector(reflect_llm, registry=default_registry()),
+        max_steps=5,
+    )
+    result = agent.run("上个月GMV是多少", conn=conn)
+    assert result.error is None
+    assert result.step_tools() == ["query_metric", "query_metric"]
+    assert result.reflection == {
+        "sufficient": False,
+        "reason": "缺少华北数据",
+        "follow_up": {
+            "tool": "query_metric",
+            "args": {"query": "上个月华北GMV"},
+            "success": True,
+        },
+    }
+
+
+def test_llm_reflector_sufficient_no_extra_step(conn):
+    """LLM 反思判定充分 -> 不追加任何调用，仅留痕。"""
+
+    planner_llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
+            json.dumps({"done": "信息已充分"}),
+        ]
+    )
+    reflect_llm = FakeLLM([json.dumps({"sufficient": True, "reason": "数据完整"})])
+    agent = ToolAgent(
+        registry=default_registry(),
+        planner=LLMPlanner(planner_llm, max_retries=1),
+        reflector=LLMReflector(reflect_llm, registry=default_registry()),
+        max_steps=5,
+    )
+    result = agent.run("上个月GMV是多少", conn=conn)
+    assert result.error is None
+    assert result.step_tools() == ["query_metric"]
+    assert result.reflection == {"sufficient": True, "reason": "数据完整"}
+
+
+def test_llm_reflector_invalid_follow_up_dropped(conn):
+    """反思器给出未注册工具 -> 校验拦截 -> 重试耗尽 -> 优雅终止（无留痕）。"""
+
+    planner_llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
+            json.dumps({"done": "信息已充分"}),
+        ]
+    )
+    reflect_llm = FakeLLM(
+        [json.dumps({"sufficient": False, "reason": "想删表", "tool": "drop_table", "args": {}})]
+    )
+    agent = ToolAgent(
+        registry=default_registry(),
+        planner=LLMPlanner(planner_llm, max_retries=1),
+        reflector=LLMReflector(reflect_llm, registry=default_registry(), max_retries=0),
+        max_steps=5,
+    )
+    result = agent.run("上个月GMV是多少", conn=conn)
+    assert result.error is None  # 反思失效不阻塞作答
+    assert result.step_tools() == ["query_metric"]
+    assert result.reflection is None
+
+
+def test_reflection_skipped_when_budget_exhausted(conn):
+    """预算耗尽（steps == max_steps）-> 不触发反思（无预算即无追加空间）。"""
+    spy = {"n": 0}
+
+    class ManyCallsPlanner(DeterministicPlanner):
+        def plan(self, query, principal, registry, **kwargs):
+            return PlanResult(calls=[ToolCall("query_metric", {"query": query})] * 5)
+
+    class SpyReflector(DeterministicReflector):
+        def reflect(self, *args, **kwargs):
+            spy["n"] += 1
+            return super().reflect(*args, **kwargs)
+
+    agent = ToolAgent(planner=ManyCallsPlanner(), reflector=SpyReflector(), max_steps=5)
+    result = agent.run("本月GMV", conn=conn)
+    assert len(result.steps) == 5
+    assert spy["n"] == 0
+    assert result.reflection is None
+
+
+def test_reflection_skipped_when_replan_answered(conn):
+    """重规划已基于轨迹作答 -> 规划器已做充分性判断，反思跳过。"""
+    llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月华南GMV"}}),
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月华北GMV"}}),
+            json.dumps({"answer": "华北GMV更高"}),
+        ]
+    )
+    spy = {"n": 0}
+
+    class SpyReflector(DeterministicReflector):
+        def reflect(self, *args, **kwargs):
+            spy["n"] += 1
+            return super().reflect(*args, **kwargs)
+
+    agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), reflector=SpyReflector(), max_steps=5)
+    result = agent.run("上个月华南和华北哪个GMV更高", conn=conn)
+    assert result.error is None
+    assert result.answer == "华北GMV更高"
+    assert spy["n"] == 0
+    assert result.reflection is None
+
+
+def test_default_tool_agent_wires_reflector(monkeypatch):
+    """工厂装配契约：开关开启时按 LLM 可用性装配反思器，关闭时不装配。"""
+    from agent import tool_agent as ta
+    from config import settings
+
+    ta.set_default_tool_agent(None)
+    try:
+        monkeypatch.setattr(settings, "AGENT_REFLECTION_ENABLED", True)
+        monkeypatch.setattr(settings, "LLM_API_KEY", "")  # 离线：确定性反思器
+        agent = ta.default_tool_agent()
+        assert isinstance(agent.reflector, ta.DeterministicReflector)
+
+        ta.set_default_tool_agent(None)
+        monkeypatch.setattr(settings, "AGENT_REFLECTION_ENABLED", False)
+        agent = ta.default_tool_agent()
+        assert agent.reflector is None
+    finally:
+        ta.set_default_tool_agent(None)

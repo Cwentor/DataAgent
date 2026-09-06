@@ -428,6 +428,8 @@ def run_query(
             result["mode"] = "degraded" if agent_result.degraded else "normal"
             result["rewrites"] = agent_result.rewrites
             result["scan_rows"] = agent_result.scan_rows
+            # R3 反思层留痕透传（None = 未启用/未触发；前端可忽略）
+            result["reflection"] = agent_result.reflection
 
             # R4 处置：LLM 规划器判定的 clarify 与路由层 CLARIFY 分支同权——
             # 反问写入槽位回填上下文（用户短语回答可结构化合并回原问题），

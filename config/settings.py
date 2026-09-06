@@ -85,6 +85,9 @@ ASYNC_TASK_TTL_SECONDS: float = float(os.getenv("ASYNC_TASK_TTL_SECONDS", "3600"
 
 # Multi-Tool Agent 调度上限（Max Steps：3~5 步，杜绝无限工具循环）
 MAX_AGENT_STEPS: int = int(os.getenv("MAX_AGENT_STEPS", "5"))
+# R3 反思层总开关：调度终止后自检结果充分性（确定性判定零成本；
+# LLM 反思在预算有余时可追加一次受控查询，工具执行总数仍 <= MAX_AGENT_STEPS）
+AGENT_REFLECTION_ENABLED: bool = os.getenv("AGENT_REFLECTION_ENABLED", "1") == "1"
 
 # --------------------------------------------------------------------------- #
 # 意图路由与决策中心（Intent Router & Decision Engine）—— 见 agent/router/
