@@ -47,7 +47,7 @@
    - 时间主轴硬编码 `f.order_time`（`compiler/sql_compiler.py:227-232`），退款时间序列分析（"近30天每日退款金额"）无法通过 time_filter 表达。
 2. **`RatioMetric` 无除零防护**：编译为 `(num)/(den)` 裸除法（`compiler/sql_compiler.py:267-270`），分母为 0 时输出 inf/NaN 而非 NULL——对比指标都做了 `NULLIF(prev, 0)`（`compiler/sql_compiler.py:429`），口径防御不一致。
 3. **多轮继承覆盖面窄**：`_expand_dimension` 仅识别品类/品牌（`agent/memory.py:284-291`）；`_apply_deltas` 仅处理省份/大区/品类/时间四类增量（`agent/memory.py:330-357`），无通用"维度替换/指标切换"算子；且全部依赖中文关键词硬编码，未从语义目录派生。
-4. **启发式解析器词汇表与数仓硬绑定**：`PROVINCES/CATEGORIES` 为代码常量（`agent/heuristic.py:30-41`），`catalog_loader` 已实现数据驱动目录（`semantic/catalog_loader.py:200-255`）但启发式层不消费——新增字段后 LLM 路径可用、离线路径失明。
+4. **启发式解析器词汇表与数仓硬绑定**：`PROVINCES/CATEGORIES` 为代码常量（`agent/heuristic.py:30-41`），`catalog_loader` 已实现数据驱动目录（`semantic/catalog_loader.py:200-255`）但启发式层不消费——新增字段后 LLM 路径可用、离线路径失明。**（✅ 2026-09-06 已实施数据驱动化：`semantic/catalog.py` 新增 `DIMENSION_MEMBERS` 词汇表，`catalog_loader` 从数仓 dim 表 distinct 值随 `refresh_catalog` 重建；`heuristic`/`memory`/`intent_router` 三处消费点全部改为动态读取，大区展开与数仓省份取交集——commit `f5512c4`、`46f5700`）**
 5. **单机态存储三件套**：会话记忆（`agent/memory.py:107-131` 进程内 OrderedDict）、登录限流（`auth/ratelimit.py` 进程内）、澄清槽位（`agent/slotfill.py:46-77`）均无跨进程共享，水平扩展即失效；审计虽有跨进程文件锁（`audit/store.py:58-80`）但多 worker 下 DuckDB 单写文件仍是瓶颈。
 6. **EXPLAIN ANALYZE 预检成本翻倍**：扫描行熔断以"先真实执行一遍"为代价（`exec/guards.py:12-17` 自述），大查询延迟×2，且预检与正式执行之间无计划缓存。
 7. **评测维度缺口**：golden 仅 19 例（`eval/golden_dataset.json`），无多轮追问用例、无 RLS 越权用例、无澄清反问用例——这些恰是本项目最具特色的防线，却不在回归保护网内（渗透测试仅散落在 `scripts/_p0_1_pen.py`）。
