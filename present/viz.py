@@ -31,7 +31,7 @@ from semantic.dsl_schema import QueryDSL
 # 时间字段集合（可视化时序判定，与 dsl_schema.TIME_FIELDS 同源）
 TIME_DIM_FIELDS = {"order_time", "refund_time", "register_time"}
 
-# 图表类型 -> 数值指标别名别名标签（用于系列中文名）
+# pie 基数信号上限：类别基数超过该值时柱状图比饼图更可读
 _PIE_MAX_CATEGORIES = 8
 
 
@@ -59,6 +59,31 @@ def _numeric_share(
     return numeric / judged if judged else 1.0
 
 
+def _has_positive(
+    columns: tuple[str, ...] | list[str], rows: tuple[tuple, ...] | list[tuple], y_col: str | None
+) -> bool | None:
+    """y 列是否存在正数值（pie 正数信号）。
+
+    返回 None 表示无可判定单元格（y 列缺失 / 全部缺列 / 全部非数值）——
+    信号不足，不据此拦截（与 _numeric_share 的缺列跳过约定一致）。
+    """
+    if y_col is None or y_col not in columns:
+        return None
+    idx = list(columns).index(y_col)
+    saw_value = False
+    for r in rows:
+        if idx >= len(r):
+            continue
+        try:
+            value = float(r[idx])
+        except (TypeError, ValueError):
+            continue
+        saw_value = True
+        if value > 0:
+            return True
+    return False if saw_value else None
+
+
 def recommend_viz(
     dsl: QueryDSL,
     columns: tuple[str, ...] | list[str],
@@ -82,9 +107,10 @@ def recommend_viz(
     if any(d in TIME_DIM_FIELDS for d in dims):
         return "line"
 
-    # 单维度单指标 -> 柱状 / 饼图（基数信号：类别数 <= 8 且至少一条正数才 pie）
+    # 单维度单指标 -> 柱状 / 饼图（基数信号：类别数 <= 8；正数信号：y 列
+    # 存在正数值才 pie——占比语义在全负/零值上会误导，此时退回柱状图）
     if len(dims) == 1 and n_metrics == 1:
-        if n_rows <= _PIE_MAX_CATEGORIES:
+        if n_rows <= _PIE_MAX_CATEGORIES and _has_positive(columns, rows, y_col) is not False:
             return "pie"
         return "bar"
 

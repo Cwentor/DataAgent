@@ -267,3 +267,27 @@ def test_build_chart_spec_echarts_contract():
     assert payload["echarts"]["series"][0]["type"] == "pie"
     assert payload["columns"] == ["category", "gmv"]
     assert payload["rows"] == [["a", 1]]
+
+
+# --------------------------------------------------------------------------- #
+# pie 正数信号：占比语义在全负/零值上误导，退回柱状图（整改指令3-1 信号补全）
+# --------------------------------------------------------------------------- #
+def test_viz_bar_when_all_values_nonpositive():
+    """y 列可判定且全部非正 -> 拒绝 pie（退回 bar）。"""
+    dsl = _dsl(dimensions=[{"field": "category"}])
+    rows = tuple((f"c{i}", -10.0 - i) for i in range(5))
+    assert recommend_viz(dsl, ("category", "gmv"), rows) == "bar"
+
+
+def test_viz_pie_when_any_positive_value():
+    """存在正数值 -> pie 信号满足（即使夹杂负值）。"""
+    dsl = _dsl(dimensions=[{"field": "category"}])
+    rows = tuple((f"c{i}", -5.0 if i == 0 else 10.0 + i) for i in range(5))
+    assert recommend_viz(dsl, ("category", "gmv"), rows) == "pie"
+
+
+def test_viz_pie_without_y_signal_unaffected():
+    """无可判定 y 值（全部缺列）：信号不足不拦截，维持原 pie 行为。"""
+    dsl = _dsl(dimensions=[{"field": "category"}])
+    rows = tuple((f"c{i}",) for i in range(5))
+    assert recommend_viz(dsl, ("category", "gmv"), rows) == "pie"
