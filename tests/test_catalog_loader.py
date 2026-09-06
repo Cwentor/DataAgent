@@ -7,6 +7,7 @@ import json
 import pytest
 
 from compiler.sql_compiler import CompileError, compile_sql
+from config import settings
 from semantic import catalog
 from semantic.catalog_loader import (
     build_catalog,
@@ -128,3 +129,56 @@ def test_unknown_field_still_rejected_after_refresh(conn, tmp_path):
             compile_sql(dsl)
     finally:
         reset_defaults()
+
+
+# --------------------------------------------------------------------------- #
+# 维度成员词汇表数据驱动（审计 §3.2-4）：dim 表 distinct 值 -> DIMENSION_MEMBERS
+# --------------------------------------------------------------------------- #
+def test_dimension_members_loaded_from_warehouse(conn):
+    """build_catalog 从 dim 表 distinct 值加载维度成员，与库内数据一致。"""
+    cat = build_catalog(conn=conn)
+    members = cat.dimension_members
+    # 省份成员与库内 dim_user.province 完全一致（数据驱动，非内置默认引用）
+    db_provinces = [
+        str(r[0])
+        for r in conn.execute('SELECT DISTINCT "province" FROM "dim_user" ORDER BY 1').fetchall()
+    ]
+    assert members["province"] == tuple(db_provinces)
+    db_categories = [
+        str(r[0])
+        for r in conn.execute('SELECT DISTINCT "category" FROM "dim_product" ORDER BY 1').fetchall()
+    ]
+    assert members["category"] == tuple(db_categories)
+    # dim 表全部 str 字段均被覆盖（brand/gender 自动纳入，无需声明）
+    assert set(members) == {"province", "gender", "category", "brand"}
+
+
+def test_refresh_catalog_syncs_dimension_members_globals(conn):
+    """refresh_catalog 把成员词汇表安装到 semantic.catalog 全局，reset 恢复默认。"""
+    default_provinces = dict(catalog.DIMENSION_MEMBERS)["province"]
+    refresh_catalog(conn=conn)
+    try:
+        # mock 库与内置默认同源；库内成员经 ORDER BY 稳定排序，故按集合比较
+        assert set(catalog.DIMENSION_MEMBERS["province"]) == set(default_provinces)
+        # 库中新增省份后重新刷新 -> 词汇表跟随（新增成员离线路径不失明的核心断言）
+        conn.execute("INSERT INTO dim_user VALUES (99999, '西藏', 'M', '2023-01-01')")
+        refresh_catalog(conn=conn)
+        assert "西藏" in catalog.DIMENSION_MEMBERS["province"]
+    finally:
+        reset_defaults()
+        conn.execute("DELETE FROM dim_user WHERE user_id = 99999")
+
+
+def test_build_catalog_without_db_falls_back_to_defaults(tmp_path, monkeypatch):
+    """库不可用时回退内置默认词汇表（离线可运行），不报错。
+
+    隔离真实数仓文件（settings.DB_PATH 指向不存在的路径），确保走回退分支。
+    """
+    monkeypatch.setattr(settings, "DB_PATH", tmp_path / "missing.duckdb")
+    cat = build_catalog(db_path=tmp_path / "missing.duckdb")
+    assert set(cat.dimension_members["province"]) == {
+        "广东", "浙江", "江苏", "北京", "上海", "四川", "湖北", "山东",
+    }
+    assert set(cat.dimension_members["category"]) == {
+        "数码", "家电", "服饰", "美妆", "食品", "家居",
+    }

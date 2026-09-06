@@ -88,3 +88,22 @@ JOIN_RULES: dict[str, JoinRule] = {
 FACT_JOIN_RULES: dict[str, JoinRule] = {
     "fact_refunds": JoinRule("left", (("order_id", "order_id"),)),
 }
+
+# 维度成员词汇表（逻辑字段 -> 成员值）：启发式解析与多轮会话继承从问题文本
+# 抽取维度值用（审计 §3.2-4：原 heuristic.PROVINCES/CATEGORIES 硬编码常量数据化）。
+# 内置默认仅作"库不可用"时的离线回退；服务启动时由
+# catalog_loader.refresh_catalog() 从数仓 dim 表 distinct 值重建——
+# 新增省份/品类等维度成员只需改库，离线启发式路径不再失明。
+DIMENSION_MEMBERS: dict[str, tuple[str, ...]] = {
+    "province": ("广东", "浙江", "江苏", "北京", "上海", "四川", "湖北", "山东"),
+    "gender": ("M", "F"),
+    "category": ("数码", "家电", "服饰", "美妆", "食品", "家居"),
+    "brand": (
+        "华为", "小米", "苹果", "联想",
+        "美的", "格力", "海尔", "TCL",
+        "优衣库", "耐克", "阿迪达斯", "李宁",
+        "兰蔻", "雅诗兰黛", "欧莱雅", "自然堂",
+        "三只松鼠", "良品铺子", "蒙牛", "伊利",
+        "宜家", "顾家", "全友", "林氏木业",
+    ),
+}

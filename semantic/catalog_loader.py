@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,10 @@ _DEFAULT_FACT_TABLE = catalog.FACT_TABLE
 _DEFAULT_FACT_TABLES = tuple(catalog.FACT_TABLES)
 _DEFAULT_JOIN_RULES = dict(catalog.JOIN_RULES)
 _DEFAULT_FACT_JOIN_RULES = dict(catalog.FACT_JOIN_RULES)
+_DEFAULT_DIMENSION_MEMBERS = dict(catalog.DIMENSION_MEMBERS)
+
+# 维度成员词汇表：dim 表 str 字段 distinct 值加载上限（高基数异常表防御截断）
+_DIMENSION_MEMBER_CAP = 512
 
 # 默认覆写文件（项目根 config/ 下）
 DEFAULT_OVERLAY_PATH: Path = settings.PROJECT_ROOT / "config" / "semantic.json"
@@ -77,6 +81,7 @@ class Catalog:
     fact_tables: tuple[str, ...]
     join_rules: dict[str, JoinRule]
     fact_join_rules: dict[str, JoinRule]
+    dimension_members: dict[str, tuple[str, ...]]
 
 
 # --------------------------------------------------------------------------- #
@@ -101,6 +106,28 @@ def _physical_columns(conn: duckdb.DuckDBPyConnection) -> dict[str, dict[str, st
             continue
         out.setdefault(str(table), {})[str(column)] = _map_dtype(str(dtype))
     return out
+
+
+def _load_dimension_members(
+    conn: duckdb.DuckDBPyConnection, columns: dict[str, FieldMeta]
+) -> dict[str, tuple[str, ...]]:
+    """从数仓 dim 表读取 str 维度字段的 distinct 成员值（数据驱动词汇表）。
+
+    仅加载 dim_ 前缀维度表上的 str 字段（province/category/brand 等），
+    字段范围随目录声明自动扩展，新增维度字段无需改代码；表名/列名来自
+    目录白名单（非用户输入），每字段 distinct 值按 _DIMENSION_MEMBER_CAP
+    截断防御高基数异常表。
+    """
+    members: dict[str, tuple[str, ...]] = {}
+    for name, meta in columns.items():
+        if not meta.table.startswith("dim_") or meta.dtype != "str":
+            continue
+        rows = conn.execute(
+            f'SELECT DISTINCT "{meta.column}" FROM "{meta.table}" '
+            f"WHERE \"{meta.column}\" IS NOT NULL ORDER BY 1 LIMIT {_DIMENSION_MEMBER_CAP}"
+        ).fetchall()
+        members[name] = tuple(str(r[0]) for r in rows)
+    return members
 
 
 # --------------------------------------------------------------------------- #
@@ -174,7 +201,15 @@ def _build_from_overlay(
 
     join_rules = _rules(overlay.get("join_rules", {}))
     fact_join_rules = _rules(overlay.get("fact_join_rules", {}))
-    return Catalog(columns, aliases, fact_table, fact_tables, join_rules, fact_join_rules)
+    return Catalog(
+        columns,
+        aliases,
+        fact_table,
+        fact_tables,
+        join_rules,
+        fact_join_rules,
+        dimension_members=dict(_DEFAULT_DIMENSION_MEMBERS),
+    )
 
 
 def _build_defaults(physical: dict[str, dict[str, str]] | None) -> Catalog:
@@ -194,6 +229,7 @@ def _build_defaults(physical: dict[str, dict[str, str]] | None) -> Catalog:
         fact_tables=_DEFAULT_FACT_TABLES,
         join_rules=dict(_DEFAULT_JOIN_RULES),
         fact_join_rules=dict(_DEFAULT_FACT_JOIN_RULES),
+        dimension_members=dict(_DEFAULT_DIMENSION_MEMBERS),
     )
 
 
@@ -223,8 +259,16 @@ def build_catalog(
 
         overlay = _read_overlay(overlay_path)
         if overlay is not None:
-            return _build_from_overlay(overlay, physical)
-        return _build_defaults(physical)
+            cat = _build_from_overlay(overlay, physical)
+        else:
+            cat = _build_defaults(physical)
+
+        # 维度成员词汇表：库可用时从 dim 表 distinct 值加载（数据驱动），
+        # 不可用时保留内置默认回退（离线可运行）。
+        member_conn = conn if conn is not None else own_conn
+        if member_conn is not None:
+            return replace(cat, dimension_members=_load_dimension_members(member_conn, cat.columns))
+        return cat
     finally:
         if own_conn is not None:
             own_conn.close()
@@ -252,6 +296,8 @@ def refresh_catalog(
     catalog.FACT_JOIN_RULES.update(cat.fact_join_rules)
     catalog.FACT_TABLE = cat.fact_table
     catalog.FACT_TABLES = cat.fact_tables
+    catalog.DIMENSION_MEMBERS.clear()
+    catalog.DIMENSION_MEMBERS.update(cat.dimension_members)
     return cat
 
 
@@ -267,6 +313,8 @@ def reset_defaults() -> None:
     catalog.FACT_JOIN_RULES.update(_DEFAULT_FACT_JOIN_RULES)
     catalog.FACT_TABLE = _DEFAULT_FACT_TABLE
     catalog.FACT_TABLES = _DEFAULT_FACT_TABLES
+    catalog.DIMENSION_MEMBERS.clear()
+    catalog.DIMENSION_MEMBERS.update(_DEFAULT_DIMENSION_MEMBERS)
 
 
 def main() -> None:
@@ -290,6 +338,10 @@ def main() -> None:
         m = cat.columns[name]
         print(f"  - {name}: {m.table}.{m.column} ({m.dtype})")
     print(f"表别名: {cat.aliases}")
+    print(
+        f"维度成员词汇表: "
+        f"{ {k: len(v) for k, v in cat.dimension_members.items()} }"
+    )
     print(f"维度连接: { {t: (r.join_type, r.on) for t, r in cat.join_rules.items()} }")
     print(f"事实表连接: { {t: (r.join_type, r.on) for t, r in cat.fact_join_rules.items()} }")
 
