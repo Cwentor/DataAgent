@@ -64,6 +64,43 @@ def test_store_get_update_clear():
     assert store.get("s1", "alice") is None
 
 
+def test_store_update_rejects_cross_user_overwrite():
+    """就绪度评审 R5：同 session_id 被另一用户 update 时拒绝覆盖原用户状态。"""
+    store = SessionStore()
+    s_a = _make_state("s-x", "alice")
+    append_message(s_a, "user", "上个月华东的GMV")
+    store.update("s-x", "alice", s_a)
+
+    # bob 用同一 session_id update（模拟会话 id 抢占）
+    s_b = SessionState(session_id="s-x", user_id="bob")
+    returned = store.update("s-x", "bob", s_b)
+    # bob 的写入被拒绝：返回 alice 的现有状态，原状态保留
+    assert returned.user_id == "alice"
+    got = store.get("s-x", "alice")
+    assert got is not None
+    assert got.history and got.history[0].content == "上个月华东的GMV"
+    # bob 仍然读不到该会话（跨用户隔离语义不变）
+    assert store.get("s-x", "bob") is None
+
+
+def test_store_update_rejects_cross_user_overwrite_persisted(tmp_path):
+    """R5 持久层场景：内存 miss 时从 SQLite 校验归属，同样拒绝覆盖。"""
+    db = str(tmp_path / "mem-r5.db")
+    store1 = SessionStore(db_path=db)
+    s_a = _make_state("s-p", "alice")
+    append_message(s_a, "user", "按品类展开")
+    store1.update("s-p", "alice", s_a)
+
+    # 新实例（模拟重启后另一 worker）：内存为空，bob 的 update 走持久层归属校验
+    store2 = SessionStore(db_path=db)
+    s_b = SessionState(session_id="s-p", user_id="bob")
+    returned = store2.update("s-p", "bob", s_b)
+    assert returned.user_id == "alice"
+    restored = store2.get("s-p", "alice")
+    assert restored is not None
+    assert restored.history and restored.history[0].content == "按品类展开"
+
+
 # --------------------------------------------------------------------------- #
 # SessionStore 持久化（整改指令3-2）：db_path 落盘 SQLite，跨实例一致
 # --------------------------------------------------------------------------- #

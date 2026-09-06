@@ -195,9 +195,23 @@ class SessionStore:
             return state
 
     def update(self, session_id: str, user_id: str | None, state: SessionState) -> SessionState:
-        """写入（或覆盖）会话状态，滚动裁剪历史并维护 LRU 容量。"""
+        """写入（或覆盖）会话状态，滚动裁剪历史并维护 LRU 容量。
+
+        就绪度评审 R5 处置：同 session_id 已存在其他用户的会话（内存或持久
+        层）时拒绝覆盖——返回现有状态、本次写入丢弃，跨用户抢占不破坏原
+        用户状态，与 get/clear 的归属校验对齐。
+        """
+        owner = user_id or _ANONYMOUS
+        with self._lock:
+            existing = self._items.get(session_id)
+            if existing is None and self._kv is not None:
+                persisted = self._load(session_id)
+                if persisted is not None:
+                    existing = persisted
+            if existing is not None and existing.user_id != owner:
+                return existing  # 跨用户抢占：拒绝覆盖，保留原用户状态
         state.session_id = session_id
-        state.user_id = user_id or _ANONYMOUS
+        state.user_id = owner
         state.updated_at = datetime.now(UTC)
         # 滚动保留最近 N 轮（每轮 user + assistant 两条）
         max_msgs = self._history_turns * 2
