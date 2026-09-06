@@ -39,7 +39,6 @@ from agent.agent import extract_json
 from agent.clarify import detect_clarifications
 from agent.glossary import METRIC_TERMS
 from agent.heuristic import REGIONS, DeterministicNL2DSL, dimension_members
-from agent.intent import _CHITCHAT_PATTERNS, _RAG_PATTERNS
 from agent.llm import LLMError, OpenAICompatClient
 from audit.logging import get_logger
 from config import settings
@@ -152,6 +151,53 @@ _SYSTEM_ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
 _EXACT_SYSTEM_ACTIONS: dict[str, tuple[str, ...]] = {
     "exit": ("退出", "结束对话", "结束会话", "关闭会话", "退出系统"),
 }
+
+# 口径 / 定义类问题触发词（命中即走 RAG 检索）——路由关键词单一来源
+# （原定义于 agent/intent.py，双路由合并后统一由五分类路由器持有）
+_RAG_PATTERNS: tuple[str, ...] = (
+    "口径",
+    "怎么算",
+    "如何算",
+    "如何计算",
+    "怎么计算",
+    "计算方式",
+    "计算公式",
+    "是什么意思",
+    "什么意思",
+    "定义",
+    "怎么定义",
+    "如何定义",
+    "指标解释",
+    "解释一下",
+    "什么口径",
+)
+
+# 闲聊 / 寒暄 / 越界话题触发词（命中即拒绝）
+_CHITCHAT_PATTERNS: tuple[str, ...] = (
+    "你好",
+    "您好",
+    "早上好",
+    "晚上好",
+    "下午好",
+    "谢谢",
+    "再见",
+    "哈喽",
+    "嗨",
+    "天气",
+    "讲个笑话",
+    "笑话",
+    "今天星期几",
+    "现在几点",
+    "你是谁",
+    "你能做什么",
+    "你会什么",
+    "写首诗",
+    "唱首歌",
+    "帮我写",
+    "给我写",
+    "翻译",
+    "讲个故事",
+)
 
 # 极短打招呼词（整句精确匹配，纳秒级拦截；复合句由规则层 _CHITCHAT_PATTERNS 处理）
 _EXACT_CHITCHAT: frozenset[str] = frozenset(

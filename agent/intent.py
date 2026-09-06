@@ -1,16 +1,18 @@
-"""意图路由：显式三分类。
+"""意图路由：旧三分类（已废弃，双路由合并的过渡兼容层）。
 
-把用户输入分类为三种意图之一：
-- TEXT2SQL：数据分析查询，进入 NL -> DSL -> SQL 链路；
-- RAG：询问指标口径 / 定义 / 计算方法，进入口径文档检索；
-- CHITCHAT：与数据分析无关的闲聊 / 寒暄，直接礼貌拒绝。
+历史定位：显式三分类（TEXT2SQL / RAG / CHITCHAT），曾作为 LLM 之前的第一道闸门。
+双路由合并后，生产判定已统一由 agent.router.intent_router 的五分类判决中心承担，
+本模块仅保留 Intent 枚举与 classify_intent 以维持既有导入路径不变，
+classify_intent 已无生产调用方（仅测试引用）。
 
-分类为确定性规则（离线可运行、可单测），是 LLM 之前的第一道闸门。
+路由关键词（_RAG_PATTERNS / _CHITCHAT_PATTERNS）的单一来源已迁至五分类路由器。
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
+
+from agent.router.intent_router import _CHITCHAT_PATTERNS, _RAG_PATTERNS
 
 
 class Intent(StrEnum):
@@ -19,53 +21,6 @@ class Intent(StrEnum):
     CHITCHAT = "chitchat"
     DIRECT_ANSWER = "direct_answer"
     CLARIFY = "clarify"
-
-
-# 口径 / 定义类问题触发词（命中即走 RAG 检索）。
-_RAG_PATTERNS = (
-    "口径",
-    "怎么算",
-    "如何算",
-    "如何计算",
-    "怎么计算",
-    "计算方式",
-    "计算公式",
-    "是什么意思",
-    "什么意思",
-    "定义",
-    "怎么定义",
-    "如何定义",
-    "指标解释",
-    "解释一下",
-    "什么口径",
-)
-
-# 闲聊 / 寒暄 / 越界话题触发词（命中即拒绝）。
-_CHITCHAT_PATTERNS = (
-    "你好",
-    "您好",
-    "早上好",
-    "晚上好",
-    "下午好",
-    "谢谢",
-    "再见",
-    "哈喽",
-    "嗨",
-    "天气",
-    "讲个笑话",
-    "笑话",
-    "今天星期几",
-    "现在几点",
-    "你是谁",
-    "你能做什么",
-    "你会什么",
-    "写首诗",
-    "唱首歌",
-    "帮我写",
-    "给我写",
-    "翻译",
-    "讲个故事",
-)
 
 
 def classify_intent(query: str) -> Intent:
