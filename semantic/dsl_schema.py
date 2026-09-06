@@ -33,6 +33,8 @@ TIME_FIELDS: frozenset[str] = frozenset({"order_time", "refund_time", "register_
 # 时间相关枚举
 # --------------------------------------------------------------------------- #
 class Granularity(StrEnum):
+    """时间粒度枚举（Time granularity: day / week / month / quarter）。"""
+
     DAY = "day"
     WEEK = "week"
     MONTH = "month"
@@ -48,11 +50,15 @@ class Comparison(StrEnum):
 
 
 class TimeRangeType(StrEnum):
+    """时间跨度类型：relative 相对窗口 / absolute 绝对区间（Range type）。"""
+
     RELATIVE = "relative"
     ABSOLUTE = "absolute"
 
 
 class RelativeUnit(StrEnum):
+    """相对时间窗口的单位（Relative time unit）。"""
+
     DAY = "day"
     WEEK = "week"
     MONTH = "month"
@@ -75,6 +81,8 @@ class RelativeMode(StrEnum):
 
 
 class RelativeTime(BaseModel):
+    """相对时间窗口：相对锚点滚动 amount 个 unit，mode 决定滚动 / 自然周期 / 至今语义。"""
+
     model_config = ConfigDict(extra="forbid")
 
     amount: int = Field(gt=0, description="时间跨度数值，必须为正整数")
@@ -83,6 +91,8 @@ class RelativeTime(BaseModel):
 
 
 class AbsoluteTime(BaseModel):
+    """绝对时间区间 [start, end)，start 必须严格早于 end（Absolute date range）。"""
+
     model_config = ConfigDict(extra="forbid")
 
     start: date
@@ -96,6 +106,8 @@ class AbsoluteTime(BaseModel):
 
 
 class TimeFilter(BaseModel):
+    """时间过滤契约：粒度 + 相对/绝对窗口 + 同比环比标记 + 白名单时间主轴（time_field）。"""
+
     model_config = ConfigDict(extra="forbid")
 
     granularity: Granularity = Granularity.DAY
@@ -141,6 +153,8 @@ class TimeFilter(BaseModel):
 # 指标相关
 # --------------------------------------------------------------------------- #
 class AggFunc(StrEnum):
+    """受限聚合函数白名单（Allowed aggregation functions）。"""
+
     SUM = "sum"
     COUNT = "count"
     COUNT_DISTINCT = "count_distinct"
@@ -150,6 +164,8 @@ class AggFunc(StrEnum):
 
 
 class AggregateMetric(BaseModel):
+    """聚合指标：对逻辑字段做单一聚合，alias 为输出列名（must match IDENTIFIER_PATTERN）。"""
+
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["aggregate"] = "aggregate"
@@ -207,6 +223,8 @@ Metric = Annotated[AggregateMetric | RatioMetric | WindowMetric, Field(discrimin
 
 
 class Dimension(BaseModel):
+    """分组维度：逻辑字段名 + 可选输出别名（Group-by dimension）。"""
+
     model_config = ConfigDict(extra="forbid")
 
     field: str = Field(min_length=1)
@@ -217,6 +235,8 @@ class Dimension(BaseModel):
 # 过滤 / 排序
 # --------------------------------------------------------------------------- #
 class FilterOperator(StrEnum):
+    """受限过滤操作符白名单（Allowed filter operators）。"""
+
     EQ = "eq"
     NE = "ne"
     IN = "in"
@@ -231,6 +251,8 @@ FilterValue = str | int | float | bool | list[str | int | float | bool]
 
 
 class Filter(BaseModel):
+    """标量 / 集合过滤条件：in 要求非空列表，between 恰好两个元素 [low, high]。"""
+
     model_config = ConfigDict(extra="forbid")
 
     field: str = Field(min_length=1)
@@ -251,11 +273,15 @@ class Filter(BaseModel):
 
 
 class SortDirection(StrEnum):
+    """排序方向枚举（Sort direction）。"""
+
     ASC = "asc"
     DESC = "desc"
 
 
 class OrderBy(BaseModel):
+    """排序子句：字段必须满足标识符白名单（Order-by clause）。"""
+
     model_config = ConfigDict(extra="forbid")
 
     field: str = Field(min_length=1, pattern=IDENTIFIER_PATTERN)
@@ -285,6 +311,8 @@ class TopN(BaseModel):
 # 顶层 DSL
 # --------------------------------------------------------------------------- #
 class QueryDSL(BaseModel):
+    """顶层 DSL 契约：Agent 产出的唯一合法查询结构（extra="forbid"，未知字段直接报错）。"""
+
     model_config = ConfigDict(extra="forbid")
 
     metrics: list[Metric] = Field(min_length=1)

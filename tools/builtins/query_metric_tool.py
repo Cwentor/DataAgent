@@ -27,6 +27,8 @@ class QueryMetricArgs(BaseModel):
 
 
 class QueryMetricTool(BaseTool):
+    """即时指标查询工具：点查与汇总类分析的受守卫查询入口（Instant metric query tool）。"""
+
     name = "query_metric"
     description = (
         "查即时指标：承接点查与汇总类分析（如『2024年6月成功订单的GMV是多少？』"
@@ -38,6 +40,7 @@ class QueryMetricTool(BaseTool):
     args_schema = QueryMetricArgs
 
     def execute(self, validated_args: QueryMetricArgs, ctx: ToolContext) -> ToolResult:
+        """执行受守卫的即时指标查询，返回数据 + 可视化配置（Guarded point query）。"""
         result = run_guarded_query(
             validated_args.query,
             principal=ctx.principal,

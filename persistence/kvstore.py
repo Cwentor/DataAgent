@@ -36,6 +36,7 @@ class SqliteKVStore:
     """线程安全 SQLite 键值存储：key -> JSON 值，可选 TTL 惰性失效。"""
 
     def __init__(self, db_path: str | Path, table: str = "kv", busy_timeout_ms: int = 5000) -> None:
+        """打开 SQLite 连接并完成 WAL / busy_timeout 加固，按需建表。"""
         self._db_path = str(db_path)
         self._table = table
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -118,6 +119,7 @@ class SqliteKVStore:
                 pass
 
     def __len__(self) -> int:
+        """表内键值条目总数（Number of stored keys）。"""
         with self._lock:
             row = self._conn.execute(f'SELECT count(*) FROM "{self._table}"').fetchone()
             return int(row[0]) if row else 0

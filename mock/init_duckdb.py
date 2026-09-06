@@ -174,6 +174,7 @@ def _write_metadata(conn: duckdb.DuckDBPyConnection) -> None:
 
 
 def main() -> None:
+    """幂等重建本地数仓：删除旧 DuckDB 文件后全量写入 mock 数据与元数据。"""
     db_path = Path(settings.DB_PATH)
     db_path.unlink(missing_ok=True)  # 幂等重建
     conn = duckdb.connect(str(db_path))

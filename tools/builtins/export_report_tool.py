@@ -59,6 +59,8 @@ class ExportReportArgs(BaseModel):
 
 
 class ExportReportTool(BaseTool):
+    """报表导出工具：CSV / Markdown / JSON 下载与脱敏（Report export tool）。"""
+
     name = "export_report"
     description = (
         "导出报表/数据下钻：把查询结果导出为 CSV（Excel 兼容）/ Markdown / JSON "
@@ -70,6 +72,7 @@ class ExportReportTool(BaseTool):
 
     def execute(self, validated_args: ExportReportArgs, ctx: ToolContext) -> ToolResult:
         # 1) 取数据：优先复用前置查询输出，否则独立执行受控查询
+        """取数（复用前置查询或独立执行）后导出 CSV / Markdown / JSON 并返回下载链接。"""
         prior = ctx.prior
         if prior is not None and prior.success and isinstance(prior.data, dict):
             columns = list(prior.data.get("columns") or [])

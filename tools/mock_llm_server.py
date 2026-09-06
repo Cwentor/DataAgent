@@ -30,6 +30,8 @@ EXPECTED_DSL = {
 
 
 class Handler(BaseHTTPRequestHandler):
+    """本地 Mock LLM 服务：返回受控 DSL JSON（带围栏，验证解析兼容性）。"""
+
     def _reply(self, code: int, body: dict) -> None:
         data = json.dumps(body).encode("utf-8")
         self.send_response(code)
@@ -39,6 +41,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
+        """处理 /chat/completions：校验 Bearer 鉴权后返回固定受控 JSON。"""
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
         try:
@@ -72,6 +75,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def log_message(self, fmt, *args):
+        """结构化访问日志（Structured access logging）。"""
         status = str(args[1]) if len(args) > 1 else "-"
         size = str(args[2]) if len(args) > 2 else "-"
         _access_logger.info(

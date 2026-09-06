@@ -40,6 +40,7 @@ class AuthContext:
     session_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
+        """序列化身份上下文供业务层消费（roles 已排序，保证确定性输出）。"""
         return {
             "username": self.username,
             "principal": self.principal,

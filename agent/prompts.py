@@ -142,6 +142,7 @@ def build_system_prompt(principal: str | None = None) -> str:
 
 
 def build_messages(query: str, principal: str | None = None) -> list[dict[str, str]]:
+    """构造首轮对话消息：系统 Prompt（含字段白名单）+ 用户问题。"""
     return [
         {"role": "system", "content": build_system_prompt(principal)},
         {"role": "user", "content": f"问题：{query}\n请仅输出符合上述结构的 JSON。"},

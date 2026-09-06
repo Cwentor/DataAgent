@@ -68,6 +68,7 @@ class ToolResult:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """序列化工具结果（Serialize the tool result for audit & output）。"""
         return {
             "success": self.success,
             "data": self.data,
@@ -178,6 +179,7 @@ class BaseTool(ABC):
         }
 
     def __repr__(self) -> str:  # pragma: no cover - 调试辅助
+        """调试用 repr（Debug representation）。"""
         return f"<{type(self).__name__} name={self.name!r}>"
 
 

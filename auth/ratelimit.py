@@ -17,11 +17,14 @@ class LoginRateLimitError(RuntimeError):
     """登录暂时被限流。"""
 
     def __init__(self, retry_after: int) -> None:
+        """携带重试等待秒数并生成用户可读消息（Carry retry-after seconds）。"""
         self.retry_after = retry_after
         super().__init__(f"登录失败次数过多，请 {retry_after} 秒后重试")
 
 
 class LoginRateLimiter:
+    """登录失败指数退避限流器：按 key 计数，超过阈值后进入指数退避封禁窗口。"""
+
     def __init__(
         self,
         max_failures: int = 5,
@@ -29,6 +32,7 @@ class LoginRateLimiter:
         max_seconds: float = 300.0,
         db_path: str | None = None,
     ) -> None:
+        """初始化限流参数；db_path 配置时失败计数经 SqliteKVStore 跨进程持久化。"""
         self.max_failures = max_failures
         self.base_seconds = base_seconds
         self.max_seconds = max_seconds
@@ -50,6 +54,7 @@ class LoginRateLimiter:
         return int(raw["failures"]), float(raw["last_failure"])
 
     def check(self, key: str) -> None:
+        """校验 key 是否处于封禁窗口，是则抛 LoginRateLimitError（含剩余等待秒数）。"""
         with self._lock:
             entry = self._failures.get(key) or self._load(key)
             if entry is None:
@@ -64,6 +69,7 @@ class LoginRateLimiter:
                 raise LoginRateLimitError(max(1, int(remaining + 0.999)))
 
     def record_failure(self, key: str) -> None:
+        """登记一次登录失败（Record a failed attempt，并落盘持久化）。"""
         with self._lock:
             failures, _ = self._failures.get(key, (0, 0.0)) or (0, 0.0)
             failures += 1
@@ -72,6 +78,7 @@ class LoginRateLimiter:
             self._persist(key, failures, now)
 
     def record_success(self, key: str) -> None:
+        """登录成功清零失败计数（Reset the failure counter on success）。"""
         with self._lock:
             self._failures.pop(key, None)
             if self._kv is not None:

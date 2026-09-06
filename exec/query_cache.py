@@ -53,6 +53,7 @@ class QueryCache:
     """线程安全的 LRU + TTL 查询结果缓存。"""
 
     def __init__(self, max_entries: int = 256, ttl_seconds: float = 300.0) -> None:
+        """初始化容量上限与 TTL（LRU eviction on overflow, lazy TTL expiry）。"""
         self._max_entries = max(1, int(max_entries))
         self._ttl = float(ttl_seconds)
         self._store: OrderedDict[str, tuple[float, tuple[list[str], list[list[Any]], int]]] = (
@@ -92,6 +93,7 @@ class QueryCache:
             return n
 
     def __len__(self) -> int:
+        """当前缓存条数（Current number of cached entries）。"""
         with self._lock:
             return len(self._store)
 

@@ -318,6 +318,7 @@ def reset_defaults() -> None:
 
 
 def main() -> None:
+    """命令行入口：从数仓反射校验 / 重建语义目录（支持 overlay 覆盖）。"""
     args = sys.argv[1:]
     db_path = None
     overlay_path = None

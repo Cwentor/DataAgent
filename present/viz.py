@@ -230,6 +230,7 @@ class ChartSpec:
     echarts: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, include_data: bool = True) -> dict[str, Any]:
+        """序列化图表指令；include_data=False 时仅输出类型 / 轴 / ECharts option。"""
         payload: dict[str, Any] = {
             "chart": self.chart,
             "x": self.x,

@@ -40,6 +40,7 @@ class ClarifyContext:
     created_at: float = field(default_factory=time.time)
 
     def expired(self, ttl_seconds: int | None = None) -> bool:
+        """槽位上下文是否超过 TTL（Whether the pending context has expired）。"""
         ttl = ttl_seconds if ttl_seconds is not None else settings.CLARIFY_SLOT_TTL
         return time.time() - self.created_at > ttl
 
@@ -56,6 +57,7 @@ class ClarifySlotStore:
     """
 
     def __init__(self, ttl_seconds: int | None = None, db_path: str | None = None) -> None:
+        """初始化 TTL 与进程内缓存；db_path 配置时经 SqliteKVStore 落盘。"""
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.CLARIFY_SLOT_TTL
         # 值为 (owner, ctx)：属主与上下文一并缓存/落盘，供归属校验
         self._items: dict[str, tuple[str | None, ClarifyContext]] = {}
@@ -63,6 +65,7 @@ class ClarifySlotStore:
         self._kv = SqliteKVStore(db_path, table="clarify_slots") if db_path else None
 
     def get(self, session_id: str, user_id: str | None = None) -> ClarifyContext | None:
+        """读取槽位上下文；过期或属主不符（fail-closed）一律视同不存在。"""
         with self._lock:
             entry = self._items.get(session_id)
             if entry is None and self._kv is not None:
@@ -92,6 +95,7 @@ class ClarifySlotStore:
             return ctx
 
     def set(self, session_id: str, ctx: ClarifyContext, user_id: str | None = None) -> None:
+        """登记槽位上下文与属主（Store the context with owner binding）。"""
         with self._lock:
             self._items[session_id] = (user_id, ctx)
             if self._kv is not None:

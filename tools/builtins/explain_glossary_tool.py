@@ -27,6 +27,8 @@ class ExplainGlossaryArgs(BaseModel):
 
 
 class ExplainGlossaryTool(BaseTool):
+    """口径与指标解释工具：只检索词典，不执行 SQL（Glossary explanation tool）。"""
+
     name = "explain_glossary"
     description = (
         "口径与指标解释：回答指标的定义、计算公式与同义词说明，如"
@@ -36,6 +38,7 @@ class ExplainGlossaryTool(BaseTool):
     args_schema = ExplainGlossaryArgs
 
     def execute(self, validated_args: ExplainGlossaryArgs, ctx: ToolContext) -> ToolResult:
+        """检索口径词典并组织 Markdown 解释（Glossary retrieval，不执行任何 SQL）。"""
         documents = retrieve(
             validated_args.query,
             top_k=validated_args.top_k,

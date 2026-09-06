@@ -17,6 +17,8 @@ class LLMError(RuntimeError):
 
 
 class OpenAICompatClient:
+    """OpenAI 兼容 Chat Completions 客户端（零 SDK 依赖，纯标准库实现）。"""
+
     def __init__(
         self,
         base_url: str,
@@ -25,6 +27,7 @@ class OpenAICompatClient:
         temperature: float = 0.0,
         timeout: int = 60,
     ) -> None:
+        """初始化连接参数（base_url / api_key / model / temperature / timeout）。"""
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model

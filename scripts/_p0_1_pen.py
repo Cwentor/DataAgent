@@ -1,3 +1,8 @@
+"""P0-1 渗透验证脚本：手工矩阵测试 assert_read_only_sql 对危险 SQL（表函数 /
+多语句 / 写操作）的拦截，并用裸 DuckDB 连接复现 read_csv 数据外泄风险
+（Manual pen-test matrix for the read-only SQL guard）。
+"""
+
 import os
 import tempfile
 

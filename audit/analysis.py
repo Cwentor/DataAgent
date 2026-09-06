@@ -174,6 +174,7 @@ def _render(report: dict[str, Any]) -> str:
 
 
 def main() -> None:
+    """命令行入口：只读审计库，输出意图分流漏斗分析报告（Read-only funnel analysis）。"""
     parser = argparse.ArgumentParser(description="审计意图分流漏斗分析（只读）")
     parser.add_argument(
         "--db", default=None, help="审计 DuckDB 文件路径（默认 settings.AUDIT_DB_PATH）"

@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 @dataclass(frozen=True)
 class Session:
+    """会话快照（不可变）：opaque session_id + 身份 + 起止时间（Immutable session snapshot）。"""
+
     session_id: str
     username: str
     principal: str
@@ -40,6 +42,7 @@ class Session:
 
     @property
     def expired(self) -> bool:
+        """会话是否已过期（Whether the session has expired）。"""
         return time.time() >= self.expires_at
 
 
@@ -51,11 +54,13 @@ class SessionStore:
     """
 
     def __init__(self, ttl_seconds: int | None = None) -> None:
+        """初始化进程内存储；ttl_seconds 缺省取 settings.AUTH_SESSION_TTL。"""
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.AUTH_SESSION_TTL
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
 
     def create(self, username: str, principal: str, ttl_seconds: int | None = None) -> Session:
+        """签发并登记一个新会话（Create and register a new session）。"""
         now = time.time()
         ttl = ttl_seconds if ttl_seconds is not None else self._ttl
         session = Session(
@@ -104,6 +109,7 @@ class SqliteSessionStore(SessionStore):
     """
 
     def __init__(self, db_path: str | Path, ttl_seconds: int | None = None) -> None:
+        """初始化 SQLite 存储：建表（WAL），TTL 缺省取全局配置。"""
         super().__init__(ttl_seconds)
         self._db_path = str(db_path)
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -113,6 +119,7 @@ class SqliteSessionStore(SessionStore):
         self._conn.commit()
 
     def create(self, username: str, principal: str, ttl_seconds: int | None = None) -> Session:
+        """签发并落盘新会话（Create and persist a new session）。"""
         now = time.time()
         ttl = ttl_seconds if ttl_seconds is not None else self._ttl
         session = Session(
@@ -138,6 +145,7 @@ class SqliteSessionStore(SessionStore):
         return session
 
     def get(self, session_id: str) -> Session | None:
+        """按 id 读取会话；不存在 / 过期返回 None（惰性清理过期行）。"""
         with self._lock:
             row = self._conn.execute(
                 "SELECT session_id, username, principal, created_at, expires_at "
@@ -154,12 +162,14 @@ class SqliteSessionStore(SessionStore):
             return session
 
     def revoke(self, session_id: str) -> bool:
+        """登出：删除会话行，返回是否确实存在（Revoke a session）。"""
         with self._lock:
             cur = self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
             self._conn.commit()
             return cur.rowcount > 0
 
     def prune(self) -> int:
+        """清理全部过期会话，返回清理条数（Prune expired sessions）。"""
         now = time.time()
         with self._lock:
             cur = self._conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
@@ -167,6 +177,7 @@ class SqliteSessionStore(SessionStore):
             return cur.rowcount
 
     def close(self) -> None:
+        """关闭底层 SQLite 连接（Close the underlying connection）。"""
         with self._lock:
             self._conn.close()
 

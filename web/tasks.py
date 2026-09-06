@@ -37,6 +37,7 @@ class TaskManager:
         max_history: int | None = None,
         ttl_seconds: float | None = None,
     ) -> None:
+        """初始化线程池与历史容量 / TTL（缺省取 settings）。"""
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers or settings.ASYNC_TASK_MAX_WORKERS,
             thread_name_prefix="async-task",

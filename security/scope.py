@@ -63,8 +63,10 @@ def scoped_field_listing(principal: str | None) -> str:
 
 
 def is_field_allowed(principal: str | None, field: str) -> bool:
+    """字段是否在主体白名单内（Field-level access check）。"""
     return field in scoped_fields(principal)
 
 
 def is_table_allowed(principal: str | None, table: str) -> bool:
+    """表是否在主体白名单内（Table-level access check）。"""
     return table in scoped_tables(principal)

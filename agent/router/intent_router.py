@@ -90,6 +90,7 @@ class RouteDecision:
     routing_latency_ms: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
+        """序列化判决结果供审计与 API 输出（Serialize the routing decision）。"""
         return {
             "intent": self.intent.value,
             "confidence": self.confidence,
@@ -366,6 +367,7 @@ class IntentRouter:
         llm: OpenAICompatClient | None = None,
         enable_llm: bool = True,
     ) -> None:
+        """初始化置信度阈值与 LLM 客户端（未配置 API Key 则纯规则路由）。"""
         self.min_confidence = (
             min_confidence if min_confidence is not None else settings.ROUTER_MIN_CONFIDENCE
         )

@@ -36,6 +36,7 @@ class JsonFormatter(logging.Formatter):
     """把 LogRecord 序列化为单行 JSON。"""
 
     def format(self, record: logging.LogRecord) -> str:
+        """序列化 LogRecord 为单行 JSON，附带 request_id / session / user 上下文。"""
         payload: dict[str, object] = {
             "ts": datetime.now(UTC).isoformat(),
             "level": record.levelname,
@@ -68,6 +69,7 @@ def set_request_context(
 
 
 def get_request_id() -> str:
+    """读取当前请求上下文中的 request_id（Current request ID）。"""
     return _request_id.get()
 
 
@@ -83,4 +85,5 @@ def setup_logging(level: int = logging.INFO) -> None:
 
 
 def get_logger(name: str) -> logging.Logger:
+    """按名获取 logger（Get a named logger）。"""
     return logging.getLogger(name)

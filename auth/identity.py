@@ -113,6 +113,7 @@ class IdentityStore:
     """服务端身份库：认证与 principal 映射的唯一事实来源。"""
 
     def __init__(self, users_file: Path | str | None = None) -> None:
+        """加载身份库：users_file 存在则读取 JSON，否则回退内置 DEFAULT_USERS。"""
         self._users: dict[str, User] = {}
         self._load(Path(users_file) if users_file else settings.AUTH_USERS_FILE)
 
@@ -134,9 +135,11 @@ class IdentityStore:
             )
 
     def get(self, username: str) -> User | None:
+        """按用户名查询用户；不存在返回 None（Lookup by username）。"""
         return self._users.get(username)
 
     def require_user(self, username: str) -> User:
+        """按用户名取用户；不存在或已停用抛 AuthenticationError（fail-closed）。"""
         user = self._users.get(username)
         if user is None:
             raise AuthenticationError(f"用户不存在: {username!r}")

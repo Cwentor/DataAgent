@@ -1,3 +1,8 @@
+"""P0-1 SQL 守卫矩阵验证：逐条断言危险 SQL（读文件表函数 / COPY / EXPORT /
+扩展加载 / 多语句等）被拒绝、合法 SELECT / CTE / 字面量分号被放行，并实测
+execute_sql 真实入口（Guard verification matrix）。
+"""
+
 import os
 import tempfile
 

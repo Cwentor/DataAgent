@@ -108,6 +108,7 @@ class AuditStore:
     """线程安全的审计写入器（JSONL + DuckDB 审计表）。"""
 
     def __init__(self, jsonl_path: Path | None = None, db_path: Path | None = None) -> None:
+        """初始化写入器：JSONL 与 DuckDB 路径均可选（None 表示关闭该通道）。"""
         self.jsonl_path = jsonl_path
         self.db_path = db_path
         self._lock = threading.Lock()
@@ -115,6 +116,7 @@ class AuditStore:
         self._schema_ready = False  # 每个进程只做一次迁移
 
     def write(self, record: AuditRecord) -> None:
+        """线程安全写入一条审计记录（JSONL 追加 + DuckDB 插入，通道按配置启用）。"""
         with self._lock:
             if self.jsonl_path is not None:
                 self._append_jsonl(record)
@@ -122,15 +124,18 @@ class AuditStore:
                 self._insert_db(record)
 
     def close(self) -> None:
+        """关闭 DuckDB 连接（幂等；JSONL 每次追加后即关闭句柄）。"""
         with self._lock:
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
 
     def __enter__(self) -> AuditStore:
+        """支持 with 上下文管理（Context-manager entry）。"""
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        """退出时关闭连接（Close the store on exit）。"""
         self.close()
 
     # ------------------------------------------------------------------ #

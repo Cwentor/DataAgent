@@ -25,6 +25,7 @@ class ReadOnlyConnectionPool:
     """固定容量的只读 DuckDB 连接池（线程安全）。"""
 
     def __init__(self, db_path: Path | str, max_connections: int = 4) -> None:
+        """初始化容量与待还队列；连接惰性创建（Lazy connection creation）。"""
         if max_connections < 1:
             raise ValueError("max_connections 必须 >= 1")
         self._db_path = str(db_path)
@@ -73,12 +74,15 @@ class ReadOnlyConnectionPool:
 
     @property
     def capacity(self) -> int:
+        """最大连接容量（Maximum pool capacity）。"""
         return self._max
 
     def __enter__(self) -> ReadOnlyConnectionPool:
+        """支持 with 上下文管理（Context-manager entry）。"""
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        """退出时关闭连接池（Close the pool on exit）。"""
         self.close()
 
 

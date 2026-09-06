@@ -16,11 +16,14 @@ from agent.glossary import METRIC_TERMS
 
 @dataclass(frozen=True)
 class Clarification:
+    """一次澄清反问：槽位类型 + 缺失术语 + 面向用户的问题文本。"""
+
     kind: str  # missing_time_window | undefined_metric
     term: str | None
     question: str
 
     def to_dict(self) -> dict[str, str | None]:
+        """序列化为 API 可传输的字典（Serialize to dict）。"""
         return {"kind": self.kind, "term": self.term, "question": self.question}
 
 

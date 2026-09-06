@@ -98,6 +98,7 @@ def reset_default_policies() -> None:
 
 
 def main() -> None:
+    """命令行入口：从 config/policies.json 构建策略并打印摘要（Build & preview policies）。"""
     policies, attrs = build_policies()
     print(f"策略 {len(policies)} 个、主体属性 {len(attrs)} 组：")
     for name, p in sorted(policies.items()):

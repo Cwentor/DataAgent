@@ -43,9 +43,11 @@ class ExportItem:
     @property
     def suffix(self) -> str:
         # 落盘文件不携带扩展名（uuid 裸名），扩展名取自用户可见文件名
+        """用户可见文件名的扩展名（Extension of the user-facing filename）。"""
         return Path(self.meta.get("filename", "export")).suffix
 
     def read_bytes(self) -> bytes:
+        """读取导出文件内容（Read the exported file bytes）。"""
         return self.path.read_bytes()
 
 
@@ -60,6 +62,7 @@ class ExportStore:
     """线程安全的导出文件存储。"""
 
     def __init__(self, root: Path | None = None, ttl_hours: int = 24) -> None:
+        """初始化导出根目录（默认审计目录下 exports/）并确保目录存在。"""
         self.root = root or (settings.AUDIT_DIR / "exports")
         self.ttl_hours = ttl_hours
         self.root.mkdir(parents=True, exist_ok=True)
@@ -134,9 +137,11 @@ class ExportStore:
         return ExportItem(export_id=export_id, path=path, meta=meta)
 
     def url_for(self, export_id: str) -> str:
+        """导出文件的下载路由（Download URL for an export）。"""
         return f"/api/export/{export_id}"
 
     def __len__(self) -> int:
+        """现存导出文件数（Current number of exports）。"""
         return len(list(self.root.glob("[0-9a-f]" * 32))) if self.root.exists() else 0
 
 

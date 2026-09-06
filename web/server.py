@@ -68,6 +68,8 @@ def _level_from_str(level: str) -> int:
 
 
 class Handler(BaseHTTPRequestHandler):
+    """HTTP 请求处理器：静态文件 + 受鉴权保护的 JSON API（stdlib-only HTTP server）。"""
+
     def _send_json(self, obj: dict, code: int = 200, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -125,6 +127,7 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ #
     def do_GET(self) -> None:
         # 每个请求入口注入结构化日志上下文（request_id 贯穿）
+        """GET 路由：健康检查 / 指标 / 审计 / 导出下载 / 静态前端文件。"""
         set_request_context(request_id=self.headers.get("X-Request-ID"))
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
@@ -143,6 +146,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_file(rel)
 
     def do_POST(self) -> None:
+        """POST 路由：登录 / 登出 / 问答 / 异步任务等受鉴权保护的 API。"""
         set_request_context(request_id=self.headers.get("X-Request-ID"))
         parsed = urlparse(self.path)
         if parsed.path == "/api/auth/login":
@@ -414,6 +418,7 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ #
     def log_message(self, fmt: str, *args: object) -> None:
         # 结构化访问日志（替代默认 stderr 文本；request_id 已在上下文中）
+        """以结构化 JSON 记录访问日志（Structured access logging）。"""
         status = str(args[1]) if len(args) > 1 else "-"
         size = str(args[2]) if len(args) > 2 else "-"
         _access_logger.info(
@@ -474,6 +479,7 @@ def _startup_security_issues(host: str) -> list[str]:
 
 
 def main() -> None:
+    """启动入口：安全预检 -> 建库 -> ThreadingHTTPServer 常驻服务。"""
     setup_logging(_level_from_str(settings.LOG_LEVEL))
     host = settings.WEB_HOST
     issues = _startup_security_issues(host)

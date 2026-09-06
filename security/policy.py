@@ -16,6 +16,8 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Policy:
+    """主体策略：允许表 / 禁止列 / RLS 行级过滤（默认拒绝：表白名单不可为空）。"""
+
     name: str
     allowed_tables: frozenset[str]
     forbidden_columns: frozenset[str] = frozenset()
@@ -23,6 +25,7 @@ class Policy:
     row_filters: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
+        """构造校验：allowed_tables 为空直接报错（Default-deny guard）。"""
         if not self.allowed_tables:
             raise ValueError("allowed_tables 不能为空（默认拒绝）")
 

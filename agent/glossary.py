@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class GlossaryDoc:
+    """口径文档：指标定义 / 计算公式 / 同义词 / 关联字段（Glossary entry）。"""
+
     key: str
     title: str
     aliases: tuple[str, ...]
@@ -20,6 +22,7 @@ class GlossaryDoc:
     fields: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
+        """序列化为检索结果字典（Serialize to a retrieval payload）。"""
         return {
             "key": self.key,
             "title": self.title,

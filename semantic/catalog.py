@@ -21,6 +21,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class FieldMeta:
+    """字段元数据：物理表 + 列名 + 类型（dtype 用于字面量安全转义）。"""
+
     table: str
     column: str
     dtype: str  # 用于字面量安全转义：str / int / float / bool / timestamp

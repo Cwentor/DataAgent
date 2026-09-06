@@ -18,6 +18,7 @@ class MetricsRegistry:
     """线程安全的进程内指标注册表。"""
 
     def __init__(self, latency_window: int = 1000) -> None:
+        """初始化计数器与延迟窗口（latency_window：分位数采样容量）。"""
         self._lock = threading.Lock()
         self._started_at = time.time()
         self._total = 0
@@ -51,6 +52,7 @@ class MetricsRegistry:
         clarify_filled: bool,
         circuit_breaker: str | None = None,
     ) -> None:
+        """打点一次问答：意图/动作分布、延迟、错误、降级、自愈与熔断事件。"""
         with self._lock:
             self._total += 1
             self._intent_counts[intent] += 1
@@ -69,10 +71,12 @@ class MetricsRegistry:
                 self._error_kinds[error] += 1
 
     def record_circuit_breaker(self, kind: str) -> None:
+        """登记一次资源治理熔断事件（超时 / 扫描行数 / 返回行数 / 不安全 SQL）。"""
         with self._lock:
             self._circuit_breakers[kind] += 1
 
     def record_self_heal_failure(self) -> None:
+        """登记一次自愈失败（Record a self-heal failure）。"""
         with self._lock:
             self._self_heal_failures += 1
 
@@ -87,6 +91,7 @@ class MetricsRegistry:
     # 聚合
     # ------------------------------------------------------------------ #
     def snapshot(self) -> dict[str, Any]:
+        """导出指标快照（P50/P95 分位数、累计计数与分布），供 /api/metrics。"""
         with self._lock:
             elapsed = max(time.time() - self._started_at, 1e-9)
             latencies = list(self._latencies)

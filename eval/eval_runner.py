@@ -89,6 +89,8 @@ def _normalize_sql(sql: str) -> str:
 # --------------------------------------------------------------------------- #
 @dataclass
 class CaseReport:
+    """单个用例的评测报告：DSL / 结果 / SQL 三重校验与哈希。"""
+
     id: str
     question: str
     dsl_ok: bool
@@ -102,6 +104,8 @@ class CaseReport:
 
 @dataclass
 class EvalSummary:
+    """整体评测汇总（Aggregate evaluation summary）。"""
+
     total: int = 0
     passed: int = 0
     failed: int = 0
@@ -246,6 +250,7 @@ def evaluate_all(
     conn: duckdb.DuckDBPyConnection,
     pipeline: Callable[[str], QueryDSL] = run_pipeline,
 ) -> EvalSummary:
+    """遍历 Golden 数据集逐条评测（单轮 + 多轮），汇总通过率。"""
     summary = EvalSummary()
     for item in load_golden():
         summary.total += 1
@@ -282,6 +287,7 @@ def _print_summary(summary: EvalSummary, print_sql: bool = False) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """命令行入口：--pipeline 选择 oracle/agent，--print-sql 输出编译 SQL。"""
     parser = argparse.ArgumentParser(description="ChatBI Golden Dataset 评测")
     parser.add_argument("--print-sql", action="store_true", help="打印每个用例的编译 SQL")
     parser.add_argument(

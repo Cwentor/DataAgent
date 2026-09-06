@@ -213,6 +213,7 @@ class ToolInvocationRecord:
     output: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """序列化为前端 / 审计消费的字典（Serialize for audit & frontend）。"""
         return {
             "step": self.step,
             "tool": self.tool,
@@ -267,9 +268,11 @@ class AgentResult:
     reflection: dict[str, Any] | None = None
 
     def step_tools(self) -> list[str]:
+        """返回调度轨迹中依次调用的工具名（Tool names in execution order）。"""
         return [s.tool for s in self.steps]
 
     def to_dict(self) -> dict[str, Any]:
+        """序列化为 API 响应字典（Serialize to the API response payload）。"""
         return {
             "query": self.query,
             "answer": self.answer,
@@ -306,7 +309,9 @@ class Planner(ABC):
         *,
         history: Any = None,
         last_dsl: Any = None,
-    ) -> PlanResult: ...
+    ) -> PlanResult:
+        """规划本轮调度：产出工具调用 / 直接作答 / 反问澄清三选一（Decide this turn's actions）。"""
+        ...
 
     def plan_next(
         self,
@@ -356,6 +361,7 @@ class DeterministicPlanner(Planner):
         history: Any = None,
         last_dsl: Any = None,
     ) -> PlanResult:
+        """确定性规划：五分类意图判决 + 关键词规则产出调用计划（Rule-based, zero LLM）。"""
         from agent.router import IntentType, route_decision
 
         # 与 web.service 分流共用同一五分类判决中心：携带会话状态（history/last_dsl），
@@ -428,6 +434,7 @@ class LLMPlanner(Planner):
         registry: ToolRegistry | None = None,
         max_retries: int = 2,
     ):
+        """初始化 LLM 规划器（Bind the OpenAI-compatible client and retry budget）。"""
         self.client = client
         self.registry = registry  # 构造注入：correct() 自愈路径依赖工具注册表校验
         self.max_retries = max_retries
@@ -441,6 +448,7 @@ class LLMPlanner(Planner):
         history: Any = None,
         last_dsl: Any = None,
     ) -> PlanResult:
+        """首轮规划：把工具清单（JSON Schema）注入上下文，由 LLM 决策调用 / 作答 / 反问。"""
         tools_json = json.dumps(registry.tool_definitions(), ensure_ascii=False)
         messages = [
             {
@@ -641,13 +649,15 @@ class Synthesizer(ABC):
     """总结器抽象：把工具执行结果合成最终洞察。"""
 
     @abstractmethod
-    def synthesize(self, result: AgentResult, outputs: list[ToolResult], query: str) -> None: ...
+    def synthesize(self, result: AgentResult, outputs: list[ToolResult], query: str) -> None:
+        """把工具输出合成为最终洞察（Compose the final insight；原地写入 result）。"""
 
 
 class DeterministicSynthesizer(Synthesizer):
     """确定性合成：基于工具输出拼装洞察 + 图表指令（零幻觉、可测）。"""
 
     def synthesize(self, result: AgentResult, outputs: list[ToolResult], query: str) -> None:
+        """确定性合成：按末位工具类型分派作答模板并回填数据字段（zero LLM, zero hallucination）。"""
         if result.clarifications:
             result.answer = "；".join(c["question"] for c in result.clarifications)
             return
@@ -768,9 +778,11 @@ class LLMSynthesizer(Synthesizer):
     """LLM 总结：把工具输出喂回 LLM 合成最终洞察（含图表指令）。"""
 
     def __init__(self, client: OpenAICompatClient):
+        """绑定 LLM 客户端（Bind the OpenAI-compatible client）。"""
         self.client = client
 
     def synthesize(self, result: AgentResult, outputs: list[ToolResult], query: str) -> None:
+        """把工具输出喂回 LLM 合成洞察；失败时优雅回退确定性合成（Graceful deterministic fallback）。"""
         if result.answer:
             # R1 重规划作答：规划器已基于完整轨迹给出最终洞察，
             # 这里仅回填数据字段（dsl/sql/rows/viz/chart_spec），不再重复调 LLM
@@ -842,7 +854,9 @@ class Reflector(ABC):
         steps: list[ToolInvocationRecord],
         outputs: list[ToolResult],
         remaining_steps: int,
-    ) -> ReflectionVerdict: ...
+    ) -> ReflectionVerdict:
+        """审计执行轨迹并判定结果充分性（Judge whether the trajectory suffices to answer）。"""
+        ...
 
 
 class DeterministicReflector(Reflector):
@@ -871,6 +885,7 @@ class DeterministicReflector(Reflector):
         outputs: list[ToolResult],
         remaining_steps: int,
     ) -> ReflectionVerdict:
+        """零 LLM 充分性判定：失败步骤 / 空数据 / 对比不完整三类规则（Deterministic reflection）。"""
         failed = [s for s in steps if not s.success]
         if failed:
             return ReflectionVerdict(False, f"存在失败步骤：{failed[-1].error_type or 'unknown'}")
@@ -898,6 +913,7 @@ class LLMReflector(Reflector):
         registry: ToolRegistry | None = None,
         max_retries: int = 1,
     ):
+        """初始化 LLM 反思器（registry 注入后，判不充分时才可能产出追加调用）。"""
         self.client = client
         self.registry = registry  # 注入后追加调用才可能产出（未注入只判定不追加）
         self.max_retries = max_retries
@@ -912,6 +928,7 @@ class LLMReflector(Reflector):
         outputs: list[ToolResult],
         remaining_steps: int,
     ) -> ReflectionVerdict:
+        """LLM 审计轨迹缺口；非法输出带错误反馈重试，重试耗尽抛 PipelineError（LLM-based reflection）。"""
         trajectory = json.dumps(LLMPlanner._trajectory_view(steps, outputs), ensure_ascii=False)
         tools_json = json.dumps(registry.tool_definitions(), ensure_ascii=False)
         messages = [
@@ -981,6 +998,7 @@ class ToolAgent:
         max_steps: int = 5,
         reflector: Reflector | None = None,
     ) -> None:
+        """装配调度内核：max_steps 受控 3~5，reflector=None 表示关闭 R3 反思层（Controlled dispatch loop）。"""
         self.registry = registry or default_registry()
         self.planner = planner or DeterministicPlanner()
         self.synthesizer = synthesizer or DeterministicSynthesizer()
@@ -1417,6 +1435,7 @@ def default_tool_agent() -> ToolAgent:
 
 # 允许测试注入自定义 Agent（与 web.service 现有 monkeypatch 风格一致）
 def set_default_tool_agent(agent: ToolAgent | None) -> None:
+    """注入 / 重置进程级默认 ToolAgent（供测试替换；None 恢复懒加载装配）。"""
     global _default_agent
     _default_agent = agent
 

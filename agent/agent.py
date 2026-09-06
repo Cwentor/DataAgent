@@ -56,6 +56,7 @@ class LLMNL2DSL:
     """基于 LLM 的 NL -> DSL Agent。"""
 
     def __init__(self, client: OpenAICompatClient, max_retries: int = 2) -> None:
+        """绑定 LLM 客户端与重试上限（Bind the client and retry budget）。"""
         self.client = client
         self.max_retries = max_retries
 

@@ -43,4 +43,5 @@ class AuditRecord:
     created_at: str = field(default_factory=_utcnow_iso)
 
     def to_dict(self) -> dict[str, Any]:
+        """全字段序列化（asdict），供审计存储层消费（Full serialization）。"""
         return asdict(self)

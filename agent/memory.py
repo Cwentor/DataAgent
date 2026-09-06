@@ -127,6 +127,7 @@ class SessionStore:
         history_turns: int | None = None,
         db_path: str | None = None,
     ) -> None:
+        """初始化 TTL / 容量 / 历史轮数（缺省取 settings）；db_path 配置时落盘 SQLite。"""
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.SESSION_MEMORY_TTL
         self._max = (
             max_sessions if max_sessions is not None else settings.SESSION_MEMORY_MAX_SESSIONS
@@ -257,6 +258,7 @@ class SessionStore:
             return n
 
     def __len__(self) -> int:
+        """当前会话数（Number of live sessions）。"""
         with self._lock:
             return len(self._items)
 

@@ -58,18 +58,22 @@ VALUE_LABELS: dict[str, dict[str, str]] = {
 
 
 def field_label(field: str) -> str:
+    """逻辑字段的中文展示名（Display label for a logical field）。"""
     return FIELD_LABELS.get(field, field)
 
 
 def agg_label(agg: str) -> str:
+    """聚合函数的中文展示名（Display label for an aggregation）。"""
     return AGG_LABELS.get(agg, agg)
 
 
 def op_label(op: str) -> str:
+    """过滤操作符的中文展示名（Display label for an operator）。"""
     return OP_LABELS.get(op, op)
 
 
 def value_label(field: str, value) -> str:
+    """枚举字段的取值中文映射（Value mapping；列表值拼接渲染）。"""
     mapping = VALUE_LABELS.get(field, {})
     if isinstance(value, list):
         return "[" + ", ".join(mapping.get(v, str(v)) for v in value) + "]"

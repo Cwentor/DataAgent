@@ -39,6 +39,7 @@ class ToolRegistry:
     """线程安全的工具注册表。"""
 
     def __init__(self) -> None:
+        """初始化空注册表（name -> 工具实例，写操作全程持锁）。"""
         self._tools: dict[str, BaseTool] = {}
         self._lock = threading.Lock()
 
@@ -80,6 +81,7 @@ class ToolRegistry:
             raise UnknownToolError(f"未注册的工具: {name!r}") from exc
 
     def has(self, name: str) -> bool:
+        """判断工具是否已注册（Whether a tool is registered）。"""
         return name in self._tools
 
     def list_tools(self) -> list[BaseTool]:
@@ -88,13 +90,16 @@ class ToolRegistry:
             return list(self._tools.values())
 
     def tool_names(self) -> list[str]:
+        """按注册顺序返回工具名清单（Registered tool names in order）。"""
         with self._lock:
             return list(self._tools.keys())
 
     def __contains__(self, name: object) -> bool:
+        """支持 ``name in registry`` 语法（Membership test）。"""
         return name in self._tools
 
     def __len__(self) -> int:
+        """已注册工具数量（Number of registered tools）。"""
         return len(self._tools)
 
     # ------------------------------------------------------------------ #

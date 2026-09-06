@@ -65,6 +65,8 @@ _FILL_GAPS_KEYWORDS = ("补零", "补齐", "补全", "连续日期")
 
 
 class TrendAnalysisTool(BaseTool):
+    """趋势与对比分析工具：时序 / 同比环比 / 补零语义的受守卫查询入口（Trend analysis tool）。"""
+
     name = "trend_analysis"
     description = (
         "趋势与对比分析：承接带时间粒度、周期对比（同比yoy/环比mom）、双窗口对比"
@@ -77,6 +79,7 @@ class TrendAnalysisTool(BaseTool):
     def execute(self, validated_args: TrendAnalysisArgs, ctx: ToolContext) -> ToolResult:
         # 会话上下文继承：有 base_dsl 时以其为基础（省略指代/下钻语句本身无法独立
         # 解析出指标），否则走完整 NL->DSL 解析
+        """规范化趋势 / 对比 / 补零语义后执行受守卫时序查询（Guarded trend query）。"""
         if ctx.base_dsl is not None:
             dsl, degraded = ctx.base_dsl, False
         else:

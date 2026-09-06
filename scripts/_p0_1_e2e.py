@@ -1,3 +1,7 @@
+"""P0-1 端到端安全验证：真实业务入口 execute_sql 必须拒绝 read_csv 表函数的
+任意文件读取路径，正常查询照常放行（Pen-test e2e for the SQL guard）。
+"""
+
 import os
 import tempfile
 
