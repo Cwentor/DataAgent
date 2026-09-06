@@ -58,3 +58,4 @@
 | [production-readiness-audit.md](production-readiness-audit.md) | 就绪度评审：生产就绪度 | 2026-09 |
 | [audit-chatbi-domain-specificity.md](audit-chatbi-domain-specificity.md) | 深度审计：ChatBI 领域专业性与问数能力穿透 | 2026-09 |
 | [repair-chatbi-domain-specificity.md](repair-chatbi-domain-specificity.md) | 缺陷修复：ChatBI 领域专业性整改闭环 | 2026-09 |
+| [audit-authentication-error-null-root.md](audit-authentication-error-null-root.md) | 深度审计：AuthenticationError 空根遗留风险项核实 | 2026-09 |
