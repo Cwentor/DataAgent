@@ -1,29 +1,57 @@
-<h1 align="center">FutureBI</h1>
+<div align="center">
+  <img src="docs/assets/logo.svg" width="112" alt="FutureBI Logo"/>
 
-<p align="center">
-  <b>企业级 ChatBI（Data Agent）—— 自然语言 → 受限 DSL → 确定性 SQL → DuckDB</b><br/>
-  LLM 只产出受控 JSON，绝不直接生成裸 SQL：零幻觉、零注入、零随意 Join。
-</p>
+  # FutureBI
 
-<p align="center">
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white"/>
-  <img alt="Pydantic" src="https://img.shields.io/badge/Pydantic-V2-E92063?style=flat-square&logo=pydantic&logoColor=white"/>
-  <img alt="DuckDB" src="https://img.shields.io/badge/DuckDB-%E6%9C%AC%E5%9C%B0%E6%95%B0%E4%BB%93-FFF000?style=flat-square&logo=duckdb&logoColor=black"/>
-  <img alt="License" src="https://img.shields.io/badge/License-MIT-green?style=flat-square"/>
-  <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Cat-Drink/FutureBI/ci.yml?branch=master&style=flat-square&label=CI"/>
-</p>
+  **企业级 ChatBI（Data Agent）：自然语言 → 受控 DSL → 确定性 SQL → DuckDB**
 
-FutureBI 是一个规格驱动（Spec-Driven）的企业级 ChatBI / Data Agent 底座：以受限 DSL 为契约，
-由确定性编译器产出 SQL，从机制上杜绝大模型幻觉与注入，并为查询提供解释、可视化、
-权限治理、审计与可观测能力。
+  LLM 只产出受控 JSON，绝不直接生成裸 SQL —— 零幻觉、零注入、零随意 Join。
+
+  <p>
+    <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white"/>
+    <img alt="Pydantic" src="https://img.shields.io/badge/Pydantic-V2-E92063?style=flat-square&logo=pydantic&logoColor=white"/>
+    <img alt="DuckDB" src="https://img.shields.io/badge/DuckDB-%E6%9C%AC%E5%9C%B0%E6%95%B0%E4%BB%93-FFF000?style=flat-square&logo=duckdb&logoColor=black"/>
+    <img alt="Code Style" src="https://img.shields.io/badge/Code%20Style-black-000000?style=flat-square"/>
+    <img alt="Lint" src="https://img.shields.io/badge/Lint-ruff-261230?style=flat-square&logo=ruff&logoColor=white"/>
+    <img alt="License" src="https://img.shields.io/badge/License-MIT-green?style=flat-square"/>
+    <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Cat-Drink/FutureBI/ci.yml?branch=master&style=flat-square&label=CI"/>
+  </p>
+
+  **一句话读懂它**：把大模型关进契约的笼子——模型只负责"理解问题"，数据永远由确定性代码产出。
+
+</div>
+
+---
+
+## 🧠 核心链路（一图流）
+
+```text
+🗣️ 自然语言提问
+      │
+      ▼
+🧭 意图路由 ──── 五分类分流：问数 / 口径解释 / 澄清反问 / 闲聊 / 系统操作
+      │
+      ▼
+📐 受控 DSL ──── LLM 仅产出契约内 JSON（extra="forbid"），支持多轮指代继承
+      │
+      ▼
+⚙️ 确定性编译 ── 字段白名单 + 受控 JOIN + 表/列/行级 RLS 强制注入
+      │
+      ▼
+🛡️ 受控执行 ─── 只读 AST 校验 / 超时中断 / 扫描行数熔断 / 返回行数上限
+      │
+      ▼
+📊 可解释交付 ── 中文话术 + 图表自适应推荐 + SQL 溯源 + 全链路审计
+```
 
 ## ✨ 特性
 
 - **受限 DSL 契约**：Pydantic V2 + `extra="forbid"`，字段、操作符、聚合均为受限枚举
 - **确定性编译**：SQL 只由编译器生成，支持聚合/比率/时间/窗口/补零/Top-N/同比环比
-- **纵深安全**：统一认证（JWT + Session）+ 生成前作用域 + 表/列/行级权限守卫
+- **纵深安全**：统一认证（JWT + Session）+ 生成前作用域 + 表/列/行级权限守卫（RLS）
 - **受控执行**：只读白名单、超时取消、扫描行数熔断、返回行数上限、SQL 自愈
-- **可解释交付**：DSL → 中文话术 + 图表推荐 + Web UI，零前端框架
+- **对话式体验**：意图路由、多轮指代继承（"那华南呢？"）、口径澄清与槽位回填、多工具编排
+- **可解释交付**：DSL → 中文话术 + 图表自适应推荐 + Web UI，零前端框架
 - **可观测**：全链路审计快照、结构化日志、QPS/分位数指标
 
 ## 🚀 快速开始
@@ -41,19 +69,20 @@ python -m web.server 8000
 
 ```text
 FutureBI/
-├── semantic/     # 语义层：受限 DSL 契约 + 字段目录
-├── agent/        # NL -> DSL：LLM / 启发式双路径、意图路由、RAG、澄清
+├── semantic/     # 语义层：受限 DSL 契约 + 数据驱动字段目录
+├── agent/        # NL -> DSL：LLM / 启发式双路径、意图路由、RAG、多轮记忆
 ├── compiler/     # DSL -> 确定性 SQL
-├── exec/         # SQL 执行层：超时 / 熔断 / 只读白名单 / 自愈
-├── present/      # 解释 + 可视化推荐
-├── security/     # 权限：表级 / 列级 / 行级 RLS
-├── auth/         # 身份认证：JWT + Session
+├── exec/         # SQL 执行层：只读 AST 校验 / 超时 / 熔断 / 连接池 / 自愈
+├── tools/        # 多工具编排：查数 / 趋势 / 导出 / 口径解释
+├── present/      # 解释 + 图表自适应推荐
+├── security/     # 权限：表级 / 列级 / 行级 RLS（配置驱动）
+├── auth/         # 身份认证：JWT + Session + 登录限流
 ├── audit/        # 审计快照 + 可观测性指标
-├── web/          # Web UI / HTTP 服务 / 静态前端
-├── eval/         # Golden 评测（19 用例，双模式）
+├── web/          # Web UI / HTTP 服务 / 异步查询
+├── eval/         # Golden 评测（25 用例，含多轮对话序列，双模式）
 ├── mock/         # 确定性 DuckDB 数仓
-├── tests/        # 17 个测试文件（159 用例）
-└── docs/         # 详细文档
+├── tests/        # 25 个测试文件（364 用例）
+└── docs/         # 详细文档 + 评审归档
 ```
 
 ## 📚 文档
