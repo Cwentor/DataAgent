@@ -67,6 +67,12 @@ SESSION_MEMORY_HISTORY_TURNS: int = int(os.getenv("SESSION_MEMORY_HISTORY_TURNS"
 DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "4"))
 MAX_CONCURRENT_QUERIES: int = int(os.getenv("MAX_CONCURRENT_QUERIES", "4"))
 
+# 查询结果缓存（生产化）：同 (principal, SQL, 执行参数) 短期内重复查询免重复执行。
+# 默认关闭；开启前确认数据时效可容忍 TTL 窗口（只读系统无写失效问题）。
+QUERY_CACHE_ENABLED: bool = os.getenv("QUERY_CACHE_ENABLED", "0").lower() not in ("0", "false", "no")
+QUERY_CACHE_TTL_SECONDS: float = float(os.getenv("QUERY_CACHE_TTL_SECONDS", "300"))
+QUERY_CACHE_MAX_ENTRIES: int = int(os.getenv("QUERY_CACHE_MAX_ENTRIES", "256"))
+
 # Multi-Tool Agent 调度上限（Max Steps：3~5 步，杜绝无限工具循环）
 MAX_AGENT_STEPS: int = int(os.getenv("MAX_AGENT_STEPS", "5"))
 

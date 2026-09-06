@@ -32,7 +32,7 @@ from agent.pipeline import rewrite_dsl, run_pipeline_with_status
 from audit.metrics import default_registry
 from compiler.sql_compiler import CompileError, compile_sql
 from config import settings
-from exec.guards import SqlExecutionError, execute_sql
+from exec.guards import ExecutionResult, SqlExecutionError, execute_sql
 from security.guard import apply_policy
 from semantic.dsl_schema import QueryDSL
 
@@ -52,6 +52,8 @@ class GuardedQueryResult:
     rewrites: int
     degraded: bool
     duration_ms: float
+    # 结果缓存命中标记（QUERY_CACHE_ENABLED 开启时可能为 True）
+    cached: bool = False
 
 
 def _acquire_conn() -> duckdb.DuckDBPyConnection:
@@ -126,9 +128,20 @@ def _run_guarded(
     max_rewrites = settings.SQL_SELF_HEAL_MAX_RETRIES
     current_dsl = dsl
     rewrites = 0
+    _cached_flag = False
     while True:
         try:
             sql = compile_sql(current_dsl)
+            cache_key = _result_cache_key(principal, sql)
+            cached = _cache_get(cache_key) if cache_key is not None else None
+            if cached is not None:
+                # 缓存命中：还原为 ExecutionResult 形态，后续消费路径保持一致
+                columns, rows, scan_rows = cached
+                exec_result = ExecutionResult(
+                    columns=columns, rows=rows, scan_rows=scan_rows, duration_ms=0.0
+                )
+                _cached_flag = True
+                break
             exec_result = executor(
                 conn,
                 sql,
@@ -136,6 +149,8 @@ def _run_guarded(
                 max_scan_rows=settings.MAX_SCAN_ROWS,
                 max_result_rows=settings.MAX_RESULT_ROWS,
             )
+            if cache_key is not None:
+                _cache_put(cache_key, exec_result)
             break
         except (CompileError, SqlExecutionError) as exc:
             if rewrites >= max_rewrites:
@@ -166,7 +181,35 @@ def _run_guarded(
         rewrites=rewrites,
         degraded=degraded,
         duration_ms=duration_ms,
+        cached=_cached_flag,
     )
+
+
+def _result_cache_key(principal: str | None, sql: str) -> str | None:
+    """结果缓存键；缓存关闭时返回 None（跳过缓存路径）。"""
+    from exec.query_cache import query_cache_enabled, query_cache_key
+
+    if not query_cache_enabled():
+        return None
+    return query_cache_key(
+        principal,
+        sql,
+        statement_timeout_ms=settings.QUERY_TIMEOUT_MS,
+        max_scan_rows=settings.MAX_SCAN_ROWS,
+        max_result_rows=settings.MAX_RESULT_ROWS,
+    )
+
+
+def _cache_get(key: str) -> Any | None:
+    from exec.query_cache import default_query_cache
+
+    return default_query_cache().get(key)
+
+
+def _cache_put(key: str, exec_result: Any) -> None:
+    from exec.query_cache import default_query_cache
+
+    default_query_cache().put(key, exec_result.columns, exec_result.rows, exec_result.scan_rows)
 
 
 def _json_safe(value: Any) -> Any:
