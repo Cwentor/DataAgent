@@ -380,19 +380,13 @@ class Handler(BaseHTTPRequestHandler):
         except ExportNotFoundError:
             return self._send_json({"error": "export not found"}, 404)
 
-        # P1-3: 检查导出文件所有权 - 只有文件所有者或管理员可下载
+        # P1-3 + 就绪度评审 P3 处置：导出文件属主校验——只有文件所有者或
+        # admin 角色可下载。管理员判定用显式角色（ctx.roles），取代旧
+        # scoped_fields(None) 探测式实现（principal=None 恒返回全量、恒不抛
+        # 异常，属主校验实际失效为"恒放行"）。
         item_principal = item.meta.get("principal")
         if item_principal is not None and item_principal != ctx.principal:
-            # 检查是否为管理员角色（允许管理员访问所有用户的导出）
-            from security.errors import SecurityError
-            from security.scope import scoped_fields
-
-            try:
-                # 尝试获取管理员作用域 - 如果成功则为管理员
-                scoped_fields(None)  # None 表示系统/管理员作用域
-                # 如果没抛异常，则当前用户是管理员，允许访问
-            except SecurityError:
-                # 非管理员且不匹配文件所有者，拒绝访问
+            if "admin" not in ctx.roles:
                 return self._send_json({"error": "forbidden: export access denied"}, 403)
 
         body = item.read_bytes()

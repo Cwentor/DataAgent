@@ -417,3 +417,81 @@ def test_async_query_missing_query_400(warehouse):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# 导出下载属主校验（P1-3 + 就绪度评审 P3 处置）
+# --------------------------------------------------------------------------- #
+def _create_export(port, headers):
+    """以指定身份执行一次带导出语义的查询，返回 (export_id, download_path)。"""
+    status, body, _ = _request(
+        port,
+        "POST",
+        "/api/query",
+        {"query": "把上个月各省份的GMV导出成表格"},
+        headers,
+    )
+    assert status == 200, body
+    assert body.get("download_urls"), body
+    path = body["download_urls"][0]
+    return path.rsplit("/", 1)[-1], path
+
+
+def _download(port, path, headers, timeout=10):
+    """下载端点返回文件字节（非 JSON），单独封装取状态码与原始响应。"""
+    url = f"http://127.0.0.1:{port}{path}"
+    req = urllib.request.Request(url, method="GET")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read(), resp
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(), exc
+
+
+def test_export_owner_can_download(warehouse):
+    """文件所有者本人下载自己的导出 -> 200。"""
+    server, port = _start_server()
+    try:
+        _, login, _ = _login(port, "admin", "admin123")
+        _, path = _create_export(port, {"Authorization": "Bearer " + login["token"]})
+        status, raw, resp = _download(port, path, {"Authorization": "Bearer " + login["token"]})
+        assert status == 200
+        assert raw
+        assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_export_foreign_download_403(warehouse):
+    """非属主且无 admin 角色（bob/ops）下载他人导出 -> 403（旧探测式实现恒放行）。"""
+    server, port = _start_server()
+    try:
+        _, admin_login, _ = _login(port, "admin", "admin123")
+        _, path = _create_export(port, {"Authorization": "Bearer " + admin_login["token"]})
+        _, bob_login, _ = _login(port, "bob", "bob123")
+        status, _, _ = _download(
+            port, path, {"Authorization": "Bearer " + bob_login["token"]}
+        )
+        assert status == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_export_admin_role_can_download_foreign(warehouse):
+    """admin 角色可下载他人导出（显式角色判定放行）。"""
+    server, port = _start_server()
+    try:
+        _, bob_login, _ = _login(port, "bob", "bob123")
+        _, path = _create_export(port, {"Authorization": "Bearer " + bob_login["token"]})
+        _, admin_login, _ = _login(port, "admin", "admin123")
+        status, _, _ = _download(
+            port, path, {"Authorization": "Bearer " + admin_login["token"]}
+        )
+        assert status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
