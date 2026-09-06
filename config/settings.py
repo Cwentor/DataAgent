@@ -77,6 +77,12 @@ QUERY_CACHE_ENABLED: bool = os.getenv("QUERY_CACHE_ENABLED", "0").lower() not in
 QUERY_CACHE_TTL_SECONDS: float = float(os.getenv("QUERY_CACHE_TTL_SECONDS", "300"))
 QUERY_CACHE_MAX_ENTRIES: int = int(os.getenv("QUERY_CACHE_MAX_ENTRIES", "256"))
 
+# 异步查询任务（生产化）：POST /api/query/async 提交 -> 后台线程池执行 -> 轮询取回。
+# 任务与结果保存在进程内存（重启丢失）；任务函数复用 run_query，护栏不旁路。
+ASYNC_TASK_MAX_WORKERS: int = int(os.getenv("ASYNC_TASK_MAX_WORKERS", "2"))
+ASYNC_TASK_HISTORY: int = int(os.getenv("ASYNC_TASK_HISTORY", "1000"))
+ASYNC_TASK_TTL_SECONDS: float = float(os.getenv("ASYNC_TASK_TTL_SECONDS", "3600"))
+
 # Multi-Tool Agent 调度上限（Max Steps：3~5 步，杜绝无限工具循环）
 MAX_AGENT_STEPS: int = int(os.getenv("MAX_AGENT_STEPS", "5"))
 
