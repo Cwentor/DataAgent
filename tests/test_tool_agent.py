@@ -535,3 +535,64 @@ def test_deterministic_planner_skips_replan_loop(conn):
     assert spy["n"] == 0
     assert DeterministicPlanner.iterative is False
     assert LLMPlanner.iterative is True
+
+
+# --------------------------------------------------------------------------- #
+# R2 问题分解与对比综合
+# --------------------------------------------------------------------------- #
+def test_decompose_comparison_regions():
+    """对比分解：『A 和 B 哪个更 X』-> 两个保留时间窗口的单实体子查询。"""
+    from agent.tool_agent import decompose_comparison
+
+    pairs = decompose_comparison("上个月华南和华北哪个GMV更高")
+    assert pairs is not None
+    assert [entity for entity, _ in pairs] == ["华南", "华北"]  # 按出现位置排序
+    assert [sub for _, sub in pairs] == ["上个月华南GMV", "上个月华北GMV"]
+
+
+def test_decompose_comparison_negative_cases():
+    """非对比 / 无双实体的问题不分解（保持整问单查，绝不冒险猜测）。"""
+    from agent.tool_agent import decompose_comparison
+
+    assert decompose_comparison("查看上个月的销售总额") is None  # 非对比型
+    assert decompose_comparison("上个月哪个品类GMV最高") is None  # 有触发词但无双实体
+    assert decompose_comparison("上个月华南GMV是多少") is None  # 单实体
+
+
+def test_accept_regional_comparison_decomposed_and_compared(conn):
+    """端到端：对比问题 -> 分解为两次单实体查询 -> 跨步对比作答 + 对比柱状图。"""
+    agent = ToolAgent(max_steps=5)
+    result = agent.run("上个月华南和华北哪个GMV更高", conn=conn)
+    assert result.error is None
+    assert result.step_tools() == ["query_metric", "query_metric"]
+    assert all(s.success for s in result.steps)
+    # 两次调用的子查询各自聚焦单个大区（对比分解链路）
+    assert "华南" in result.steps[0].args["query"]
+    assert "华北" in result.steps[1].args["query"]
+    # 对比综合：双方标签 + 高低结论
+    assert "华南" in result.answer and "华北" in result.answer
+    assert "更高" in result.answer or "持平" in result.answer
+    # 对比柱状图：两行（对比项, 指标值），与作答标签一致
+    assert result.chart_spec and result.chart_spec["chart"] == "bar"
+    assert [r[0] for r in result.chart_spec["rows"]] == ["华南", "华北"]
+
+
+def test_comparison_synthesis_skipped_for_non_comparison(conn):
+    """非对比问题即使碰巧多组输出也不触发对比综合（单输出作答路径不变）。"""
+    agent = ToolAgent(max_steps=5)
+    result = agent.run("查看上个月的销售总额", conn=conn)
+    assert result.error is None
+    assert "对比结果" not in result.answer
+    assert result.chart_spec and result.chart_spec["chart"] == "number"
+
+
+def test_llm_planner_plan_prompt_carries_decomposition_guidance():
+    """用 RecordingLLM 断言首轮规划提示含对比分解指引。"""
+    from tools.registry import default_registry
+
+    llm = RecordingLLM([json.dumps({"done": "无需工具"})])
+    planner = LLMPlanner(llm, max_retries=1)
+    planner.plan("华南和华北哪个GMV更高", None, default_registry())
+    system = llm.seen_messages[0][0]["content"]
+    assert "对比类问题" in system
+    assert "分别查询每个对比对象" in system

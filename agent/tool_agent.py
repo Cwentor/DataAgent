@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from typing import Any
 from agent.agent import extract_json
 from agent.clarify import Clarification, detect_clarifications
 from agent.errors import PipelineError
+from agent.heuristic import REGIONS, dimension_members
 from agent.llm import OpenAICompatClient
 from agent.router import IntentType
 from audit.logging import get_logger
@@ -77,6 +79,98 @@ _TREND_KEYWORDS = (
     "mom",
     "变化",
 )
+
+# --------------------------------------------------------------------------- #
+# R2 对比型问题（确定性分解）：触发词 / 脚手架词 / 实体候选池
+# --------------------------------------------------------------------------- #
+_COMPARATIVE_TRIGGERS = ("哪个", "哪方", "谁更", "谁高", "对比", "比较", "相比", "更高", "更低", "更多", "更少")
+_COMPARATIVE_SCAFFOLD = re.compile(
+    r"哪个|哪方|谁|更(高|低|多|少|大|小|好|差)|相比|对比|比较|分别|各自"
+)
+
+
+def _is_comparative_question(query: str) -> bool:
+    """是否为对比型问题（A 和 B 哪个更 X），供分解 / 反思 / 综合三处共用。"""
+    return any(k in query for k in _COMPARATIVE_TRIGGERS)
+
+
+def _comparative_entities(query: str) -> list[str]:
+    """按出现位置提取查询中的可对比实体（大区/省份/品类，值域全部来自语义目录）。"""
+    pools = [REGIONS.keys(), dimension_members("province"), dimension_members("category")]
+    seen: dict[str, int] = {}
+    for pool in pools:
+        for entity in pool:
+            if entity and entity in query and entity not in seen:
+                seen[entity] = query.index(entity)
+    return [e for e, _ in sorted(seen.items(), key=lambda kv: kv[1])]
+
+
+def decompose_comparison(query: str) -> list[tuple[str, str]] | None:
+    """对比型问题确定性分解（R2）：『A 和 B 哪个<指标>更X』-> [(A, 子查询A), (B, 子查询B)]。
+
+    仅当命中对比触发词且识别到 >=2 个可对比实体（大区/省份/品类，值域来自
+    语义目录白名单）时分解；子查询剔除其余实体与对比脚手架词，保留时间窗口
+    与指标表述，可被启发式解析为合法 DSL（区域过滤 + 时间过滤均已验证）。
+    任何一步剔除后为空即返回 None（保持整问单查），绝不冒险猜测。
+    """
+    if not _is_comparative_question(query):
+        return None
+    entities = _comparative_entities(query)
+    if len(entities) < 2:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for keep in entities:
+        sub = query
+        for other in entities:
+            if other != keep:
+                sub = re.sub(rf"[和与跟]?{re.escape(other)}", "", sub)
+        sub = _COMPARATIVE_SCAFFOLD.sub("", sub)
+        sub = re.sub(rf"[和与跟](?={re.escape(keep)})", "", sub)
+        sub = re.sub(r"呢\s*[？?！!。]*$", "", sub).strip(" 　，,。：:？?！!")
+        if not sub or keep not in sub:
+            return None
+        pairs.append((keep, sub))
+    return pairs
+
+
+def _comparison_label(data: dict[str, Any]) -> str:
+    """从单值结果的 DSL 过滤条件推导对比标签（大区 > 省份 > 品类 > 退化为解释前缀）。"""
+    dsl = data.get("dsl")
+    filters = dsl.get("filters") if isinstance(dsl, dict) else None
+    if isinstance(filters, list):
+        for f in filters:
+            if not isinstance(f, dict):
+                continue
+            field_name, value = f.get("field"), f.get("value")
+            if field_name == "province":
+                if isinstance(value, list) and value:
+                    province = str(value[0])
+                    for region, provinces in REGIONS.items():
+                        if province in provinces:
+                            return region
+                    return province
+                if isinstance(value, str):
+                    return value
+            if field_name == "category" and isinstance(value, str):
+                return value
+    explanation = data.get("explanation")
+    return str(explanation)[:12] if explanation else "对比项"
+
+
+def _metric_label(outputs: list[ToolResult]) -> str:
+    """从最后一组成功数据输出的主指标列推导中文标签（与 present.labels 同源）。"""
+    for o in reversed(outputs):
+        data = o.data if o.success and isinstance(o.data, dict) else None
+        columns = (data or {}).get("columns")
+        if columns:
+            col = str(columns[0])
+            try:
+                from present.labels import FIELD_LABELS
+
+                return str(FIELD_LABELS.get(col, col))
+            except ImportError:  # pragma: no cover - 依赖缺失时回退原始列名
+                return col
+    return "指标"
 
 
 # --------------------------------------------------------------------------- #
@@ -269,7 +363,7 @@ class DeterministicPlanner(Planner):
                 clarifications=[Clarification(**c) for c in clarifications if isinstance(c, dict)]
             )
 
-        # DATA_QUERY：关键词分派（趋势 / 导出 / 即时点查）
+        # DATA_QUERY：关键词分派（趋势 / 导出 / 对比分解 / 即时点查）
         ql = query.lower()
         if any(k in ql for k in _EXPORT_KEYWORDS):
             # 组合调用：先查询（复用 query_metric），再把结果交给导出工具
@@ -282,6 +376,15 @@ class DeterministicPlanner(Planner):
         if any(k in ql for k in _TREND_KEYWORDS):
             return PlanResult(
                 calls=[ToolCall("trend_analysis", {"query": query}, reason="时序/对比分析")]
+            )
+        # R2 对比分解：『A 和 B 哪个更 X』-> 分别查询每个对比对象，由合成器跨步对比
+        decomposed = decompose_comparison(query)
+        if decomposed:
+            return PlanResult(
+                calls=[
+                    ToolCall("query_metric", {"query": sub}, reason=f"对比分解：{entity}")
+                    for entity, sub in decomposed
+                ]
             )
         return PlanResult(calls=[ToolCall("query_metric", {"query": query}, reason="即时指标点查")])
 
@@ -334,7 +437,9 @@ class LLMPlanner(Planner):
                     '{ "tool": "<工具名>", "args": {...} }\n'
                     '{ "answer": "无需查询的直接回答文本" }\n'
                     '{ "clarify": "需要向用户追问他的一句问题" }\n'
-                    "禁止输出解释或多余文字。若问题需要数据但缺少关键信息，输出 clarify。"
+                    "禁止输出解释或多余文字。若问题需要数据但缺少关键信息，输出 clarify。\n"
+                    "对比类问题（如『A 和 B 哪个更高』）应分别查询每个对比对象"
+                    "（多次调用 query_metric，每次查询聚焦单个对象），全部查完后再综合作答。"
                 ),
             },
             {"role": "user", "content": f"问题：{query}"},
@@ -578,6 +683,10 @@ class DeterministicSynthesizer(Synthesizer):
         result.scan_rows = int(data.get("scan_rows") or 0)
         result.degraded = result.degraded or bool(data.get("degraded"))
 
+        # R2 对比综合：对比型问题拿到 >=2 组单值结果 -> 跨步对比作答 + 柱状图
+        if self._apply_comparison_answer(result, outputs):
+            return
+
         rows = result.rows or []
         viz = result.viz or {}
         explanation = (result.explanation or "").rstrip("。")
@@ -589,6 +698,56 @@ class DeterministicSynthesizer(Synthesizer):
             result.answer = f"{label} = {value}；{explanation}。"
         else:
             result.answer = f"{explanation}。返回 {len(rows)} 行结果。"
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _apply_comparison_answer(result: AgentResult, outputs: list[ToolResult]) -> bool:
+        """R2 对比综合：>=2 组成功单值结果 -> 跨步对比作答 + 对比柱状图。
+
+        只在对比型问题且数据可比较时生效（返回 True 表示已接管作答）；
+        其余情况返回 False 走既有单输出作答路径。
+        """
+        if not _is_comparative_question(result.query):
+            return False
+        pairs: list[tuple[str, Any]] = []
+        for o in outputs:
+            data = o.data if o.success and isinstance(o.data, dict) else None
+            rows = (data or {}).get("rows")
+            if isinstance(rows, list) and len(rows) == 1 and rows[0]:
+                pairs.append((_comparison_label(data or {}), rows[0][0]))
+        numeric = [
+            (label, float(value))
+            for label, value in pairs
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if len(numeric) < 2:
+            return False
+        rendered = [(label, round(value, 2)) for label, value in numeric]
+        metric = _metric_label(outputs)
+        parts = "，".join(f"{label} {metric}={value}" for label, value in rendered)
+        hi_label, hi = max(rendered, key=lambda p: p[1])
+        lo_label, lo = min(rendered, key=lambda p: p[1])
+        if hi == lo:
+            tail = "两者持平"
+        else:
+            tail = f"{hi_label} 更高，高出约 {abs(hi - lo) / lo * 100:.1f}%" if lo else ""
+        result.answer = f"对比结果：{parts}；{tail}。"
+        result.viz = {"chart": "bar", "x": "对比项", "y": metric}
+        result.chart_spec = {
+            "chart": "bar",
+            "x": "对比项",
+            "y": metric,
+            "echarts": {
+                "tooltip": {"trigger": "axis"},
+                "legend": {"show": False, "data": [metric]},
+                "xAxis": {"type": "category", "name": "对比项", "axisLabel": {"rotate": 0}},
+                "yAxis": {"type": "value"},
+                "series": [{"name": metric, "type": "bar", "encode": {"x": 0, "y": 1}}],
+            },
+            "columns": ["对比项", metric],
+            "rows": [[label, value] for label, value in rendered],
+        }
+        return True
 
 
 class LLMSynthesizer(Synthesizer):
@@ -1036,5 +1195,6 @@ __all__ = [
     "ToolCall",
     "ToolInvocationRecord",
     "default_tool_agent",
+    "decompose_comparison",
     "set_default_tool_agent",
 ]
