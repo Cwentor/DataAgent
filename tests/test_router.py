@@ -401,6 +401,46 @@ def test_e2e_clarify_vague_input(conn):
     assert result.get("sql") is None
 
 
+def test_e2e_llm_planner_clarify_fills_slot(conn, monkeypatch):
+    """就绪度评审 R4：LLM 规划器在 DATA_QUERY 分支输出的 clarify 与路由层
+    CLARIFY 分支同权——写入槽位回填上下文，用户短语回答可合并回原问题。"""
+    import web.service as svc
+    from agent.slotfill import default_slot_store
+    from agent.tool_agent import AgentResult
+
+    clarifications = [
+        {"kind": "missing_time_window", "term": None, "question": "请问要查询哪个时间范围？"}
+    ]
+
+    class _ClarifyAgent:
+        """模拟 LLM 规划器把带指标的模糊问题判为需反问（clarify 早退路径）。"""
+
+        def run(self, query, principal, **kwargs):
+            return AgentResult(
+                query=query,
+                answer=clarifications[0]["question"],
+                clarifications=clarifications,
+                intent="clarify",
+            )
+
+    real_agent_factory = svc.default_tool_agent
+    monkeypatch.setattr(svc, "default_tool_agent", lambda: _ClarifyAgent())
+    sid = "r4-slot"
+    first = run_query("上个月的GMV是多少", conn=conn, session_id=sid, user="alice")
+    assert first["clarifications"] == clarifications
+    # 槽位已按属主登记
+    pending = default_slot_store().get(sid, "alice")
+    assert pending is not None
+    assert "missing_time_window" in pending.pending
+
+    # 下一轮短语回答：恢复真实 Agent，回填合并回原问题执行
+    monkeypatch.setattr(svc, "default_tool_agent", real_agent_factory)
+    second = run_query("最近30天", conn=conn, session_id=sid, user="alice")
+    assert second.get("clarify_filled") is True
+    assert second["resolved_query"] == "上个月的GMV是多少 最近30天"
+    assert "error" not in second, second.get("error_detail")
+
+
 def test_e2e_context_isolation_through_chitchat(conn):
     """上下文隔离验收：华东上月GMV -> 天气(闲聊) -> 那华南呢？
     中间的闲聊绝不破坏第 3 轮对第 1 轮 GMV 指标的继承（记忆状态解耦）。"""

@@ -431,6 +431,23 @@ def run_query(
             result["rewrites"] = agent_result.rewrites
             result["scan_rows"] = agent_result.scan_rows
 
+            # R4 处置：LLM 规划器判定的 clarify 与路由层 CLARIFY 分支同权——
+            # 反问写入槽位回填上下文（用户短语回答可结构化合并回原问题），
+            # 并向响应透出结构化澄清问题（与 CLARIFY 分支响应契约一致）。
+            if agent_result.clarifications:
+                result["clarifications"] = agent_result.clarifications
+                if slot_store is not None:
+                    slot_store.set(
+                        session_id,
+                        ClarifyContext(
+                            original_query=effective_query,
+                            pending=tuple(
+                                c.get("kind") for c in agent_result.clarifications
+                            ),
+                        ),
+                        owner,
+                    )
+
             if agent_result.error:
                 error = _friendly_by_class(agent_result.error_type) or "系统繁忙，请稍后重试"
                 result["error"] = error
