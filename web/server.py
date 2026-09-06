@@ -298,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
                 user=ctx.username,
             )
 
-        task_id = default_task_manager().submit(_run_query_task)
+        task_id = default_task_manager().submit(_run_query_task, owner=ctx.username)
         _auth_logger.info(
             "async_task_submitted",
             extra={"event": "async_task_submitted", "task_id": task_id, "user": ctx.username},
@@ -306,13 +306,19 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"task_id": task_id, "status": "pending"}, 202)
 
     def _get_task(self, task_id: str) -> None:
-        """查询异步任务状态与结果（认证保护；未知 task_id 返回 404）。"""
+        """查询异步任务状态与结果（认证保护；未知 task_id 或非属主返回 404）。
+
+        属主校验（就绪度评审 R1 处置）：任务快照含查询结果数据，仅提交者
+        本人可读取；admin 角色全局可见（与导出下载的属主/admin 放行一致）。
+        """
         ctx = self._authenticate()
         if ctx is None:
             return self._send_json({"error": "unauthorized"}, 401)
-        snap = default_task_manager().snapshot(task_id)
+        owner = None if "admin" in ctx.roles else ctx.username
+        snap = default_task_manager().snapshot(task_id, owner=owner)
         if snap is None:
             return self._send_json({"error": "task not found"}, 404)
+        snap.pop("owner", None)  # 快照对外不暴露属主字段
         self._send_json(snap)
 
     # 受保护：/api/query

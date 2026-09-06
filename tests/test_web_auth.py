@@ -419,6 +419,42 @@ def test_async_query_missing_query_400(warehouse):
         server.server_close()
 
 
+def test_async_task_foreign_user_404(warehouse):
+    """就绪度评审 R1：非属主轮询他人任务 -> 404（快照含查询数据，防跨用户读取）。"""
+    server, port = _start_server()
+    try:
+        _, admin_login, _ = _login(port, "admin", "admin123")
+        status, body, _ = _request(
+            port,
+            "POST",
+            "/api/query/async",
+            {"query": "2024年6月成功订单的GMV是多少？"},
+            {"Authorization": "Bearer " + admin_login["token"]},
+        )
+        assert status == 202
+        task_id = body["task_id"]
+        # bob 轮询 admin 的任务 -> 404（视同不存在，不泄露任务状态）
+        _, bob_login, _ = _login(port, "bob", "bob123")
+        status, snap, _ = _request(
+            port,
+            "GET",
+            f"/api/tasks/{task_id}",
+            headers={"Authorization": "Bearer " + bob_login["token"]},
+        )
+        assert status == 404
+        # admin 角色全局可见（与导出下载放行策略一致）
+        status, snap, _ = _request(
+            port,
+            "GET",
+            f"/api/tasks/{task_id}",
+            headers={"Authorization": "Bearer " + admin_login["token"]},
+        )
+        assert status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 # --------------------------------------------------------------------------- #
 # 导出下载属主校验（P1-3 + 就绪度评审 P3 处置）
 # --------------------------------------------------------------------------- #

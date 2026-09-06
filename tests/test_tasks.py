@@ -80,3 +80,20 @@ def test_concurrent_tasks_all_complete(manager):
         snap = manager.wait(tid)
         assert snap["status"] == "success"
         assert snap["result"] == i * 2
+
+
+def test_snapshot_owner_enforcement(manager):
+    """就绪度评审 R1：属主校验——非属主视同不存在，属主与 admin（owner=None）可读。"""
+    tid = manager.submit(lambda: 1, owner="alice")
+    manager.wait(tid)
+    # 属主本人可读
+    snap = manager.snapshot(tid, owner="alice")
+    assert snap is not None and snap["result"] == 1
+    # 其他用户读取 -> None（fail-closed，不泄露任务存在性）
+    assert manager.snapshot(tid, owner="mallory") is None
+    # 未登记属主的历史任务对 owner 校验查询同样 fail-closed
+    legacy = manager.submit(lambda: 2)
+    manager.wait(legacy)
+    assert manager.snapshot(legacy, owner="alice") is None
+    # owner=None 不校验（admin 全局可见 / 运维）
+    assert manager.snapshot(tid, owner=None)["result"] == 1

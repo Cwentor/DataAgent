@@ -47,8 +47,12 @@ class TaskManager:
         self._events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
-    def submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> str:
-        """提交任务（立即返回 task_id）；任务在后台线程执行 fn(*args, **kwargs)。"""
+    def submit(self, fn: Callable[..., Any], *args: Any, owner: str | None = None, **kwargs: Any) -> str:
+        """提交任务（立即返回 task_id）；任务在后台线程执行 fn(*args, **kwargs)。
+
+        owner：任务属主（提交者身份），写入任务快照供轮询端点做属主校验
+        （就绪度评审 R1 处置：任务结果含查询数据，防止跨用户读取）。
+        """
         task_id = uuid.uuid4().hex
         self.cleanup()
         with self._lock:
@@ -60,6 +64,7 @@ class TaskManager:
                 "finished_at": None,
                 "result": None,
                 "error": None,
+                "owner": owner,
             }
             self._events[task_id] = threading.Event()
 
@@ -88,11 +93,20 @@ class TaskManager:
         self._pool.submit(_run)
         return task_id
 
-    def snapshot(self, task_id: str) -> dict[str, Any] | None:
-        """读取任务快照；未知 task_id 返回 None。"""
+    def snapshot(self, task_id: str, owner: str | None = None) -> dict[str, Any] | None:
+        """读取任务快照；未知 task_id 返回 None。
+
+        owner 非 None 时执行属主校验：与提交时登记的 owner 不一致（含历史
+        任务未登记 owner 的情况）一律视同不存在返回 None（fail-closed，不
+        泄露任务存在性）；owner=None 不校验（admin 全局可见 / 运维 / 测试）。
+        """
         with self._lock:
             task = self._tasks.get(task_id)
-            return dict(task) if task is not None else None
+            if task is None:
+                return None
+            if owner is not None and task.get("owner") != owner:
+                return None
+            return dict(task)
 
     def wait(self, task_id: str, timeout: float = 30.0) -> dict[str, Any] | None:
         """阻塞等待任务终态（测试与同步降级用），超时返回当前快照。"""
