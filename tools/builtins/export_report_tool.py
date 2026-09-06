@@ -42,7 +42,6 @@ class ExportReportArgs(BaseModel):
     query: str | None = Field(
         default=None, min_length=1, description="自然语言问题；与前置查询结果二选一"
     )
-    principal: str | None = Field(default=None, description="数据权限主体（服务端注入）")
     format: ExportFormat = Field(default="csv", description="导出格式：csv/excel/markdown/json")
     filename: str | None = Field(
         default=None,

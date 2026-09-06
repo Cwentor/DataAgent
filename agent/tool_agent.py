@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -757,33 +758,41 @@ def _summarize(tool_result: ToolResult) -> dict[str, Any] | None:
 # 默认 Agent 工厂
 # --------------------------------------------------------------------------- #
 _default_agent: ToolAgent | None = None
-_agent_lock = None
+_agent_lock = threading.Lock()
 
 
 def default_tool_agent() -> ToolAgent:
-    """进程内复用的默认 ToolAgent（LLM 已配置 -> LLM 规划 + 总结；否则确定性）。"""
+    """进程内复用的默认 ToolAgent（LLM 已配置 -> LLM 规划 + 总结；否则确定性）。
+
+    双检锁保护并发首调（就绪度评审 P3 卫生项处置：原工厂无锁且 _agent_lock
+    为死变量，并发首调可能重复构造）。
+    """
     global _default_agent
     if _default_agent is None:
-        registry = default_registry()
-        if settings.LLM_API_KEY:
-            client = OpenAICompatClient(
-                base_url=settings.LLM_BASE_URL,
-                api_key=settings.LLM_API_KEY,
-                model=settings.LLM_MODEL,
-                temperature=settings.LLM_TEMPERATURE,
-                timeout=settings.LLM_TIMEOUT,
-            )
-            planner = LLMPlanner(client, registry=registry, max_retries=settings.LLM_MAX_RETRIES)
-            synthesizer = LLMSynthesizer(client)
-        else:
-            planner = DeterministicPlanner()
-            synthesizer = DeterministicSynthesizer()
-        _default_agent = ToolAgent(
-            registry=registry,
-            planner=planner,
-            synthesizer=synthesizer,
-            max_steps=int(getattr(settings, "MAX_AGENT_STEPS", 5)),
-        )
+        with _agent_lock:
+            if _default_agent is None:
+                registry = default_registry()
+                if settings.LLM_API_KEY:
+                    client = OpenAICompatClient(
+                        base_url=settings.LLM_BASE_URL,
+                        api_key=settings.LLM_API_KEY,
+                        model=settings.LLM_MODEL,
+                        temperature=settings.LLM_TEMPERATURE,
+                        timeout=settings.LLM_TIMEOUT,
+                    )
+                    planner = LLMPlanner(
+                        client, registry=registry, max_retries=settings.LLM_MAX_RETRIES
+                    )
+                    synthesizer = LLMSynthesizer(client)
+                else:
+                    planner = DeterministicPlanner()
+                    synthesizer = DeterministicSynthesizer()
+                _default_agent = ToolAgent(
+                    registry=registry,
+                    planner=planner,
+                    synthesizer=synthesizer,
+                    max_steps=int(getattr(settings, "MAX_AGENT_STEPS", 5)),
+                )
     return _default_agent
 
 

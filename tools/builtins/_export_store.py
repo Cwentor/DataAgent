@@ -103,14 +103,14 @@ class ExportStore:
             path.write_bytes(content)
             meta_path = self.root / f"{export_id}.meta.json"
             meta_path.write_text(
-                __import__("json").dumps(
+                json.dumps(
                     {"filename": sanitize_filename(filename), **(meta or {})},
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
             )
-        #  occasionally清理过期文件（大约每100次保存清理一次）
-        if random.random() < 0.01:  # 1% 的概率执行清理
+        # 偶发清理过期导出文件（大约每 100 次保存触发一次，摊薄扫描成本）
+        if random.random() < 0.01:
             self._cleanup_expired()
         return export_id
 
