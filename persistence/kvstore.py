@@ -69,9 +69,7 @@ class SqliteKVStore:
                 if "locked" not in str(exc).lower():
                     raise
                 time.sleep(delay)
-        raise sqlite3.OperationalError(
-            f"WAL 模式切换重试耗尽（数据库被并发占用）: {self._db_path}"
-        )
+        raise sqlite3.OperationalError(f"WAL 模式切换重试耗尽（数据库被并发占用）: {self._db_path}")
 
     def get(self, key: str, ttl_seconds: float | None = None) -> Any | None:
         """读取键值；TTL 过期记录读取即删除并返回 None。"""
