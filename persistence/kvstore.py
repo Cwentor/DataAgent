@@ -8,6 +8,8 @@
 - 接口与进程内 dict 语义一致：get / set / delete / clear / close；
 - get 支持惰性 TTL 失效（过期记录读取时删除）；
 - 线程安全（RLock 串行化 SQLite 读写）；
+- 多 worker 并发写加固（遗留风险项2）：连接启用 WAL 日志模式（并发读不阻塞写）
+  + busy_timeout 等锁重试（写锁冲突时等待而非立即报 database is locked）；
 - 值统一 JSON 序列化（ensure_ascii=False 保中文；datetime/date 走 default=str），
   由调用方负责反序列化为领域对象；
 - 只做键值读写，不承担任何鉴权/审计职责（安全防线仍在业务层）。
@@ -33,16 +35,43 @@ def _json_default(obj: Any) -> str:
 class SqliteKVStore:
     """线程安全 SQLite 键值存储：key -> JSON 值，可选 TTL 惰性失效。"""
 
-    def __init__(self, db_path: str | Path, table: str = "kv") -> None:
+    def __init__(self, db_path: str | Path, table: str = "kv", busy_timeout_ms: int = 5000) -> None:
         self._db_path = str(db_path)
         self._table = table
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        # 多 worker 并发写加固：busy_timeout 为连接级属性（须在持锁操作前设置）；
+        # WAL 为数据库级持久属性，仅首次切换需要排他锁。
+        self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        self._enable_wal()
         self._conn.execute(
             f'CREATE TABLE IF NOT EXISTS "{table}" ('
             "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL)"
         )
         self._conn.commit()
         self._lock = threading.RLock()
+
+    def _enable_wal(self) -> None:
+        """切换 WAL 日志模式（已处于 WAL 则跳过）。
+
+        journal_mode 切换需要排他锁且不走 busy_timeout 重试（SQLite 行为），
+        多 worker 并发初始化时可能撞锁，故显式短重试；耗尽仍失败则抛出，
+        不静默降级（不吞错原则）。
+        """
+        current = self._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(current).lower() == "wal":
+            return
+        delay = 0.05
+        for _ in range(20):
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                time.sleep(delay)
+        raise sqlite3.OperationalError(
+            f"WAL 模式切换重试耗尽（数据库被并发占用）: {self._db_path}"
+        )
 
     def get(self, key: str, ttl_seconds: float | None = None) -> Any | None:
         """读取键值；TTL 过期记录读取即删除并返回 None。"""
