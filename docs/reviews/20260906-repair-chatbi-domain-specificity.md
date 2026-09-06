@@ -1,9 +1,9 @@
 # 评审报告｜缺陷修复：ChatBI 领域专业性整改闭环（2026-09）
 
-> 评审日期：2026-09 · 修复对象：`audit-chatbi-domain-specificity.md` · 验收：324 passed + black + ruff 全绿
+> 评审日期：2026-09 · 修复对象：`20260906-audit-chatbi-domain-specificity.md` · 验收：324 passed + black + ruff 全绿
 
 **版本**: v1.0-final  
-**范围**: `docs/reviews/audit-chatbi-domain-specificity.md` 全部 P0/P1/P2 项（含整改指令2-4 多轮 golden 闭环）  
+**范围**: `docs/reviews/20260906-audit-chatbi-domain-specificity.md` 全部 P0/P1/P2 项（含整改指令2-4 多轮 golden 闭环）  
 **测试基线**: 325 passed（含 25 条 golden 评测 + 104 条回归单测）  
 **格式**: `black --check .` ✅ `ruff check .` ✅
 
@@ -186,7 +186,7 @@ default_tool_agent(registry=registry)  # 传递 registry
 | `_run_with_timeout` monkeypatch 测试脆弱 | 测试拦截 EXPLAIN 需精确匹配 lambda；生产无影响 | P3 | 可选：在 `execute_sql` 内部注入 `pre_check_hook(callback)` 供测试 stub |
 | `agent/time_utils.py` QUARTER 分支实测 | `_resolve_window` QUARTER calendar 逻辑通过编译器单测覆盖；heuristic 自然语言解析未添加 "季度" 时间词规则 | P2 | 补充 "N个季度" / "本季度" 正则规则 |
 | `STATE_STORE_DB` 多 worker 并发写 | SQLite 默认 WAL 模式对并发读安全；并发写竞争由 RLock 串行，未做冲突重试 | P2 | ✅ `SqliteKVStore` 连接启用 WAL + busy_timeout 等锁重试（journal_mode 切换撞锁显式重试，耗尽抛出不吞错），附并发写单测（commit `43dbe8e`） |
-| `AuthenticationError` 空根 | `web/service.py:45` 分支 `raise AuthenticationError()` 仍存在；路由不阻断 | P0 | ✅ 单独立项核实为误报：全库无空参异常构造、`web/service.py` 全历史未含该标识符（行号系漂移）、受保护路由门禁完整——详见 [audit-authentication-error-null-root.md](audit-authentication-error-null-root.md)，核实关闭 |
+| `AuthenticationError` 空根 | `web/service.py:45` 分支 `raise AuthenticationError()` 仍存在；路由不阻断 | P0 | ✅ 单独立项核实为误报：全库无空参异常构造、`web/service.py` 全历史未含该标识符（行号系漂移）、受保护路由门禁完整——详见 [20260906-audit-authentication-error-null-root.md](20260906-audit-authentication-error-null-root.md)，核实关闭 |
 
 ---
 

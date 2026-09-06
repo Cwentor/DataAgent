@@ -10,14 +10,15 @@
 ## 文件命名规范
 
 ```
-<类型>-<主题关键词>.md
+yyyymmdd-<类型>-<主题关键词>.md
 ```
 
+- `yyyymmdd`：评审归档日期（文件首次入库日，8 位数字前缀，保证目录按时间排序）；
 - 类型使用小写 kebab-case 英文关键词，例如：
   - `pr-review-*`：Pull Request / 变更全量评审
   - `audit-*`：深度审计（架构 / 性能 / 安全等）
   - `readiness-*`：生产就绪度评审
-- 示例：`pr-review-multi-tool-agent.md`、`audit-code-depth.md`、`readiness-production.md`
+- 示例：`20260905-pr-review-multi-tool-agent.md`、`20260905-code-depth-audit.md`、`20260906-readiness-final-signoff.md`
 
 ## 标题统一格式
 
@@ -53,10 +54,10 @@
 
 | 文件 | 评审报告 | 日期 |
 | --- | --- | --- |
-| [pr-review-multi-tool-agent.md](pr-review-multi-tool-agent.md) | PR 评审：多工具编排升级 | 2025-06 |
-| [code-depth-audit.md](code-depth-audit.md) | 深度审计：代码深度与生产健壮性 | 2026-09 |
-| [production-readiness-audit.md](production-readiness-audit.md) | 就绪度评审：生产就绪度 | 2026-09 |
-| [audit-chatbi-domain-specificity.md](audit-chatbi-domain-specificity.md) | 深度审计：ChatBI 领域专业性与问数能力穿透 | 2026-09 |
-| [repair-chatbi-domain-specificity.md](repair-chatbi-domain-specificity.md) | 缺陷修复：ChatBI 领域专业性整改闭环 | 2026-09 |
-| [audit-authentication-error-null-root.md](audit-authentication-error-null-root.md) | 深度审计：AuthenticationError 空根遗留风险项核实 | 2026-09 |
-| [readiness-final-signoff.md](readiness-final-signoff.md) | 就绪度评审：终态生产就绪度综合审计与防退化验收 | 2026-09 |
+| [20260905-pr-review-multi-tool-agent.md](20260905-pr-review-multi-tool-agent.md) | PR 评审：多工具编排升级 | 2025-06 |
+| [20260905-code-depth-audit.md](20260905-code-depth-audit.md) | 深度审计：代码深度与生产健壮性 | 2026-09 |
+| [20260905-production-readiness-audit.md](20260905-production-readiness-audit.md) | 就绪度评审：生产就绪度 | 2026-09 |
+| [20260906-audit-chatbi-domain-specificity.md](20260906-audit-chatbi-domain-specificity.md) | 深度审计：ChatBI 领域专业性与问数能力穿透 | 2026-09 |
+| [20260906-repair-chatbi-domain-specificity.md](20260906-repair-chatbi-domain-specificity.md) | 缺陷修复：ChatBI 领域专业性整改闭环 | 2026-09 |
+| [20260906-audit-authentication-error-null-root.md](20260906-audit-authentication-error-null-root.md) | 深度审计：AuthenticationError 空根遗留风险项核实 | 2026-09 |
+| [20260906-readiness-final-signoff.md](20260906-readiness-final-signoff.md) | 就绪度评审：终态生产就绪度综合审计与防退化验收 | 2026-09 |

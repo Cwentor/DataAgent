@@ -1,7 +1,7 @@
 # PR Review Fixes - Change Log
 
 ## Summary
-Based on the PR review report for multi-tool agent upgrade (docs/reviews/pr-review-multi-tool-agent.md), this document details all fixes applied to address the identified issues.
+Based on the PR review report for multi-tool agent upgrade (docs/reviews/20260905-pr-review-multi-tool-agent.md), this document details all fixes applied to address the identified issues.
 
 ---
 

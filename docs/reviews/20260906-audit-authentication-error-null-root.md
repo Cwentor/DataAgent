@@ -6,7 +6,7 @@
 
 ## 1. 立项背景
 
-[`repair-chatbi-domain-specificity.md`](repair-chatbi-domain-specificity.md) §四 残余风险说明中列有一项 P0：
+[`20260906-repair-chatbi-domain-specificity.md`](20260906-repair-chatbi-domain-specificity.md) §四 残余风险说明中列有一项 P0：
 
 > | `AuthenticationError` 空根 | `web/service.py:45` 分支 `raise AuthenticationError()` 仍存在；路由不阻断 | P0 | 整改指令1 范围外，建议单独立项修复 |
 
@@ -56,5 +56,5 @@
 ## 3. 结论与处置
 
 - **结论**：该项为报告行号漂移所致的**误报**，当前代码库不存在空根 `AuthenticationError` 调用，也不存在认证门禁缺失路径，无需代码修复；
-- **处置**：本立项以核实关闭；[`repair-chatbi-domain-specificity.md`](repair-chatbi-domain-specificity.md) §四 已同步更新该项及同节其余两项（KV 缓存容量配置化、SQLite WAL/busy_timeout）的处置状态；
+- **处置**：本立项以核实关闭；[`20260906-repair-chatbi-domain-specificity.md`](20260906-repair-chatbi-domain-specificity.md) §四 已同步更新该项及同节其余两项（KV 缓存容量配置化、SQLite WAL/busy_timeout）的处置状态；
 - **遗留动作**：无。

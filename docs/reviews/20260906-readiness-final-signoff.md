@@ -3,7 +3,7 @@
 - 评审对象：FutureBI（规格驱动 ChatBI：NL → DSL(JSON) → 确定性 SQL 编译器 → DuckDB），审计基线 commit `f70f4e3`
 - 评审方式：全量代码走读（exec / semantic / security / agent / tools / web / auth / present / persistence）+ 历史评审报告逐项闭环对照 + 全量测试与质量门实测
 - 实测结果：`pytest -q` **350 passed（39.09s）**；`black --check .` **104 files clean**；`ruff check .` **clean**
-- 对照基准：[`production-readiness-audit.md`](production-readiness-audit.md)（80/100，159 passed）、[`code-depth-audit.md`](code-depth-audit.md)（P0-1~P0-6）、[`pr-review-multi-tool-agent.md`](pr-review-multi-tool-agent.md)（P0×1 / P1×5 / P2×8）
+- 对照基准：[`20260905-production-readiness-audit.md`](20260905-production-readiness-audit.md)（80/100，159 passed）、[`20260905-code-depth-audit.md`](20260905-code-depth-audit.md)（P0-1~P0-6）、[`20260905-pr-review-multi-tool-agent.md`](20260905-pr-review-multi-tool-agent.md)（P0×1 / P1×5 / P2×8）
 
 ---
 

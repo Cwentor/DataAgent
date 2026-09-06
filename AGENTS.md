@@ -116,7 +116,7 @@ web/        Web 可视化 UI（service + server + static 前端）
 ## 评审落盘规范（Review Archive）
 
 - 任何评审（PR 评审、代码审计、生产就绪度评审、安全评审等）的落盘文件**必须统一输出到 `docs/reviews/`**，严禁散落在项目根目录或其他目录；
-- 文件命名遵循 `docs/reviews/README.md` 中的 kebab-case 英文规范（如 `pr-review-<主题>.md`、`audit-<主题>.md`、`readiness-<主题>.md`）；
+- 文件命名遵循 `docs/reviews/README.md` 中的规范：`yyyymmdd-` 归档日期前缀 + kebab-case 英文类型与主题（如 `20260905-pr-review-<主题>.md`、`20260906-audit-<主题>.md`、`20260906-readiness-<主题>.md`）；
 - 文件首行标题必须遵循统一格式 `# 评审报告｜<评审类型>：<评审主题>（YYYY-MM）`，内容结构不强制统一；
 - 归档规范与清单详见 [`docs/reviews/README.md`](docs/reviews/README.md)。
 

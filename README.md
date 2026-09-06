@@ -67,7 +67,7 @@ FutureBI/
 | [安全模型](docs/security.md) | 认证、数据权限、演示账号 |
 | [质量保障](docs/quality.md) | Golden 评测、CI、可复现锚点 |
 | [演进里程碑](docs/roadmap.md) | 十二期能力演进 |
-| [生产就绪评审](./docs/reviews/production-readiness-audit.md) | 生产就绪度评估与整改项 |
+| [生产就绪评审](./docs/reviews/20260905-production-readiness-audit.md) | 生产就绪度评估与整改项 |
 | [评审归档](./docs/reviews/README.md) | 历次评审落盘文件统一归档目录 |
 | [工程约定](./AGENTS.md) | 面向 AI 协作者的运行环境与命令 |
 
