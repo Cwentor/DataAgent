@@ -60,9 +60,7 @@ class QueryCache:
         )
         self._lock = threading.Lock()
 
-    def get(
-        self, key: str
-    ) -> tuple[list[str], list[list[Any]], int] | None:
+    def get(self, key: str) -> tuple[list[str], list[list[Any]], int] | None:
         """命中返回 (columns, rows, scan_rows)；过期 / 缺失返回 None。"""
         with self._lock:
             item = self._store.get(key)
@@ -78,7 +76,10 @@ class QueryCache:
     def put(self, key: str, columns: list[str], rows: list[list[Any]], scan_rows: int) -> None:
         """写入结果；超容量淘汰最久未命中条目。"""
         with self._lock:
-            self._store[key] = (time.monotonic(), (list(columns), [list(r) for r in rows], scan_rows))
+            self._store[key] = (
+                time.monotonic(),
+                (list(columns), [list(r) for r in rows], scan_rows),
+            )
             self._store.move_to_end(key)
             while len(self._store) > self._max_entries:
                 self._store.popitem(last=False)

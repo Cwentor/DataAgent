@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import time
 
-import duckdb
-
 from config import settings
 from exec.query_cache import QueryCache, query_cache_key
 from tools.builtins._query_core import run_guarded_query

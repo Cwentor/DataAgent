@@ -69,7 +69,11 @@ MAX_CONCURRENT_QUERIES: int = int(os.getenv("MAX_CONCURRENT_QUERIES", "4"))
 
 # 查询结果缓存（生产化）：同 (principal, SQL, 执行参数) 短期内重复查询免重复执行。
 # 默认关闭；开启前确认数据时效可容忍 TTL 窗口（只读系统无写失效问题）。
-QUERY_CACHE_ENABLED: bool = os.getenv("QUERY_CACHE_ENABLED", "0").lower() not in ("0", "false", "no")
+QUERY_CACHE_ENABLED: bool = os.getenv("QUERY_CACHE_ENABLED", "0").lower() not in (
+    "0",
+    "false",
+    "no",
+)
 QUERY_CACHE_TTL_SECONDS: float = float(os.getenv("QUERY_CACHE_TTL_SECONDS", "300"))
 QUERY_CACHE_MAX_ENTRIES: int = int(os.getenv("QUERY_CACHE_MAX_ENTRIES", "256"))
 
