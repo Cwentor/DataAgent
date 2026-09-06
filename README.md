@@ -63,7 +63,7 @@ python -m mock.init_duckdb
 python -m web.server 8000
 ```
 
-浏览器打开 http://127.0.0.1:8000。更完整的安装、评测与离线自检步骤见 [快速开始](docs/quickstart.md)。
+> 🌐 启动后用浏览器打开 <http://127.0.0.1:8000> 即可体验；完整的安装、评测与离线自检步骤见 **[快速开始](docs/quickstart.md)**。
 
 ## 📦 项目结构
 
