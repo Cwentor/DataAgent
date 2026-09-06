@@ -276,7 +276,7 @@ def run_query(
     try:
         # P0-5 澄清槽位回填：命中上一轮挂起上下文且答案可填槽时，合并回原问题
         slot_store = default_slot_store() if session_id else None
-        pending = slot_store.get(session_id) if slot_store is not None else None
+        pending = slot_store.get(session_id, owner) if slot_store is not None else None
         if pending is not None and pending_kinds(pending):
             merged = attempt_fill(pending, query)
             if merged is not None:
@@ -307,7 +307,7 @@ def run_query(
 
         if detected == IntentType.CHITCHAT:
             if slot_store is not None:
-                slot_store.clear(session_id)
+                slot_store.clear(session_id, owner)
             # 记忆状态解耦：闲聊轮绝不污染 last_dsl / active_entities 等结构化数据
             # 查询状态，仅追加用户消息保留多轮对话语境（后续省略指代仍可继承上轮 DSL）
             if memory_store is not None and state is not None:
@@ -326,6 +326,7 @@ def run_query(
                 slot_store.set(
                     session_id,
                     ClarifyContext(original_query=effective_query, pending=pending),
+                    owner,
                 )
             # 澄清轮保留上轮有效 DSL（用户补口径后可能回到原查询语境）
             if memory_store is not None and state is not None:
@@ -353,7 +354,7 @@ def run_query(
         elif detected == IntentType.GLOSSARY_EXPLAIN:
             # 口径文档检索：经 explain_glossary_tool 执行，记录调度轨迹（不触达 SQL 引擎）
             if slot_store is not None:
-                slot_store.clear(session_id)
+                slot_store.clear(session_id, owner)
             agent_result = default_tool_agent().run(effective_query, principal, request_id=rid)
             result["steps"] = [s.to_dict() for s in agent_result.steps]
             result["answer"] = agent_result.answer
@@ -367,6 +368,7 @@ def run_query(
                         original_query=effective_query,
                         pending=tuple(c.get("kind") for c in agent_result.clarifications),
                     ),
+                    owner,
                 )
 
             result["message"] = (
@@ -387,7 +389,7 @@ def run_query(
         else:
             # DATA_QUERY：Multi-Tool Agent 调度（Plan & Select -> Execute & Guard -> Reflect）
             if slot_store is not None:
-                slot_store.clear(session_id)
+                slot_store.clear(session_id, owner)
             agent = default_tool_agent()
 
             # 会话上下文继承与消解（Contextual Merging）：

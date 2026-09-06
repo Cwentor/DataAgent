@@ -47,19 +47,25 @@ class ClarifyContext:
 class ClarifySlotStore:
     """线程安全的会话级澄清上下文缓存（随 TTL 惰性失效）。
 
+    就绪度评审 R2 处置：条目登记属主（user_id），get/clear 带身份时校验
+    归属——跨用户 / 未登记属主的条目一律视同不存在（fail-closed），与会话
+    记忆 SessionStore 的 (session_id, user_id) 双键隔离对齐；user_id=None
+    时不做归属校验（纯 session 键，向后兼容既有调用与测试）。
+
     配置 db_path 时通过 SqliteKVStore 落盘（整改指令3-2：多 worker/重启一致）。
     """
 
     def __init__(self, ttl_seconds: int | None = None, db_path: str | None = None) -> None:
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.CLARIFY_SLOT_TTL
-        self._items: dict[str, ClarifyContext] = {}
+        # 值为 (owner, ctx)：属主与上下文一并缓存/落盘，供归属校验
+        self._items: dict[str, tuple[str | None, ClarifyContext]] = {}
         self._lock = threading.Lock()
         self._kv = SqliteKVStore(db_path, table="clarify_slots") if db_path else None
 
-    def get(self, session_id: str) -> ClarifyContext | None:
+    def get(self, session_id: str, user_id: str | None = None) -> ClarifyContext | None:
         with self._lock:
-            ctx = self._items.get(session_id)
-            if ctx is None and self._kv is not None:
+            entry = self._items.get(session_id)
+            if entry is None and self._kv is not None:
                 raw = self._kv.get(session_id, ttl_seconds=self._ttl)
                 if raw is not None:
                     ctx = ClarifyContext(
@@ -67,13 +73,17 @@ class ClarifySlotStore:
                         pending=tuple(raw["pending"]),
                         created_at=float(raw["created_at"]),
                     )
+                    entry = (raw.get("owner"), ctx)
                     if not ctx.expired(self._ttl):
-                        self._items[session_id] = ctx
+                        self._items[session_id] = entry
                     else:
                         self._kv.delete(session_id)
-                        ctx = None
-            if ctx is None:
+                        entry = None
+            if entry is None:
                 return None
+            owner, ctx = entry
+            if user_id is not None and owner != user_id:
+                return None  # 跨用户 / 未登记属主：拒绝继承（fail-closed）
             if ctx.expired(self._ttl):
                 self._items.pop(session_id, None)
                 if self._kv is not None:
@@ -81,9 +91,9 @@ class ClarifySlotStore:
                 return None
             return ctx
 
-    def set(self, session_id: str, ctx: ClarifyContext) -> None:
+    def set(self, session_id: str, ctx: ClarifyContext, user_id: str | None = None) -> None:
         with self._lock:
-            self._items[session_id] = ctx
+            self._items[session_id] = (user_id, ctx)
             if self._kv is not None:
                 self._kv.set(
                     session_id,
@@ -91,11 +101,21 @@ class ClarifySlotStore:
                         "original_query": ctx.original_query,
                         "pending": list(ctx.pending),
                         "created_at": ctx.created_at,
+                        "owner": user_id,
                     },
                 )
 
-    def clear(self, session_id: str) -> None:
+    def clear(self, session_id: str, user_id: str | None = None) -> None:
+        """删除槽位上下文；带身份且归属不一致时不误删（视为不存在）。"""
         with self._lock:
+            if user_id is not None:
+                entry = self._items.get(session_id)
+                if entry is not None and entry[0] != user_id:
+                    return
+                if entry is None and self._kv is not None:
+                    raw = self._kv.get(session_id)
+                    if raw is not None and raw.get("owner") != user_id:
+                        return
             self._items.pop(session_id, None)
             if self._kv is not None:
                 self._kv.delete(session_id)

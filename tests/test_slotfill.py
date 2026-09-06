@@ -60,6 +60,55 @@ def test_slot_store_clear():
 
 
 # --------------------------------------------------------------------------- #
+# 属主隔离（就绪度评审 R2）：槽位按 (session_id, user_id) 归属校验
+# --------------------------------------------------------------------------- #
+def test_slot_store_owner_isolation():
+    store = ClarifySlotStore(ttl_seconds=600)
+    store.set(
+        "s-own",
+        ClarifyContext(original_query="GMV是多少？", pending=(SLOT_MISSING_TIME,)),
+        user_id="alice",
+    )
+    # 属主可读
+    assert store.get("s-own", user_id="alice") is not None
+    # 跨用户拒绝（fail-closed，视同不存在）
+    assert store.get("s-own", user_id="mallory") is None
+    # 未登记属主的条目对带身份查询同样拒绝
+    store.set("s-legacy", ClarifyContext(original_query="x", pending=(SLOT_MISSING_TIME,)))
+    assert store.get("s-legacy", user_id="alice") is None
+    # 无身份查询不校验（向后兼容旧调用）
+    assert store.get("s-legacy") is not None
+
+
+def test_slot_store_clear_foreign_user_noop():
+    """跨用户 clear 不误删属主槽位。"""
+    store = ClarifySlotStore(ttl_seconds=600)
+    store.set(
+        "s-del",
+        ClarifyContext(original_query="x", pending=(SLOT_MISSING_TIME,)),
+        user_id="alice",
+    )
+    store.clear("s-del", user_id="mallory")
+    assert store.get("s-del", user_id="alice") is not None
+    store.clear("s-del", user_id="alice")
+    assert store.get("s-del", user_id="alice") is None
+
+
+def test_slot_store_sqlite_owner_isolation_persisted(tmp_path):
+    """持久层恢复的槽位同样做归属校验。"""
+    db = str(tmp_path / "slots-own.db")
+    store1 = ClarifySlotStore(ttl_seconds=600, db_path=db)
+    store1.set(
+        "s-pown",
+        ClarifyContext(original_query="x", pending=(SLOT_MISSING_TIME,)),
+        user_id="alice",
+    )
+    store2 = ClarifySlotStore(ttl_seconds=600, db_path=db)
+    assert store2.get("s-pown", user_id="mallory") is None
+    assert store2.get("s-pown", user_id="alice") is not None
+
+
+# --------------------------------------------------------------------------- #
 # 端到端：先反问，再用短语回答 -> 联合原问题执行
 # --------------------------------------------------------------------------- #
 def test_run_query_clarify_then_fill_time(conn):
