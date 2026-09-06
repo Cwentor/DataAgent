@@ -215,6 +215,18 @@ def test_unsafe_sql_rejects_metadata_and_query_functions(big_conn):
             execute_sql(big_conn, sql)
 
 
+def test_unsafe_sql_rejects_extension_file_functions(big_conn):
+    """就绪度评审测试盲区处置：扩展读文件/探测函数（spatial 预装等场景下
+    绕过 INSTALL/LOAD 语句级拦截的兜底）显式纳入黑名单。"""
+    for sql in (
+        "SELECT * FROM st_read('map.geojson')",
+        "SELECT * FROM st_read('x.gpkg')",
+        "SELECT * FROM sniff_csv('data.csv')",
+    ):
+        with pytest.raises(UnsafeSqlError):
+            execute_sql(big_conn, sql)
+
+
 def test_unsafe_sql_allows_union_and_legit_functions(big_conn):
     """只读 UNION 与编译器合法函数（date_trunc/generate_series 等）不应误伤。"""
     assert_read_only_sql("SELECT 1 AS a UNION ALL SELECT 2")

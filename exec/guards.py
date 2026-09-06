@@ -113,13 +113,16 @@ _FORBIDDEN_SQL_KEYWORDS = {
 #                        postgres_query/pandas_scan/arrow_scan 等）；
 # - *_scan/*_query/*_execute/*_glob/*_http：任意外部源扫描与路径枚举；
 # - glob/query/query_table/json_execute_serialized_sql/write_log：路径枚举、把字符串
-#   当 SQL 执行（可嵌套 read_* 形成二次绕过）、外部写。
+#   当 SQL 执行（可嵌套 read_* 形成二次绕过）、外部写；
+# - sniff_csv/st_read：文件内容探测与空间扩展读文件（就绪度评审测试盲区处置：
+#   扩展被预装的部署环境下绕过 INSTALL/LOAD 语句级拦截的兜底）。
 _FORBIDDEN_FUNCTION_CALL_RE = re.compile(
     r"\b(?:"
     r"(?:read_|write_|parquet_|sqlite_|postgres_|mysql_|mongo_|delta_|iceberg_|excel_|arrow_"
     r"|http_|azure_|s3_|gcs_|hdfs_)[a-z0-9_]*"
     r"|[a-z0-9_]*(?:_scan|_query|_execute|_glob|_http)"
     r"|glob|query|query_table|json_execute_serialized_sql|write_log"
+    r"|sniff_csv|st_read"
     r")\s*\(",
     re.IGNORECASE,
 )
@@ -133,6 +136,7 @@ _FORBIDDEN_FUNCTION_RE = re.compile(
     r"|http_|azure_|s3_|gcs_|hdfs_)[a-z0-9_]*"
     r"|[a-z0-9_]*(?:_scan|_query|_execute|_glob|_http)"
     r"|glob|query|query_table|json_execute_serialized_sql|write_log"
+    r"|sniff_csv|st_read"
     r")$",
     re.IGNORECASE,
 )
