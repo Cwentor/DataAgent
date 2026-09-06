@@ -211,3 +211,104 @@ def test_setup_logging_is_idempotent():
         if isinstance(h.formatter, JsonFormatter):
             logging.getLogger().removeHandler(h)
     assert get_request_id()
+
+
+# --------------------------------------------------------------------------- #
+# 离线漏斗分析：按 detected_intent + routing_reason 聚合分流质量
+# --------------------------------------------------------------------------- #
+def _seed_routing_records(store: AuditStore) -> None:
+    """构造含意图路由字段的审计样本：3 data_query / 1 chitchat / 1 无标注。"""
+    rows = [
+        ("r1", "data_query", "fast_path_keywords", 12.0, None),
+        ("r2", "data_query", "llm_classifier", 40.0, "PipelineError: 无法识别指标"),
+        ("r3", "data_query", "llm_classifier", 8.0, None),
+        ("r4", "chitchat", "fast_path_greeting", 1.0, None),
+        ("r5", None, None, None, None),
+    ]
+    for rid, intent, reason, latency, error in rows:
+        store.write(
+            AuditRecord(
+                request_id=rid,
+                prompt="q",
+                sql="SELECT 1",
+                detected_intent=intent,
+                routing_latency_ms=latency,
+                routing_reason=reason,
+                error=error,
+            )
+        )
+
+
+def test_routing_funnel_report_aggregates(tmp_path):
+    """意图漏斗 / 原因分解 / 耗时分位 / 失败率代理 全量聚合正确。"""
+    from audit.analysis import routing_funnel_report
+
+    db = tmp_path / "audit.duckdb"
+    store = AuditStore(db_path=db)
+    _seed_routing_records(store)
+    store.close()
+
+    report = routing_funnel_report(db_path=db)
+    assert report["total"] == 5
+    intents = {item["intent"]: item for item in report["intents"]}
+    assert intents["data_query"]["count"] == 3
+    assert intents["data_query"]["share"] == 0.6
+    assert intents["chitchat"]["count"] == 1
+    assert intents["(unrouted)"]["count"] == 1
+
+    reasons = report["routing_reasons"]["data_query"]
+    by_reason = {item["reason"]: item for item in reasons}
+    assert by_reason["fast_path_keywords"]["count"] == 1
+    assert by_reason["llm_classifier"]["count"] == 2
+    assert by_reason["llm_classifier"]["share"] == round(2 / 3, 4)
+
+    lat = report["routing_latency_ms"]
+    assert lat["samples"] == 4
+    assert lat["p50"] == 10.0  # (8, 12) 中位
+    assert lat["max"] == 40.0
+
+    err = {item["intent"]: item for item in report["error_rate_by_intent"]}
+    assert err["data_query"]["errors"] == 1
+    assert err["data_query"]["error_rate"] == round(1 / 3, 4)
+    assert err["chitchat"]["error_rate"] == 0.0
+
+
+def test_routing_funnel_report_empty_and_missing(tmp_path):
+    """audit_log 表缺失 / 库文件缺失 / 空表 -> total=0 空报表而非报错。"""
+    from audit.analysis import routing_funnel_report
+
+    empty = routing_funnel_report(db_path=tmp_path / "missing.duckdb")
+    assert empty["total"] == 0 and empty["intents"] == []
+
+    bare = tmp_path / "bare.duckdb"
+    bare_conn = duckdb.connect(str(bare))
+    bare_conn.execute("CREATE TABLE other (a int)")
+    report = routing_funnel_report(conn=bare_conn)
+    assert report["total"] == 0
+    bare_conn.close()
+
+    db = tmp_path / "audit.duckdb"
+    AuditStore(db_path=db).close()  # 建表但零记录
+    assert routing_funnel_report(db_path=db)["total"] == 0
+
+
+def test_routing_funnel_report_json_cli(tmp_path, capsys):
+    """CLI --json 输出可解析的报表 JSON（生产侧管道消费入口）。"""
+    from audit.analysis import main as analysis_main
+
+    db = tmp_path / "audit.duckdb"
+    store = AuditStore(db_path=db)
+    _seed_routing_records(store)
+    store.close()
+
+    import sys
+
+    argv_backup = sys.argv
+    try:
+        sys.argv = ["audit.analysis", "--db", str(db), "--json"]
+        analysis_main()
+    finally:
+        sys.argv = argv_backup
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total"] == 5
+    assert payload["intents"][0]["intent"] == "data_query"
