@@ -35,7 +35,7 @@ yyyymmdd-<类型>-<主题关键词>.md
 示例：
 
 ```markdown
-# 评审报告｜PR 评审：多工具编排（Multi-Tool Agent）升级（2025-06）
+# 评审报告｜PR 评审：多工具编排（Multi-Tool Agent）升级（2026-09）
 
 # 评审报告｜深度审计：代码深度与生产健壮性（2026-09）
 
@@ -54,7 +54,7 @@ yyyymmdd-<类型>-<主题关键词>.md
 
 | 文件 | 评审报告 | 日期 |
 | --- | --- | --- |
-| [20260905-pr-review-multi-tool-agent.md](20260905-pr-review-multi-tool-agent.md) | PR 评审：多工具编排升级 | 2025-06 |
+| [20260905-pr-review-multi-tool-agent.md](20260905-pr-review-multi-tool-agent.md) | PR 评审：多工具编排升级 | 2026-09 |
 | [20260905-code-depth-audit.md](20260905-code-depth-audit.md) | 深度审计：代码深度与生产健壮性 | 2026-09 |
 | [20260905-production-readiness-audit.md](20260905-production-readiness-audit.md) | 就绪度评审：生产就绪度 | 2026-09 |
 | [20260906-audit-chatbi-domain-specificity.md](20260906-audit-chatbi-domain-specificity.md) | 深度审计：ChatBI 领域专业性与问数能力穿透 | 2026-09 |

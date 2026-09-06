@@ -1,6 +1,6 @@
-# 评审报告｜PR 评审：多工具编排（Multi-Tool Agent）升级（2025-06）
+# 评审报告｜PR 评审：多工具编排（Multi-Tool Agent）升级（2026-09）
 
-> 评审日期：2025-06（会话内实时评审） · 评审方式：逐文件通读 + 缺陷实机复现 + 全量测试/静态检查验证
+> 评审日期：2026-09（会话内实时评审） · 评审方式：逐文件通读 + 缺陷实机复现 + 全量测试/静态检查验证
 > 评审范围（本次未提交改动，共 407 insertions / 91 deletions）：
 > - 新增：`tools/`（base / registry / builtins×6）、`agent/tool_agent.py`、`tests/test_tools.py`、`tests/test_tool_agent.py`
 > - 修改：`web/service.py`、`web/server.py`、`exec/pool.py`、`audit/metrics.py`、`audit/record.py`、`config/settings.py`、`agent/heuristic.py`、`agent/glossary.py`、`present/viz.py`、`web/static/*`、`pyproject.toml`、`tests/test_web.py`
