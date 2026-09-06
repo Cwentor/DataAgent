@@ -147,7 +147,13 @@ class FakeLLM:
 
 
 def test_llm_planner_picks_tool_and_executes(conn):
-    llm = FakeLLM([json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}})])
+    """规划 -> 执行 -> 重规划判定 done 终止（R1：LLMPlanner 参与重规划循环）。"""
+    llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
+            json.dumps({"done": "信息已充分"}),
+        ]
+    )
     agent = ToolAgent(
         planner=LLMPlanner(llm, max_retries=1),
         max_steps=5,
@@ -155,7 +161,7 @@ def test_llm_planner_picks_tool_and_executes(conn):
     result = agent.run("上个月GMV是多少", conn=conn)
     assert result.error is None
     assert result.step_tools() == ["query_metric"]
-    assert llm.calls == 1
+    assert llm.calls == 2  # 1 次规划 + 1 次重规划终止判定
 
 
 def test_llm_planner_direct_answer(conn):
@@ -172,13 +178,14 @@ def test_llm_planner_retries_on_invalid_tool(conn):
         [
             json.dumps({"tool": "drop_table", "args": {}}),
             json.dumps({"tool": "query_metric", "args": {"query": "本月GMV"}}),
+            json.dumps({"done": "信息已充分"}),
         ]
     )
     agent = ToolAgent(planner=LLMPlanner(llm, max_retries=2), max_steps=5)
     result = agent.run("本月GMV", conn=conn)
     assert result.error is None
     assert result.step_tools() == ["query_metric"]
-    assert llm.calls == 2
+    assert llm.calls == 3  # 2 次规划（含重试）+ 1 次重规划终止判定
 
 
 def test_llm_planner_exhausts_retries(conn):
@@ -195,13 +202,14 @@ def test_llm_planner_illegal_args_rejected(conn):
         [
             json.dumps({"tool": "query_metric", "args": {"query": "GMV", "drop_table": "x"}}),
             json.dumps({"tool": "query_metric", "args": {"query": "GMV"}}),
+            json.dumps({"done": "信息已充分"}),
         ]
     )
     agent = ToolAgent(planner=LLMPlanner(llm, max_retries=2), max_steps=5)
     result = agent.run("GMV", conn=conn)
     assert result.error is None
     assert result.step_tools() == ["query_metric"]
-    assert llm.calls == 2
+    assert llm.calls == 3  # 2 次规划（含重试）+ 1 次重规划终止判定
 
 
 def test_llm_synthesizer_uses_llm_answer(conn):
@@ -354,11 +362,13 @@ def test_llm_planner_correct_with_registry(conn):
     reg = ToolRegistry()
     reg.register(FlakyQueryTool())
 
-    # FakeLLM：先规划 query_metric，再响应 correct() 的修复请求（仍调用 query_metric）
+    # FakeLLM：先规划 query_metric，再响应 correct() 的修复请求（仍调用 query_metric），
+    # 最后重规划判定 done 终止
     llm = FakeLLM(
         [
             json.dumps({"tool": "query_metric", "args": {"query": "本月GMV"}}),
             json.dumps({"tool": "query_metric", "args": {"query": "本月GMV"}}),
+            json.dumps({"done": "信息已充分"}),
         ]
     )
     planner = LLMPlanner(llm, registry=reg, max_retries=1)
@@ -386,3 +396,142 @@ def test_llm_planner_correct_without_registry_safe(conn):
     )()
     corrected = planner.correct("本月GMV", None, failed, record)
     assert corrected is None  # 安全降级：不修复，交由上层透传错误
+
+
+# --------------------------------------------------------------------------- #
+# R1 观察驱动重规划：中间结果（observation）参与调度导航
+# --------------------------------------------------------------------------- #
+class RecordingLLM(FakeLLM):
+    """记录每次收到的 messages（用于断言轨迹注入）。"""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.seen_messages: list[list[dict]] = []
+
+    def chat(self, messages):
+        self.seen_messages.append([dict(m) for m in messages])
+        return super().chat(messages)
+
+
+def test_replan_continues_based_on_observation(conn):
+    """重规划导航：首轮查华南 -> 基于轨迹继续查华北 -> 综合作答。"""
+    llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月华南GMV"}}),
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月华北GMV"}}),
+            json.dumps({"answer": "华北GMV更高"}),
+        ]
+    )
+    agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), max_steps=5)
+    result = agent.run("上个月华南和华北哪个GMV更高", conn=conn)
+    assert result.error is None
+    assert result.step_tools() == ["query_metric", "query_metric"]
+    assert result.replans == 1
+    assert result.answer == "华北GMV更高"  # 规划器基于轨迹的洞察优先于单输出拼装
+    assert llm.calls == 3  # 1 次规划 + 2 次重规划（继续查 + 作答）
+
+
+def test_replan_prompt_carries_trajectory(conn):
+    """重规划请求必须携带已执行轨迹（observation 注入 LLM 上下文）。"""
+    llm = RecordingLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
+            json.dumps({"done": "信息已充分"}),
+        ]
+    )
+    agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), max_steps=5)
+    result = agent.run("上个月GMV是多少", conn=conn)
+    assert result.error is None
+    replan_system = llm.seen_messages[1][0]["content"]
+    assert "已经执行过若干工具调用" in replan_system
+    assert "query_metric" in replan_system
+    assert '"success": true' in replan_system
+    assert "剩余可用步数" in replan_system
+
+
+def test_replan_done_terminates_and_synthesizes(conn):
+    """规划器判定 done -> 终止调度，答案由合成器从数据产出。"""
+    llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
+            json.dumps({"done": "信息已充分"}),
+        ]
+    )
+    agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), max_steps=5)
+    result = agent.run("上个月GMV是多少", conn=conn)
+    assert result.error is None
+    assert result.step_tools() == ["query_metric"]
+    assert result.replans == 0
+    assert "gmv" in result.answer
+
+
+def test_replan_failure_degrades_gracefully(conn):
+    """重规划环节 LLM 故障：不推翻已成功的执行结果，按现有轨迹收敛作答。"""
+    llm = FakeLLM([json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}})])
+    agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), max_steps=5)
+    result = agent.run("上个月GMV是多少", conn=conn)
+    assert result.error is None  # 重规划失败不转化为顶层错误
+    assert result.step_tools() == ["query_metric"]
+    assert result.steps[0].success is True
+    assert "gmv" in result.answer
+
+
+def test_replan_can_clarify(conn):
+    """重规划阶段可反问澄清：澄清写入结果且调度终止。"""
+    llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
+            json.dumps({"clarify": "需要按哪个维度细分？"}),
+        ]
+    )
+    agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), max_steps=5)
+    result = agent.run("上个月GMV是多少", conn=conn)
+    assert result.error is None
+    assert result.clarifications and result.clarifications[0]["question"] == "需要按哪个维度细分？"
+    assert result.intent == "clarify"
+    assert "维度" in result.answer
+
+
+def test_replan_respects_max_steps_budget(conn):
+    """重规划循环受 max_steps 硬预算约束：预算耗尽立即收敛，绝不无限循环。"""
+    tool_resp = json.dumps({"tool": "query_metric", "args": {"query": "本月GMV"}})
+    llm = FakeLLM([tool_resp] * 8)  # 响应充足：若不受预算约束将无限调度
+    agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), max_steps=3)
+    result = agent.run("本月GMV", conn=conn)
+    assert result.error is None
+    assert len(result.steps) == 3
+    assert llm.calls == 3  # 1 次规划 + 2 次重规划（第 3 步后预算耗尽不再询问）
+
+
+def test_replan_invalid_output_stops_gracefully(conn):
+    """重规划输出持续非法：校验拦截 -> 重试耗尽 -> 优雅终止（已执行结果保留）。"""
+    llm = FakeLLM(
+        [
+            json.dumps({"tool": "query_metric", "args": {"query": "本月GMV"}}),
+            json.dumps({"tool": "drop_table", "args": {}}),
+            json.dumps({"tool": "drop_table", "args": {}}),
+        ]
+    )
+    agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), max_steps=5)
+    result = agent.run("本月GMV", conn=conn)
+    assert result.error is None
+    assert result.step_tools() == ["query_metric"]
+    assert result.steps[0].success is True
+
+
+def test_deterministic_planner_skips_replan_loop(conn):
+    """确定性规划器 iterative=False：不进入重规划循环（单批调度语义不变）。"""
+    spy = {"n": 0}
+
+    class SpyPlanner(DeterministicPlanner):
+        def plan_next(self, *args, **kwargs):
+            spy["n"] += 1
+            return PlanResult()
+
+    agent = ToolAgent(planner=SpyPlanner(), max_steps=5)
+    result = agent.run("查看上个月的销售总额", conn=conn)
+    assert result.error is None
+    assert result.step_tools() == ["query_metric"]
+    assert spy["n"] == 0
+    assert DeterministicPlanner.iterative is False
+    assert LLMPlanner.iterative is True

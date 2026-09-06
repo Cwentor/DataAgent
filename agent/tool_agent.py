@@ -1,4 +1,4 @@
-"""Multi-Tool Agent 调度内核：Plan & Select -> Execute & Guard -> Reflect & Synthesize。
+"""Multi-Tool Agent 调度内核：Plan & Select -> Execute & Guard -> Replan & Synthesize。
 
 把原有单路径"NL -> DSL -> SQL 执行"升级为"工具调度状态循环"：
 1. **Plan & Select**：将已注册工具清单（Function Calling JSON Schema）注入 LLM
@@ -6,15 +6,19 @@
    或多个工具；
 2. **Execute & Guard**：入参经 Pydantic 严格校验（args_schema, extra="forbid"），
    触发工具执行；未知工具名 / 非法参数 / 越权行为一律被拦截并结构化记录；
-3. **Reflect & Synthesize**：将工具执行结果格式化喂回 LLM（或确定性合成），
-   判断信息是否完整；工具报错触发一次自愈修复（Self-Correction，受 Max Steps
+3. **Replan（观察驱动重规划，R1）**：支持迭代的规划器（LLMPlanner）在每批调用
+   执行完毕后拿到完整调度轨迹（含结果摘要），自行决策：继续调用工具补齐信息、
+   给出最终洞察、反问澄清或终止；中间结果（observation）真正参与导航，
+   而非仅用于失败自愈；
+4. **Self-Correction & Synthesize**：工具报错触发一次自愈修复（受 Max Steps
    约束）；最终合成综合洞察 + 图表渲染指令（ChartSpec）+ 导出链接。
 
 调度轨迹（ToolInvocationRecord）包含每一步的工具名、入参、耗时、成功/异常状态
 与输出摘要，可完整接入审计链路（web.service 落 audit record.steps）。
 
 确定性兜底：未配置 LLM 时使用关键词规则规划（离线可运行、可单测），
-与既有确定性 Agent 哲学一致。
+与既有确定性 Agent 哲学一致；确定性规划器不参与重规划循环（iterative=False），
+行为与单批调度完全一致。
 """
 
 from __future__ import annotations
@@ -151,6 +155,8 @@ class AgentResult:
     clarifications: list[dict[str, Any]] = field(default_factory=list)
     rewrites: int = 0
     scan_rows: int = 0
+    # R1 观察驱动重规划：执行后基于轨迹追加的调度轮数（0 = 单批调度）
+    replans: int = 0
 
     def step_tools(self) -> list[str]:
         return [s.tool for s in self.steps]
@@ -177,6 +183,10 @@ class AgentResult:
 class Planner(ABC):
     """规划器抽象：决定本轮调度调用哪些工具（或直接回答/反问）。"""
 
+    # R1 观察驱动重规划：是否支持在执行后基于轨迹继续决策（ToolAgent 据此
+    # 决定是否进入重规划循环）。确定性规划器保持单批调度语义，不参与循环。
+    iterative: bool = False
+
     @abstractmethod
     def plan(
         self,
@@ -187,6 +197,25 @@ class Planner(ABC):
         history: Any = None,
         last_dsl: Any = None,
     ) -> PlanResult: ...
+
+    def plan_next(
+        self,
+        query: str,
+        principal: str | None,
+        registry: ToolRegistry,
+        *,
+        steps: list[ToolInvocationRecord],
+        outputs: list[ToolResult],
+        remaining_steps: int,
+    ) -> PlanResult:
+        """观察驱动重规划：把已执行轨迹交给规划器，决策下一步动作。
+
+        返回值语义与 ``plan`` 一致：``calls`` 继续执行 / ``answer`` 直接作答 /
+        ``clarifications`` 反问澄清；三者皆空表示信息已充分（终止调度）。
+        默认实现保守终止：不支持迭代的规划器不会在此被调用（ToolAgent 以
+        ``iterative`` 门控），此处仅作协议兜底。
+        """
+        return PlanResult()
 
     def correct(
         self,
@@ -260,12 +289,19 @@ class DeterministicPlanner(Planner):
 class LLMPlanner(Planner):
     """LLM 规划：把工具清单（JSON Schema）注入上下文，由 LLM 决策工具调用。
 
-    协议：LLM 只输出一个 JSON 对象，取值三选一：
+    协议：LLM 只输出一个 JSON 对象，取值四选一：
     - ``{"tool": "<已注册工具名>", "args": {...}}``：调用工具；
     - ``{"answer": "..."}``：直接回答（无需工具）；
-    - ``{"clarify": "..."}``：反问澄清。
+    - ``{"clarify": "..."}``：反问澄清；
+    - ``{"done": "..."}```：信息已充分，终止调度（重规划阶段使用）。
     任何非法工具名 / 非法参数都会被校验拦截并反馈 LLM 重试（max_retries 次）。
+
+    R1 观察驱动重规划（iterative=True）：``plan_next`` 把已执行轨迹（含每步
+    结果摘要与解释）喂回 LLM，由其基于中间结果决定继续查询 / 作答 / 反问 /
+    终止——中间结果（observation）真正参与调度导航，而非仅用于失败自愈。
     """
+
+    iterative = True
 
     def __init__(
         self,
@@ -303,6 +339,59 @@ class LLMPlanner(Planner):
             },
             {"role": "user", "content": f"问题：{query}"},
         ]
+        return self._decide(query, registry, messages, context="规划")
+
+    def plan_next(
+        self,
+        query: str,
+        principal: str | None,
+        registry: ToolRegistry,
+        *,
+        steps: list[ToolInvocationRecord],
+        outputs: list[ToolResult],
+        remaining_steps: int,
+    ) -> PlanResult:
+        """观察驱动重规划：携带完整执行轨迹再次决策（R1 核心入口）。"""
+        tools_json = json.dumps(registry.tool_definitions(), ensure_ascii=False)
+        trajectory = json.dumps(
+            self._trajectory_view(steps, outputs), ensure_ascii=False
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是数据分析 Agent 的规划器。已经执行过若干工具调用，"
+                    "执行轨迹（含结果摘要）如下，请判断当前信息是否足以回答问题：\n"
+                    + trajectory
+                    + "\n\n若信息已足够 -> 输出 {\"answer\": \"基于轨迹的最终中文洞察\"}；"
+                    "若还差数据（如对比类问题只查了一个对象）-> 继续调用工具补齐；"
+                    "若需用户补充 -> 输出 clarify；若无需继续 -> 输出 done。\n"
+                    "可用的工具清单（OpenAI Function Calling 规范）：\n"
+                    + tools_json
+                    + "\n\n剩余可用步数："
+                    + str(remaining_steps)
+                    + "（必须在预算内决策，预算紧张时优先收敛作答）。\n"
+                    "输出要求：只输出一个 JSON 对象，四选一：\n"
+                    '{ "tool": "<工具名>", "args": {...} }\n'
+                    '{ "answer": "基于已有轨迹的最终中文洞察" }\n'
+                    '{ "clarify": "需要向用户追问的一句问题" }\n'
+                    '{ "done": "信息已充分或无必要继续" }\n'
+                    "禁止输出解释或多余文字。"
+                ),
+            },
+            {"role": "user", "content": f"问题：{query}"},
+        ]
+        return self._decide(query, registry, messages, context="重规划")
+
+    def _decide(
+        self,
+        query: str,
+        registry: ToolRegistry,
+        messages: list[dict[str, str]],
+        *,
+        context: str,
+    ) -> PlanResult:
+        """共享决策核：调 LLM -> 解析校验 -> 非法输出反馈重试（plan/plan_next 共用）。"""
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
             raw = self.client.chat(messages)
@@ -319,10 +408,14 @@ class LLMPlanner(Planner):
                         ]
                     )
                 name = str(obj.get("tool", ""))
+                if not name:
+                    # {"done": ...} 或空对象：信息已充分，终止调度
+                    return PlanResult()
                 args = obj.get("args") or {}
                 tool = registry.get_tool(name)  # 未注册 -> UnknownToolError
                 tool.validate_args(args)  # 非法参数 -> ValidationError
-                return PlanResult(calls=[ToolCall(name, dict(args), reason="LLM 决策")])
+                reason = "LLM 决策" if context == "规划" else "LLM 重规划"
+                return PlanResult(calls=[ToolCall(name, dict(args), reason=reason)])
             except Exception as exc:
                 last_error = exc
                 messages = [
@@ -334,8 +427,34 @@ class LLMPlanner(Planner):
                     },
                 ]
         raise PipelineError(
-            f"LLM 规划器重试 {self.max_retries} 次后仍无法产出合法工具调用: {last_error}"
+            f"LLM {context}器重试 {self.max_retries} 次后仍无法产出合法决策: {last_error}"
         ) from last_error
+
+    @staticmethod
+    def _trajectory_view(
+        steps: list[ToolInvocationRecord], outputs: list[ToolResult]
+    ) -> list[dict[str, Any]]:
+        """把调度轨迹压缩为 LLM 可消费的观察视图（截断防 Token 膨胀）。"""
+        view: list[dict[str, Any]] = []
+        for s, o in zip(steps, outputs, strict=False):
+            item: dict[str, Any] = {
+                "step": s.step,
+                "tool": s.tool,
+                "args": s.args,
+                "success": s.success,
+            }
+            if s.success:
+                if s.summary:
+                    item["summary"] = s.summary
+                data = o.data if isinstance(o.data, dict) else {}
+                if data.get("explanation"):
+                    item["explanation"] = str(data["explanation"])[:200]
+                if isinstance(data.get("rows"), list):
+                    item["row_count"] = len(data["rows"])
+            else:
+                item["error"] = (s.error_msg or "")[:200]
+            view.append(item)
+        return view
 
     def correct(
         self,
@@ -479,6 +598,13 @@ class LLMSynthesizer(Synthesizer):
         self.client = client
 
     def synthesize(self, result: AgentResult, outputs: list[ToolResult], query: str) -> None:
+        if result.answer:
+            # R1 重规划作答：规划器已基于完整轨迹给出最终洞察，
+            # 这里仅回填数据字段（dsl/sql/rows/viz/chart_spec），不再重复调 LLM
+            preset = result.answer
+            DeterministicSynthesizer().synthesize(result, outputs, query)
+            result.answer = preset
+            return
         if not outputs:
             return DeterministicSynthesizer().synthesize(result, outputs, query)
         last = outputs[-1]
@@ -584,11 +710,116 @@ class ToolAgent:
             return result
 
         outputs: list[ToolResult] = []
-        step_no = 0
-        for call in plan.calls:
-            if step_no >= self.max_steps:
-                break
-            step_no += 1
+        replan_answer: str | None = None
+
+        # 首轮计划执行（含失败自愈；True 表示不可恢复失败，终止调度）
+        stopped = self._execute_calls(
+            calls=plan.calls,
+            query=query,
+            principal=principal,
+            conn=conn,
+            executor=executor,
+            rewriter=rewriter,
+            request_id=request_id,
+            base_dsl=base_dsl,
+            result=result,
+            outputs=outputs,
+        )
+
+        # R1 观察驱动重规划：每批执行完毕后把完整轨迹喂回规划器，由其基于
+        # 中间结果决定"继续查 / 作答 / 反问 / 终止"。仅 iterative 规划器参与，
+        # 全程受 max_steps 硬预算约束，杜绝无限循环。
+        if not stopped and self.planner.iterative:
+            while (
+                len(result.steps) < self.max_steps
+                and replan_answer is None
+                and not result.clarifications
+            ):
+                try:
+                    nxt = self.planner.plan_next(
+                        query,
+                        principal,
+                        self.registry,
+                        steps=result.steps,
+                        outputs=outputs,
+                        remaining_steps=self.max_steps - len(result.steps),
+                    )
+                except Exception as exc:
+                    # 重规划失败不推翻已成功的执行结果：记录告警后按现有轨迹收敛作答
+                    logger.warning(
+                        "replan_failed",
+                        extra={
+                            "event": "replan_failed",
+                            "error": f"{type(exc).__name__}: {exc}"[:300],
+                        },
+                    )
+                    break
+                if nxt.answer is not None:
+                    replan_answer = nxt.answer
+                    break
+                if nxt.clarifications:
+                    result.clarifications = [c.to_dict() for c in nxt.clarifications]
+                    replan_answer = "；".join(c.question for c in nxt.clarifications)
+                    result.intent = IntentType.CLARIFY.value
+                    break
+                if not nxt.calls:
+                    break  # 规划器判定信息已充分（done）
+                result.replans += 1
+                stopped = self._execute_calls(
+                    calls=nxt.calls,
+                    query=query,
+                    principal=principal,
+                    conn=conn,
+                    executor=executor,
+                    rewriter=rewriter,
+                    request_id=request_id,
+                    base_dsl=base_dsl,
+                    result=result,
+                    outputs=outputs,
+                )
+                if stopped:
+                    break
+
+        if replan_answer is not None:
+            # 预置规划器洞察：合成器据此跳过重复 LLM 调用，仅回填数据字段
+            result.answer = replan_answer
+        self._log_steps(result.steps)
+
+        try:
+            self.synthesizer.synthesize(result, outputs, query)
+        except Exception as exc:
+            result.error = f"{type(exc).__name__}: {exc}"
+            result.error_type = type(exc).__name__
+        if replan_answer is not None:
+            # 规划器基于完整轨迹给出的洞察优先于单输出数据拼装答案
+            result.answer = replan_answer
+
+        result.degraded = result.degraded or any((o.meta or {}).get("degraded") for o in outputs)
+        return result
+
+    # ------------------------------------------------------------------ #
+    def _execute_calls(
+        self,
+        *,
+        calls: list[ToolCall],
+        query: str,
+        principal: str | None,
+        conn: Any,
+        executor: Any,
+        rewriter: Any,
+        request_id: str | None,
+        base_dsl: Any,
+        result: AgentResult,
+        outputs: list[ToolResult],
+    ) -> bool:
+        """顺序执行一批计划调用（失败触发一次自愈修复）。
+
+        返回 True 表示调度应终止（不可恢复失败）；False 表示本批正常完成
+        或因预算耗尽收敛（预算耗尽由调用方的循环条件自然兜住）。
+        """
+        for call in calls:
+            if len(result.steps) >= self.max_steps:
+                return False
             record, tool_result = self._execute_once(
                 call,
                 query,
@@ -597,7 +828,7 @@ class ToolAgent:
                 executor,
                 rewriter,
                 request_id,
-                step_no,
+                len(result.steps) + 1,
                 outputs,
                 base_dsl,
             )
@@ -608,15 +839,14 @@ class ToolAgent:
                 continue  # 成功 -> 继续下一个计划调用
 
             # Self-Correction：工具失败时触发一次修复（受 Max Steps 约束）
-            if self._is_permanent_error(tool_result) or step_no >= self.max_steps:
-                break
+            if self._is_permanent_error(tool_result) or len(result.steps) >= self.max_steps:
+                return True
             try:
                 corrected = self.planner.correct(query, principal, call, record)
             except Exception:
                 corrected = None
             if corrected is None:
-                break
-            step_no += 1
+                return True
             rec2, res2 = self._execute_once(
                 corrected,
                 query,
@@ -625,24 +855,15 @@ class ToolAgent:
                 executor,
                 rewriter,
                 request_id,
-                step_no,
+                len(result.steps) + 1,
                 outputs,
                 base_dsl,
             )
             outputs.append(res2)
             result.steps.append(rec2)
             if not rec2.success:
-                break
-        self._log_steps(result.steps)
-
-        try:
-            self.synthesizer.synthesize(result, outputs, query)
-        except Exception as exc:
-            result.error = f"{type(exc).__name__}: {exc}"
-            result.error_type = type(exc).__name__
-
-        result.degraded = result.degraded or any((o.meta or {}).get("degraded") for o in outputs)
-        return result
+                return True
+        return False
 
     # ------------------------------------------------------------------ #
     def _execute_once(
