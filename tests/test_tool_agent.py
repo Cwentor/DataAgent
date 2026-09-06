@@ -326,7 +326,7 @@ def test_agent_result_to_dict(conn):
     result = agent.run("GMV 是怎么算的", conn=conn)
     d = result.to_dict()
     assert d["steps"][0]["tool"] == "explain_glossary"
-    assert d["intent"] == "text2sql"
+    assert d["intent"] == "data_query"
 
 
 # --------------------------------------------------------------------------- #

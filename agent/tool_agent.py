@@ -27,8 +27,8 @@ from typing import Any
 from agent.agent import extract_json
 from agent.clarify import Clarification, detect_clarifications
 from agent.errors import PipelineError
-from agent.intent import Intent
 from agent.llm import OpenAICompatClient
+from agent.router import IntentType
 from audit.logging import get_logger
 from config import settings
 from semantic.dsl_schema import QueryDSL
@@ -135,7 +135,7 @@ class AgentResult:
     error: str | None = None
     error_type: str | None = None
     degraded: bool = False
-    intent: str = Intent.TEXT2SQL.value
+    intent: str = IntentType.DATA_QUERY.value
 
     # 数据工具产物（供 web 层透传）
     dsl: QueryDSL | None = None
@@ -573,14 +573,13 @@ class ToolAgent:
 
         if plan.answer is not None:
             result.answer = plan.answer
-            result.intent = (
-                Intent.DIRECT_ANSWER.value if hasattr(Intent, "DIRECT_ANSWER") else "direct_answer"
-            )
+            # 直接回答：五分类体系无独立意图，保留旧兼容字符串供调用方区分
+            result.intent = "direct_answer"
             return result
         if plan.clarifications:
             result.clarifications = [c.to_dict() for c in plan.clarifications]
             result.answer = "；".join(c.question for c in plan.clarifications)
-            result.intent = Intent.CLARIFY.value if hasattr(Intent, "CLARIFY") else "clarify"
+            result.intent = IntentType.CLARIFY.value
             return result
 
         outputs: list[ToolResult] = []
