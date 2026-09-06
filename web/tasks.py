@@ -47,7 +47,9 @@ class TaskManager:
         self._events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
-    def submit(self, fn: Callable[..., Any], *args: Any, owner: str | None = None, **kwargs: Any) -> str:
+    def submit(
+        self, fn: Callable[..., Any], *args: Any, owner: str | None = None, **kwargs: Any
+    ) -> str:
         """提交任务（立即返回 task_id）；任务在后台线程执行 fn(*args, **kwargs)。
 
         owner：任务属主（提交者身份），写入任务快照供轮询端点做属主校验

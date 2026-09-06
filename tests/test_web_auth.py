@@ -435,7 +435,7 @@ def test_async_task_foreign_user_404(warehouse):
         task_id = body["task_id"]
         # bob 轮询 admin 的任务 -> 404（视同不存在，不泄露任务状态）
         _, bob_login, _ = _login(port, "bob", "bob123")
-        status, snap, _ = _request(
+        status, _, _ = _request(
             port,
             "GET",
             f"/api/tasks/{task_id}",
@@ -443,7 +443,7 @@ def test_async_task_foreign_user_404(warehouse):
         )
         assert status == 404
         # admin 角色全局可见（与导出下载放行策略一致）
-        status, snap, _ = _request(
+        status, _, _ = _request(
             port,
             "GET",
             f"/api/tasks/{task_id}",
@@ -508,9 +508,7 @@ def test_export_foreign_download_403(warehouse):
         _, admin_login, _ = _login(port, "admin", "admin123")
         _, path = _create_export(port, {"Authorization": "Bearer " + admin_login["token"]})
         _, bob_login, _ = _login(port, "bob", "bob123")
-        status, _, _ = _download(
-            port, path, {"Authorization": "Bearer " + bob_login["token"]}
-        )
+        status, _, _ = _download(port, path, {"Authorization": "Bearer " + bob_login["token"]})
         assert status == 403
     finally:
         server.shutdown()
@@ -524,9 +522,7 @@ def test_export_admin_role_can_download_foreign(warehouse):
         _, bob_login, _ = _login(port, "bob", "bob123")
         _, path = _create_export(port, {"Authorization": "Bearer " + bob_login["token"]})
         _, admin_login, _ = _login(port, "admin", "admin123")
-        status, _, _ = _download(
-            port, path, {"Authorization": "Bearer " + admin_login["token"]}
-        )
+        status, _, _ = _download(port, path, {"Authorization": "Bearer " + admin_login["token"]})
         assert status == 200
     finally:
         server.shutdown()
@@ -555,9 +551,7 @@ def test_query_shares_tool_layer_connection_pool(warehouse, monkeypatch):
             real_pool.release(c)
 
     monkeypatch.setattr(pool_mod, "_default_pool", _CountingPool())
-    result = run_query(
-        "2024年6月成功订单的GMV是多少？", session_id="r3-pool", user="alice"
-    )
+    result = run_query("2024年6月成功订单的GMV是多少？", session_id="r3-pool", user="alice")
     assert "error" not in result, result.get("error_detail")
     assert result["columns"] == ["gmv"]
     assert acquired["n"] == 1

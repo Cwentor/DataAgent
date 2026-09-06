@@ -346,9 +346,7 @@ def run_query(
             # 调度到数据工具（此时工具层从统一连接池取连接执行），持闸避免绕过
             # MAX_CONCURRENT_QUERIES 并发上限；纯 RAG 检索持闸耗时忽略不计。
             with _query_gate:
-                agent_result = default_tool_agent().run(
-                    effective_query, principal, request_id=rid
-                )
+                agent_result = default_tool_agent().run(effective_query, principal, request_id=rid)
             result["steps"] = [s.to_dict() for s in agent_result.steps]
             result["answer"] = agent_result.answer
             result["documents"] = agent_result.documents
@@ -441,9 +439,7 @@ def run_query(
                         session_id,
                         ClarifyContext(
                             original_query=effective_query,
-                            pending=tuple(
-                                c.get("kind") for c in agent_result.clarifications
-                            ),
+                            pending=tuple(c.get("kind") for c in agent_result.clarifications),
                         ),
                         owner,
                     )
