@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -330,6 +331,89 @@ def test_logout_revokes_session():
             headers={"X-Session-ID": sid},
         )
         assert status == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# 异步查询任务：POST /api/query/async 提交 -> GET /api/tasks/<id> 轮询
+# --------------------------------------------------------------------------- #
+def test_async_query_flow(warehouse):
+    """认证提交 -> 202 + task_id -> 轮询至 success，结果与同步链路一致。"""
+    server, port = _start_server()
+    try:
+        _, login, _ = _login(port, "admin", "admin123")
+        headers = {"Authorization": "Bearer " + login["token"]}
+        status, body, _ = _request(
+            port,
+            "POST",
+            "/api/query/async",
+            {"query": "2024年6月成功订单的GMV是多少？"},
+            headers,
+        )
+        assert status == 202
+        assert body["status"] == "pending"
+        task_id = body["task_id"]
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            status, snap, _ = _request(port, "GET", f"/api/tasks/{task_id}", headers=headers)
+            if snap["status"] in ("success", "failed"):
+                break
+            time.sleep(0.1)
+        assert status == 200
+        assert snap["status"] == "success"
+        assert snap["result"]["principal"] == "admin"
+        assert snap["result"]["columns"] == ["gmv"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_async_query_requires_auth(warehouse):
+    """未认证提交异步查询 -> 401。"""
+    server, port = _start_server()
+    try:
+        status, _, _ = _request(port, "POST", "/api/query/async", {"query": "GMV"})
+        assert status == 401
+        status, _, _ = _request(port, "GET", "/api/tasks/some-id")
+        assert status == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_async_query_unknown_task_404(warehouse):
+    """认证后查询不存在的 task_id -> 404。"""
+    server, port = _start_server()
+    try:
+        _, login, _ = _login(port, "admin", "admin123")
+        status, _, _ = _request(
+            port,
+            "GET",
+            "/api/tasks/00000000000000000000000000000000",
+            headers={"Authorization": "Bearer " + login["token"]},
+        )
+        assert status == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_async_query_missing_query_400(warehouse):
+    """提交缺少 query 字段 -> 400。"""
+    server, port = _start_server()
+    try:
+        _, login, _ = _login(port, "admin", "admin123")
+        status, _, _ = _request(
+            port,
+            "POST",
+            "/api/query/async",
+            {},
+            {"Authorization": "Bearer " + login["token"]},
+        )
+        assert status == 400
     finally:
         server.shutdown()
         server.server_close()

@@ -41,6 +41,7 @@ from auth.tokens import create_token
 from config import settings
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
 from web.service import ensure_db, run_query
+from web.tasks import default_task_manager
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_PORT = 8000
@@ -134,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_export(parsed.path[len("/api/export/") :])
         if parsed.path == "/api/auth/me":
             return self._get_me()
+        if parsed.path.startswith("/api/tasks/"):
+            return self._get_task(parsed.path[len("/api/tasks/") :])
         if parsed.path in ("/", "/index.html"):
             return self._send_file("index.html")
         rel = parsed.path[len("/static/") :] if parsed.path.startswith("/static/") else ""
@@ -148,6 +151,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_logout()
         if parsed.path == "/api/query":
             return self._post_query()
+        if parsed.path == "/api/query/async":
+            return self._post_query_async()
         return self._send_json({"error": "not found"}, 404)
 
     # ------------------------------------------------------------------ #
@@ -249,6 +254,67 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     # ------------------------------------------------------------------ #
+    # 受保护：/api/query/async（异步查询：提交 -> task_id -> 轮询）
+    # ------------------------------------------------------------------ #
+    def _post_query_async(self) -> None:
+        """异步查询提交：立即返回 task_id（202），后台线程执行完整查询链路。
+
+        鉴权与会话语义与 POST /api/query 完全一致（principal 服务端强制绑定）；
+        任务函数复用 run_query，护栏（RLS / 资源熔断 / 审计）不旁路。
+        客户端轮询 GET /api/tasks/<task_id> 取回状态与结果。
+        """
+        ctx = self._authenticate()
+        if ctx is None:
+            return self._send_json({"error": "unauthorized"}, 401)
+
+        body = self._read_body()
+        if body is None:
+            return self._send_json({"error": "invalid json"}, 400)
+        query = str(body.get("query", "")).strip()
+        if not query:
+            return self._send_json({"error": "query is required"}, 400)
+
+        session_id = ctx.session_id or _bound_session_id(self.headers, ctx.username)
+        client_principal = body.get("principal")
+        if client_principal is not None and str(client_principal) != ctx.principal:
+            _auth_logger.warning(
+                "client_principal_ignored",
+                extra={
+                    "event": "client_principal_ignored",
+                    "server_principal": ctx.principal,
+                    "client_principal": str(client_principal),
+                },
+            )
+
+        request_id = self.headers.get("X-Request-ID")
+        set_request_context(request_id=request_id, session_id=session_id, user=ctx.username)
+
+        def _run_query_task() -> dict:
+            return run_query(
+                query,
+                ctx.principal,
+                request_id=request_id,
+                session_id=session_id,
+                user=ctx.username,
+            )
+
+        task_id = default_task_manager().submit(_run_query_task)
+        _auth_logger.info(
+            "async_task_submitted",
+            extra={"event": "async_task_submitted", "task_id": task_id, "user": ctx.username},
+        )
+        self._send_json({"task_id": task_id, "status": "pending"}, 202)
+
+    def _get_task(self, task_id: str) -> None:
+        """查询异步任务状态与结果（认证保护；未知 task_id 返回 404）。"""
+        ctx = self._authenticate()
+        if ctx is None:
+            return self._send_json({"error": "unauthorized"}, 401)
+        snap = default_task_manager().snapshot(task_id)
+        if snap is None:
+            return self._send_json({"error": "task not found"}, 404)
+        self._send_json(snap)
+
     # 受保护：/api/query
     # ------------------------------------------------------------------ #
     def _post_query(self) -> None:
