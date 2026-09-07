@@ -66,6 +66,156 @@ python -m web.server 8000
 
 > 🌐 启动后用浏览器打开 <http://127.0.0.1:8000> 即可体验；完整的安装、评测与离线自检步骤见 **[快速开始](docs/quickstart.md)**。
 
+---
+
+## 📦 部署与使用指南
+
+### 一、前置要求
+
+| 依赖项 | 版本要求 |
+|---|---|
+| Python | `>=3.11`，项目锁定 `3.12` |
+| 环境管理器 | Miniconda / Anaconda（`conda 26.x+`） |
+| 包管理器 | pip |
+
+### 二、克隆与安装
+
+```bash
+# 克隆仓库
+git clone <repository-url>
+cd FutureBI
+
+# 创建并激活 conda 环境
+conda create -n futurebi python=3.12 -y
+conda activate futurebi
+
+# 安装依赖
+pip install -r requirements-dev.txt
+```
+
+### 三、初始化数仓
+
+```bash
+# 幂等初始化本地 DuckDB 数仓
+python -m mock.init_duckdb
+```
+
+### 四、配置 LLM
+
+```bash
+# 从模板创建配置文件
+copy .env.example .env
+```
+
+编辑 `.env`，至少配置以下关键变量：
+
+```ini
+# LLM 接入（必填）
+LLM_API_KEY=your-key-here
+LLM_BASE_URL=https://api.openai.com/v1   # 或 DeepSeek / Kimi / Ollama
+LLM_MODEL=gpt-4o-mini
+
+# 执行层资源治理
+QUERY_TIMEOUT_MS=30000         # 语句超时（毫秒）
+MAX_SCAN_ROWS=10000000         # 扫描行数熔断上限
+MAX_RESULT_ROWS=20000          # 返回行数硬上限
+SQL_SELF_HEAL_MAX_RETRIES=1    # SQL 自愈重试次数
+
+# 认证（生产环境必须配置）
+AUTH_ENABLED=1
+AUTH_JWT_SECRET=<强随机密钥>    # python -c "import secrets;print(secrets.token_hex(32))"
+AUTH_STRICT=1                  # 严格生产安全模式
+```
+
+> **离线开发**：无需真实 API Key，运行本地模拟服务即可：
+> ```bash
+> python tools/mock_llm_server.py 8765
+> set LLM_API_KEY=sk-mock
+> set LLM_BASE_URL=http://127.0.0.1:8765/v1
+> set LLM_MODEL=mock
+> ```
+
+### 五、启动服务
+
+```bash
+# 启动 Web UI（默认端口 8000）
+python -m web.server 8000
+```
+
+服务启动后访问：`http://127.0.0.1:8000`
+
+**内置演示账号**：
+
+| 账号 | 口令 | 权限范围 |
+|---|---|---|
+| `admin` | `admin123` | 全表 |
+| `analyst` | `analyst123` | 全表，仅 5 省行级权限 |
+| `bob` | `bob123` | 受限：无退款表/敏感列，仅广东 |
+
+### 六、验证部署
+
+```bash
+# 运行全部单元测试
+python -m pytest -q
+
+# 运行 Golden 评测（oracle 模式）
+python -m eval.eval_runner
+
+# 运行 Golden 评测（agent 模式）
+python -m eval.eval_runner --pipeline agent
+
+# 打印编译 SQL 查看详情
+python -m eval.eval_runner --print-sql
+```
+
+### 七、代码质量检查
+
+提交前确保以下检查全绿：
+
+```bash
+black --check .
+ruff check .
+python -m pytest -q
+```
+
+修复格式与 lint 问题：
+
+```bash
+black .
+ruff check --fix .
+```
+
+### 八、API 使用示例
+
+**登录获取 Token**：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"analyst","password":"analyst123"}'
+```
+
+**执行查询**：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/query \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"query":"各品类成功订单的GMV分布？"}'
+```
+
+响应包含：DSL、SQL、列信息、行数、中文解释、可视化建议。
+
+### 九、生产部署注意事项
+
+1. **JWT 密钥**：必须替换为强随机密钥（`secrets.token_hex(32)`）
+2. **启用严格模式**：`AUTH_STRICT=1` 时，弱密钥或关闭鉴权会拒绝启动
+3. **绑定地址**：生产环境建议改为 `WEB_HOST=0.0.0.0`，非 localhost 自动进入严格模式
+4. **会话共享**：多 worker 部署时配置 `AUTH_SESSION_DB` 使用 SQLite 落盘
+5. **审计开关**：生产环境保持 `AUDIT_ENABLED=1`
+
+---
+
 ## 📦 项目结构
 
 ```text
