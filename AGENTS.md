@@ -120,3 +120,6 @@ web/        Web 可视化 UI（service + server + static 前端）
 - 文件首行标题必须遵循统一格式 `# 评审报告｜<评审类型>：<评审主题>（YYYY-MM）`，内容结构不强制统一；
 - 归档规范与清单详见 [`docs/reviews/README.md`](docs/reviews/README.md)。
 
+## Language Rule
+- 无论代码、终端日志或测试用例中包含多少英文，你在调用工具之间输出的任何进度说明、思考陈述、计划与总结，**必须始终使用简体中文**。
+- 禁止在中途输出如 "Now let me...", "Next, I will..." 等英文过渡句。
