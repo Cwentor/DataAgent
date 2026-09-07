@@ -201,3 +201,116 @@ def test_heuristic_region_expansion_intersects_warehouse(monkeypatch):
     dsl = h.run("华东的GMV是多少")
     prov = [f for f in dsl.filters if f.field == "province"]
     assert len(prov) == 1 and set(prov[0].value) == {"上海", "江苏"}
+
+
+def test_heuristic_dimension_count_fallback():
+    """维度基数探查：纯维度查询自动生成 count_distinct 指标。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有几个地区")
+    assert dsl.metrics[0].kind == "aggregate"
+    assert dsl.metrics[0].field == "province"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert dsl.metrics[0].alias == "region_count"
+    assert dsl.dimensions == []
+    assert dsl.time_filter is None
+    assert dsl.limit == 1
+
+
+def test_heuristic_dimension_count_brand():
+    """维度基数探查：品牌数量查询。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有几个品牌")
+    assert dsl.metrics[0].field == "brand"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert dsl.metrics[0].alias == "brand_count"
+
+
+def test_heuristic_dimension_count_category():
+    """维度基数探查：品类数量查询。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有几个品类")
+    assert dsl.metrics[0].field == "category"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert dsl.metrics[0].alias == "category_count"
+
+
+def test_heuristic_dimension_count_fallback_with_time_filter():
+    """维度基数探查：查询含时间时仍正常生成，不因时间窗口缺失而失败。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("2024年6月有几个地区")
+    assert dsl.metrics[0].field == "province"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert dsl.time_filter is not None
+
+
+def test_heuristic_dimension_count_fallback_unknown_query():
+    """完全无法识别的查询仍抛出 PipelineError，不猜测。"""
+    h = DeterministicNL2DSL()
+
+    with pytest.raises(PipelineError):
+        h.run("今天的天气怎么样")
+
+
+def test_heuristic_uncovers_dim_count_fallback_without_metrics():
+    """空问句 (维度未指定) 时不会误匹配 count_distinct。"""
+    h = DeterministicNL2DSL()
+
+    with pytest.raises(PipelineError):
+        h.run("我想看一下数据")
+
+
+def test_heuristic_dim_count_fallback_still_handles_defined_metrics():
+    """含明确指标的维度计数不受干扰（例如"每个地区的GMV"正常生成聚合 + 分组维度）。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("每个地区的GMV")
+    assert any(m.field == "order_amount" and m.agg == "sum" for m in dsl.metrics)
+    assert any(d.field == "province" for d in dsl.dimensions)
+
+
+def test_heuristic_dim_count_province_query():
+    """方言变体：询问"有几个省"能命中维度计数兜底。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有几个省")
+    assert dsl.metrics[0].field == "province"
+    assert dsl.metrics[0].agg == "count_distinct"
+
+
+# --------------------------------------------------------------------------- #
+# 维度枚举查询（"有哪些 [维度]" / "所有 [维度]"）：除 count_distinct 指标外
+# 还需把维度字段加入 dimensions，用于成员去重枚举。
+# --------------------------------------------------------------------------- #
+def test_heuristic_dim_enum_province():
+    """ "有哪些地区" -> count_distinct 指标 + province 分组维度。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有哪些地区")
+    assert dsl.metrics[0].field == "province"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert [d.field for d in dsl.dimensions] == ["province"]
+    assert dsl.time_filter is None  # 纯维度枚举不强加时间窗口
+
+
+def test_heuristic_dim_enum_brand():
+    """ "所有品牌" -> count_distinct 指标 + brand 分组维度。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("所有品牌")
+    assert dsl.metrics[0].field == "brand"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert [d.field for d in dsl.dimensions] == ["brand"]
+
+
+def test_heuristic_dim_enum_category():
+    """ "全部品类" -> count_distinct 指标 + category 分组维度。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("全部品类")
+    assert dsl.metrics[0].field == "category"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert [d.field for d in dsl.dimensions] == ["category"]

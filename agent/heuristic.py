@@ -12,7 +12,8 @@
 - 同比/环比（comparison）；
 - 窗口函数（累计 cumsum / 移动平均 moving_avg）；
 - 日期连续补零（fill_gaps）；
-- 分组 Top-N（每省/每品牌/每品类 Top N）。
+- 分组 Top-N（每省/每品牌/每品类 Top N）；
+- 维度基数探查（"有几个地区" -> count_distinct 自动兜底）。
 """
 
 from __future__ import annotations
@@ -102,8 +103,37 @@ class DeterministicNL2DSL:
                 rank_dims = [d for d in dims if d["field"] not in partition]
                 dims = [{"field": p} for p in top_n["partition_by"]] + rank_dims
 
+            # 维度基数/枚举探查：统一修正分组维度
+            # - count 型（"有几个地区/多少品类"）：唯一指标即维度 count_distinct 兜底，
+            #   不分组（提示词要求）
+            # - 枚举型（"有哪些地区/所有品牌"）：除 count_distinct 指标外，将维度字段
+            #   加入 dimensions 以输出成员去重枚举
+            probe_field = self._enum_dimension_field(q)
+            metrics = self._metrics(q)
+            count_probe = (
+                metrics[0]
+                if (
+                    len(metrics) == 1
+                    and isinstance(metrics[0], dict)
+                    and metrics[0].get("kind") == "aggregate"
+                    and metrics[0].get("agg") == "count_distinct"
+                    and probe_field is not None
+                    and metrics[0].get("field") == probe_field
+                )
+                else None
+            )
+            if probe_field is not None:
+                if self._is_dim_enum_form(q):
+                    # 枚举型（"有哪些地区/所有品牌"）：确保维度字段在分组中以去重枚举
+                    if probe_field not in {d["field"] for d in dims}:
+                        dims.append({"field": probe_field})
+                elif count_probe is not None:
+                    # count 型（"有几个地区/多少品类"）：唯一指标即维度 count_distinct
+                    # 兜底，不分组（提示词要求）
+                    dims = [d for d in dims if d["field"] != probe_field]
+
             dsl: dict[str, Any] = {
-                "metrics": self._metrics(q),
+                "metrics": metrics,
                 "dimensions": dims,
                 "filters": self._filters(q),
                 "order_by": self._order_by(q),
@@ -276,8 +306,63 @@ class DeterministicNL2DSL:
                     }
                 )
             else:
-                raise PipelineError("无法识别指标（需要 GMV/订单数/去重用户/ARPU/客单价 之一）")
+                # 维度基数探查：自动将维度字段映射为 count_distinct 指标
+                dim_count_metric = self._dim_count_fallback(q)
+                if dim_count_metric is not None:
+                    metrics.append(dim_count_metric)
+                else:
+                    raise PipelineError("无法识别指标（需要 GMV/订单数/去重用户/ARPU/客单价 之一）")
         return metrics
+
+    def _dim_count_fallback(self, q: str) -> dict[str, Any] | None:
+        """维度基数查询兜底：将维度字段映射为 count_distinct 聚合指标。
+
+        当用户询问"有几个 [维度]""[维度]数量"等无明确指标的基数问题时，
+        自动生成针对该维度的 count_distinct 指标，无需强制用户指定业务度量。
+        alias 必须符合 DSL 契约的英文字母数字标识符白名单（IDENTIFIER_PATTERN）。
+        """
+        for keywords, field, alias in self._DIM_KEYWORDS:
+            if any(k in q for k in keywords):
+                # 确认字段在语义目录中注册
+                if field in catalog.COLUMNS:
+                    return {
+                        "kind": "aggregate",
+                        "field": field,
+                        "agg": "count_distinct",
+                        "alias": alias,
+                    }
+                return None
+        return None
+
+    # 维度基数/枚举探查：关键词组 -> (field, alias, 维度中文名)
+    _DIM_KEYWORDS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+        (("地区", "省份", "省"), "province", "region_count"),
+        (("品牌",), "brand", "brand_count"),
+        (("品类", "类别"), "category", "category_count"),
+        (("用户",), "user_id", "user_count"),
+        (("性别",), "gender", "gender_count"),
+        (("支付状态", "支付方式"), "pay_status", "pay_status_count"),
+    )
+
+    def _enum_dimension_field(self, q: str) -> str | None:
+        """维度枚举探查：识别"有哪些 [维度]""[所有/全部] [维度]"返回维度字段。
+
+        枚举查询（纯维度列表）除 count_distinct 指标外，还需把维度字段加入
+        dimensions 用于成员去重枚举。命中多个关键词时取首个注册字段。
+        """
+        for keywords, field, _alias in self._DIM_KEYWORDS:
+            if any(k in q for k in keywords):
+                if field in catalog.COLUMNS:
+                    return field
+                return None
+        return None
+
+    @classmethod
+    def _is_dim_enum_form(cls, q: str) -> bool:
+        """枚举型语气词："有哪些/所有/全部/都有/列一下"。"""
+        return any(
+            k in q for k in ("有哪些", "有哪几", "所有", "全部", "都有哪些", "列表", "清单列出")
+        )
 
     def _window_metric(self, q: str) -> dict[str, Any] | None:
         """识别窗口指标：累计（cumsum）/ 移动平均（moving_avg）。"""
@@ -368,6 +453,9 @@ class DeterministicNL2DSL:
         if "品牌" in q:
             add("brand")
         if any(k in q for k in ("各省", "按省份", "分省", "省份分布", "每省")):
+            add("province")
+        # "地区"分组语境（区别于 count 型"有几个地区"，后者不分组）
+        if any(k in q for k in ("各地区", "每个地区", "按地区", "分地区", "每地区", "地区分布")):
             add("province")
         if "支付状态" in q:
             add("pay_status")
@@ -666,4 +754,10 @@ class DeterministicNL2DSL:
 
     def _limit(self, q: str) -> int:
         m = re.search(r"前\s*(\d+)\s*个", q)
-        return int(m.group(1)) if m else 100
+        if m:
+            return int(m.group(1))
+        # 维度基数统计只返回一个总数，不强制用户补充 limit。
+        if any(k in q for k in ("有几个", "有多少个", "数量", "数目")):
+            if self._dim_count_fallback(q) is not None:
+                return 1
+        return 100

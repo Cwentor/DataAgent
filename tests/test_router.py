@@ -46,6 +46,12 @@ def test_detect_clarifications_empty_for_clear_query():
     assert detect_clarifications("2024年6月各品类成功订单的GMV分布？") == []
 
 
+def test_dimension_probe_does_not_require_time_window():
+    """维度基数/枚举查询默认走全量范围，不因缺少时间窗口而反问。"""
+    for q in ("有几个地区", "有几个品牌", "有哪些地区", "所有品类"):
+        assert detect_clarifications(q) == [], q
+
+
 # --------------------------------------------------------------------------- #
 # 禁止静默回退默认值：启发式拒绝未定义指标
 # --------------------------------------------------------------------------- #
@@ -134,6 +140,19 @@ def test_route_decision_five_way_classification():
     assert route_decision("客单价是怎么定义的").intent == GLOSSARY_EXPLAIN
     assert route_decision("上个月广东的订单总数").intent == DATA_QUERY
     assert route_decision("看下那个数据").intent == CLARIFY
+
+
+def test_route_decision_dimension_probe_as_data_query():
+    """维度基数/枚举探查查询应路由为 DATA_QUERY，而非误判为 CLARIFY。"""
+    for q in (
+        "有几个地区",
+        "有几个品牌",
+        "有哪些地区",
+        "有哪些品类",
+        "所有品牌",
+        "全部品类",
+    ):
+        assert route_decision(q).intent == DATA_QUERY, q
 
 
 def test_route_decision_contract_fields():

@@ -10,6 +10,16 @@ from __future__ import annotations
 
 from security.scope import scoped_field_listing, scoped_fields
 
+# 维度基数探查约定：当用户询问"有几个 [维度]""[维度]数量"时，
+# 自动将维度字段映射为 count_distinct 聚合指标，无需强制指定业务度量；
+# "有哪些 [维度]" 除 count_distinct 指标外，需将维度字段加入 dimensions 以枚举成员值。
+_DIM_COUNT_CONVENTION = (
+    '维度基数探查："有几个地区/省份/品牌/品类" -> '
+    "metrics=[{kind:aggregate, field:<维度字段>, agg:count_distinct, alias:<维度数>}]；"
+    '"有哪些 [维度]" -> metrics=[{kind:aggregate, field:<维度字段>, agg:count_distinct, alias:<维度数>}]'
+    " + dimensions=[<维度字段>]"
+)
+
 # 固定结构说明块（与 DSL 契约一致，不随主体变化）
 _STRUCT_BLOCK = """QueryDSL JSON 结构（所有字段必须严格符合）：
 {
@@ -109,6 +119,10 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         '同比/环比（comparison）："环比" -> comparison:mom；"同比" -> comparison:yoy；'
         "可与时间维度组合（按位配对）：prev CTE 时间列经 date_add 平移后 JOIN",
+        (),
+    ),
+    (
+        _DIM_COUNT_CONVENTION,
         (),
     ),
 )
