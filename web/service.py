@@ -391,7 +391,12 @@ def run_query(
                 if resolution.mode in ("inherit", "drilldown"):
                     base_dsl = resolution.dsl
                     context_summary = resolution.summary or None
-                elif resolution.mode == "fresh" and resolution.reason == "topic_switch":
+                elif resolution.mode == "fresh" and resolution.reason in (
+                    "topic_switch",
+                    "reset_intent",
+                ):
+                    # 话题切换 / 排他重置（"我只需要知道...几个维度"）：显式清理旧 DSL，
+                    # 本轮重新独立解析，绝不注入/沿用上轮指标与分组（Base DSL reset）。
                     state.last_dsl = None
                     context_summary = resolution.summary or None
 

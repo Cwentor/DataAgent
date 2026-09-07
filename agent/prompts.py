@@ -125,6 +125,18 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         _DIM_COUNT_CONVENTION,
         (),
     ),
+    (
+        "指标覆盖与排他（多轮/独立新问题的关键判定）："
+        '用户出现"我只需要知道 / 只看 / 仅统计 / 只要看 / 换成 / 不要之前的…"等排他表述，'
+        '或询问"多少个 / 多少种 / 有几个 [维度实体]"（如"多少种品类""有几个地区""多少用户"）时，'
+        "一律视为**独立新指标请求**：metrics 只能以该维度实体的 count_distinct 计数为准，"
+        "**严禁复用上一轮金额/订单等指标，也不得把该维度实体只塞进 dimensions 延续旧度量**；"
+        '例："我只需要知道，广东有多少种品类" -> '
+        "metrics=[{field:category, agg:count_distinct, alias:category_count}]，"
+        "不保留历史 GMV/分组，filters 仅 {field:province, operator:eq, value:广东}；"
+        "filters 中同一字段只允许出现一条过滤条件（同值既不重复 eq 又 in，也不追加多条 AND）。",
+        (),
+    ),
 )
 
 # 无论主体如何都成立的安全约束（末尾附加）

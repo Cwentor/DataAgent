@@ -15,10 +15,11 @@ from agent.memory import (
     SessionStore,
     append_message,
     derive_active_entities,
+    normalize_filters,
     resolve_context,
     strip_rls_filters,
 )
-from semantic.dsl_schema import QueryDSL
+from semantic.dsl_schema import Filter, FilterOperator, QueryDSL
 from web.service import run_query
 
 
@@ -294,6 +295,102 @@ def test_resolve_no_delta():
 
 
 # --------------------------------------------------------------------------- #
+# 排他/独立维度请求 -> RESET（Bad Case 回归，AGENTS 任务模块 A）
+# --------------------------------------------------------------------------- #
+def _gmv_category_dsl() -> QueryDSL:
+    """上一轮 DSL：某时间段各品类 GMV（对应"上个月各品类的 GMV 排名"本轮）。"""
+    return QueryDSL.model_validate(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": [{"field": "category"}],
+            "time_filter": {
+                "granularity": "month",
+                "range_type": "relative",
+                "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+                "comparison": "none",
+                "reference_date": "2024-06-30",
+            },
+            "filters": [],
+        }
+    )
+
+
+def test_resolve_exclusive_count_intent_resets():
+    """Bad Case：'我只需要知道，广东有多少种品类' 必须 RESET，绝不继承上轮 gmv 指标/品类分组。"""
+    res = resolve_context("我只需要知道，广东有多少种品类", _gmv_category_dsl(), None)
+    assert res.mode == "fresh" and res.reason == "reset_intent"
+    # RESET 不产出基于上轮 DSL 的合并结果（交由调用方独立重解析）
+    assert res.dsl is None
+
+
+def test_resolve_dimension_cardinality_resets_without_exclusive_word():
+    """无排他词，但命中'多少个/几个 [维度]' -> 同样 RESET（新指标 count_distinct）。"""
+    res = resolve_context("广东有多少个品类？", _gmv_category_dsl(), None)
+    assert res.mode == "fresh" and res.reason == "reset_intent"
+    assert res.dsl is None
+
+
+def test_resolve_enum_dimension_resets():
+    """枚举型'有哪些 [维度]'也是独立新问题 -> RESET（不复用上轮金额指标）。"""
+    res = resolve_context("有哪些品类？", _gmv_category_dsl(), None)
+    assert res.mode == "fresh" and res.reason == "reset_intent"
+    assert res.dsl is None
+
+
+def test_resolve_inherit_still_works_after_reset_rule():
+    """回归：纯粹的维度替换追问仍未受影响，保持 inherit（指标不变，仅省筛选替换）。"""
+    res = resolve_context("那广东省呢？", _last_dsl(), None)
+    assert res.mode == "inherit"
+    prov = [f for f in res.dsl.filters if f.field == "province"]
+    assert prov[0].value == "广东"
+    assert [m.alias for m in res.dsl.metrics] == ["gmv"]
+
+
+# --------------------------------------------------------------------------- #
+# Filter 去重归一化（模块 B）
+# --------------------------------------------------------------------------- #
+def test_normalize_filters_collapses_eq_and_in_same_value():
+    """同一个字段同时出现 province eq '广东' 与 province in ['广东'] -> 折叠为单条 eq。"""
+    norm = normalize_filters(
+        [
+            Filter(field="province", operator=FilterOperator.EQ, value="广东"),
+            Filter(field="province", operator=FilterOperator.IN, value=["广东"]),
+        ]
+    )
+    assert len(norm) == 1
+    assert norm[0].field == "province"
+    assert norm[0].operator == FilterOperator.EQ
+    assert norm[0].value == "广东"
+
+
+def test_normalize_filters_union_multiple_in():
+    """多个 IN -> 并集去重（布尔等价，消除重复成员）。"""
+    norm = normalize_filters(
+        [
+            Filter(field="province", operator=FilterOperator.IN, value=["广东", "浙江"]),
+            Filter(field="province", operator=FilterOperator.IN, value=["浙江", "江苏"]),
+        ]
+    )
+    assert len(norm) == 1
+    assert sorted(norm[0].value) == ["广东", "江苏", "浙江"]
+
+
+def test_normalize_filters_preserves_single_and_distinct_fields():
+    """单条件 / 不同字段不误折叠。"""
+    single = normalize_filters([Filter(field="category", operator=FilterOperator.EQ, value="手机")])
+    assert single == [Filter(field="category", operator=FilterOperator.EQ, value="手机")]
+    multi = normalize_filters(
+        [
+            Filter(field="province", operator=FilterOperator.EQ, value="广东"),
+            Filter(field="category", operator=FilterOperator.EQ, value="手机"),
+        ]
+    )
+    assert len(multi) == 2
+
+
+# --------------------------------------------------------------------------- #
 # strip_rls_filters：RLS 去重净化
 # --------------------------------------------------------------------------- #
 def test_strip_rls_filters_removes_injected_rls():
@@ -389,6 +486,40 @@ def test_e2e_topic_switch_resets(conn):
     after = run_query("那广东省呢？", conn=conn, session_id=sid, user="alice")
     assert "error" in after
     assert "context_summary" not in after
+
+
+# --------------------------------------------------------------------------- #
+# 端到端：排他 + 维度计数 RESET（Bad Case 回归，验收标准 1）
+# --------------------------------------------------------------------------- #
+def test_e2e_exclusive_count_intent_resets_previous_metric(conn):
+    """Session1 上个月各品类 GMV 排名 -> Session2 '我只需要知道，广东有多少种品类'。
+
+    验收：第二轮的款式 DSL 必须把指标解析为 count_distinct(category)，不再沿用 gmv
+    指标或 category 分组；province 过滤唯一（绝不出现 eq 与 IN 重复）。
+    """
+    sid = "mem-e2e-excl-count"
+    # 轮次 1：上个月各品类的 GMV 排名
+    first = run_query("上个月各品类的GMV排名", conn=conn, session_id=sid, user="alice")
+    assert "error" not in first, first.get("error_detail")
+    assert [m["alias"] for m in first["dsl"]["metrics"]] == ["gmv"]
+    assert [d["field"] for d in first["dsl"]["dimensions"]] == ["category"]
+
+    # 轮次 2：排他 + 维度基数请求 -> 必须 RESET，指标改为 count_distinct(category)
+    second = run_query("我只需要知道，广东有多少种品类", conn=conn, session_id=sid, user="alice")
+    assert "error" not in second, second.get("error_detail")
+    # 指标被重置为 count_distinct(category)，不再沿用上轮的 gmv
+    metrics = second["dsl"]["metrics"]
+    assert len(metrics) == 1
+    assert metrics[0]["field"] == "category"
+    assert metrics[0]["agg"] == "count_distinct"
+    assert [m["alias"] for m in metrics] != ["gmv"]
+    # count 型基数查询不按品类分组（否则组内 count 恒为 1）
+    assert [d["field"] for d in second["dsl"]["dimensions"]] == []
+    # 单个有效的 province 过滤（广东），且整条 DSL 绝不含重复 province 条件
+    prov = [f for f in second["dsl"]["filters"] if f["field"] == "province"]
+    assert len(prov) == 1
+    assert prov[0] == {"field": "province", "operator": "eq", "value": "广东"}
+    assert len(second["dsl"]["filters"]) == 1
 
 
 # --------------------------------------------------------------------------- #
