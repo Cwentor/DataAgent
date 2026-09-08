@@ -20,6 +20,14 @@ from providers.adapters import (
     build_adapter,
     extract_json_object,
 )
+from providers.context import (
+    DispatchingAdapter,
+    dispatching_adapter,
+    get_request_model,
+    pop_request_model,
+    reset_dispatching_adapter,
+    set_request_model,
+)
 from providers.errors import (
     AuthenticationError,
     ProtocolError,
@@ -58,14 +66,19 @@ def chat_text(
     model: str | None = None,
     json_mode: bool = True,
 ) -> str:
-    """统一对话入口：适配器走新接口（UnifiedChatRequest），旧形态 client
-    （测试桩 / 既有 OpenAICompatClient）走 ``chat(messages) -> str``。
+    """统一对话入口，三形态透明分发：
+
+    - Model Provider 适配器（``BaseAdapter``）走 UnifiedChatRequest 统一接口；
+    - 请求感知分发代理（``DispatchingAdapter``）按请求上下文转发真实适配器；
+    - 旧形态 client（测试桩 / 既有 OpenAICompatClient）走 ``chat(messages) -> str``。
 
     该辅助函数使 agent 层既有调用点（LLMNL2DSL / LLMPlanner 等）无需关心
     客户端形态即可透明接入 Model Provider 网关；JSON Mode 默认开启，保证
     NL -> DSL 链路的结构化输出约束在协议层得到抹平保障。
     """
     if isinstance(client, BaseAdapter):
+        return client.chat_text(messages, model=model, json_mode=json_mode)
+    if isinstance(client, DispatchingAdapter):
         return client.chat_text(messages, model=model, json_mode=json_mode)
     return client.chat(messages)
 
@@ -76,6 +89,7 @@ __all__ = [
     "ApiProtocol",
     "AuthenticationError",
     "BaseAdapter",
+    "DispatchingAdapter",
     "GeminiAdapter",
     "ModelItem",
     "OpenAIChatAdapter",
@@ -95,9 +109,14 @@ __all__ = [
     "chat_text",
     "default_provider_factory",
     "default_provider_store",
+    "dispatching_adapter",
     "error_message",
     "extract_json_object",
+    "get_request_model",
     "mask_api_key",
+    "pop_request_model",
     "reset_default_provider_store",
+    "reset_dispatching_adapter",
     "reset_provider_factory",
+    "set_request_model",
 ]

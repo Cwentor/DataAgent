@@ -13,6 +13,9 @@
 
 受保护路由:
     POST /api/query     -> 完整链路（需 Bearer JWT 或会话）
+    GET/POST /api/settings/providers        -> 供应商列表 / 创建（API Key 脱敏）
+    PUT/DELETE /api/settings/providers/<id> -> 供应商更新 / 删除（预置供应商拒绝删除）
+    POST /api/settings/providers/test       -> 连通性探测（极小 ping 文本，返回延时）
 
 P0 安全约束（网关层强制）：
 - principal 只由服务端从已认证身份映射（auth.gateway.authenticate），
@@ -40,6 +43,7 @@ from auth.session import default_session_store
 from auth.tokens import create_token
 from config import settings
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
+from web import providers_api
 from web.service import ensure_db, run_query
 from web.tasks import default_task_manager
 
@@ -140,6 +144,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_me()
         if parsed.path.startswith("/api/tasks/"):
             return self._get_task(parsed.path[len("/api/tasks/") :])
+        if parsed.path == "/api/settings/providers":
+            return self._protected(providers_api.list_providers)
         if parsed.path in ("/", "/index.html"):
             return self._send_file("index.html")
         rel = parsed.path[len("/static/") :] if parsed.path.startswith("/static/") else ""
@@ -157,6 +163,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_query()
         if parsed.path == "/api/query/async":
             return self._post_query_async()
+        if parsed.path == "/api/settings/providers":
+            return self._post_providers()
+        if parsed.path == "/api/settings/providers/test":
+            return self._post_providers_test()
+        return self._send_json({"error": "not found"}, 404)
+
+    def do_PUT(self) -> None:
+        """PUT 路由：供应商配置更新（id / is_preset 不可变更）。"""
+        set_request_context(request_id=self.headers.get("X-Request-ID"))
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/settings/providers/"):
+            provider_id = parsed.path[len("/api/settings/providers/") :]
+            return self._put_provider(provider_id)
+        return self._send_json({"error": "not found"}, 404)
+
+    def do_DELETE(self) -> None:
+        """DELETE 路由：供应商配置删除（预置供应商拒绝）。"""
+        set_request_context(request_id=self.headers.get("X-Request-ID"))
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/settings/providers/"):
+            provider_id = parsed.path[len("/api/settings/providers/") :]
+            return self._delete_provider(provider_id)
         return self._send_json({"error": "not found"}, 404)
 
     # ------------------------------------------------------------------ #
@@ -293,6 +321,10 @@ class Handler(BaseHTTPRequestHandler):
         request_id = self.headers.get("X-Request-ID")
         set_request_context(request_id=request_id, session_id=session_id, user=ctx.username)
 
+        # 请求级模型切换：随任务闭包透传（run_query 在工作线程内绑定上下文）
+        provider_id = str(body.get("provider_id") or "").strip() or None
+        model_id = str(body.get("model_id") or "").strip() or None
+
         def _run_query_task() -> dict:
             return run_query(
                 query,
@@ -300,6 +332,8 @@ class Handler(BaseHTTPRequestHandler):
                 request_id=request_id,
                 session_id=session_id,
                 user=ctx.username,
+                provider_id=provider_id,
+                model_id=model_id,
             )
 
         task_id = default_task_manager().submit(_run_query_task, owner=ctx.username)
@@ -324,6 +358,41 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": "task not found"}, 404)
         snap.pop("owner", None)  # 快照对外不暴露属主字段
         self._send_json(snap)
+
+    # ------------------------------------------------------------------ #
+    # 受保护：/api/settings/providers（Model Provider 配置管理与连通性探测）
+    # ------------------------------------------------------------------ #
+    def _protected(self, endpoint, *args) -> None:
+        """统一鉴权封装：认证通过后调用 providers_api 端点并回传 JSON。"""
+        ctx = self._authenticate()
+        if ctx is None:
+            return self._send_json({"error": "unauthorized"}, 401)
+        set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+        code, body = endpoint(*args)
+        return self._send_json(body, code)
+
+    def _post_providers(self) -> None:
+        """POST /api/settings/providers：创建自定义供应商。"""
+        body = self._read_body()
+        if body is None:
+            return self._send_json({"error": "invalid json"}, 400)
+        return self._protected(providers_api.create_provider, body)
+
+    def _post_providers_test(self) -> None:
+        """POST /api/settings/providers/test：连通性探测（业务失败以 200+success=false 返回）。"""
+        body = self._read_body() or {}
+        return self._protected(providers_api.test_provider, body)
+
+    def _put_provider(self, provider_id: str) -> None:
+        """PUT /api/settings/providers/<id>：更新供应商配置。"""
+        body = self._read_body()
+        if body is None:
+            return self._send_json({"error": "invalid json"}, 400)
+        return self._protected(providers_api.update_provider, provider_id, body)
+
+    def _delete_provider(self, provider_id: str) -> None:
+        """DELETE /api/settings/providers/<id>：删除自定义供应商。"""
+        return self._protected(providers_api.delete_provider, provider_id)
 
     # 受保护：/api/query
     # ------------------------------------------------------------------ #
@@ -350,6 +419,11 @@ class Handler(BaseHTTPRequestHandler):
 
         session_id = ctx.session_id or _bound_session_id(self.headers, ctx.username)
 
+        # 请求级模型切换（Chat 界面模型切换器）：provider_id / model_id 可选透传，
+        # 服务端据此把本次查询的所有 LLM 调用转发到目标供应商
+        provider_id = str(body.get("provider_id") or "").strip() or None
+        model_id = str(body.get("model_id") or "").strip() or None
+
         # 客户端传入的 principal 一律忽略（P0：服务端强制绑定）
         client_principal = body.get("principal")
         if client_principal is not None and str(client_principal) != ctx.principal:
@@ -373,6 +447,8 @@ class Handler(BaseHTTPRequestHandler):
             request_id=self.headers.get("X-Request-ID"),
             session_id=session_id,
             user=ctx.username,
+            provider_id=provider_id,
+            model_id=model_id,
         )
         result["auth"] = ctx.to_dict()
         return self._send_json(result)

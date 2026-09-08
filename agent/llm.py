@@ -76,12 +76,19 @@ class OpenAICompatClient:
 def resolve_default_client() -> Any | None:
     """从 Model Provider 网关解析"当前启用的默认 LLM 客户端"。
 
-    优先级：首个已配置 API Key 的启用供应商 -> 环境变量（LLM_*）回退。
-    无任何可用配置返回 None（上层回退到确定性启发式实现）。
+    返回请求感知的分发代理（``providers.dispatching_adapter``）：持有方
+    （pipeline / tool_agent / intent_router）可长期缓存，``chat`` 调用时按
+    请求上下文（provider_id + model_id）动态转发到真实协议适配器；未绑定
+    请求上下文时回落默认适配器。
+
+    无任何可用供应商 / 环境变量配置时返回 None（上层回退到确定性启发式实现）。
     """
     try:
+        from providers.context import dispatching_adapter
         from providers.factory import default_provider_factory
 
-        return default_provider_factory().resolve(None, None)
+        if not default_provider_factory().has_provider():
+            return None
+        return dispatching_adapter()
     except Exception:
         return None

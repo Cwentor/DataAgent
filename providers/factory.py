@@ -179,8 +179,35 @@ def reset_provider_factory(factory: ProviderFactory | None = None) -> None:
     _default_factory = factory
 
 
+def invalidate_provider_caches(provider_id: str | None = None) -> None:
+    """供应商配置变更后的统一失效入口（web 写操作必须调用）。
+
+    清理两类缓存：
+    1. 适配器缓存（``ProviderFactory.invalidate``：该供应商的协议适配器重建，
+       确保新 Key / 新模型 / 新协议立即生效）；
+    2. 各层持有的"默认 LLM 客户端"装配缓存（pipeline 的 NL2DSL Agent、
+       tool_agent 的 ToolAgent、intent_router 的路由器）。它们在进程内按
+       首次解析结果缓存，不失效会导致"前端配置好 Key 后仍走确定性兜底"。
+
+    使用惰性导入避免 providers -> agent 的模块级循环依赖。
+    """
+    default_provider_factory().invalidate(provider_id)
+    try:
+        from agent.pipeline import _default_agent as _pipeline_agent
+        from agent.router.intent_router import _default_router
+        from agent.tool_agent import set_default_tool_agent
+
+        _pipeline_agent.cache_clear()
+        _default_router.cache_clear()
+        set_default_tool_agent(None)
+    except ImportError:
+        # 极简部署（未安装 agent 层）时仅失效适配器缓存即可
+        pass
+
+
 __all__ = [
     "ProviderFactory",
     "default_provider_factory",
+    "invalidate_provider_caches",
     "reset_provider_factory",
 ]

@@ -1392,8 +1392,9 @@ _agent_lock = threading.Lock()
 def default_tool_agent() -> ToolAgent:
     """进程内复用的默认 ToolAgent（LLM 可用 -> LLM 规划 + 总结；否则确定性）。
 
-    LLM 客户端从 Model Provider 网关解析（`resolve_default_client`：首位已
-    配置 Key 的启用供应商 -> 环境变量回退）；反思层（R3）按
+    LLM 客户端从 Model Provider 网关解析（`resolve_default_client` 返回请求感知
+    的分发代理：按请求上下文 provider_id + model_id 动态转发真实协议适配器，
+    未绑定请求上下文时回落默认适配器）；反思层（R3）按
     AGENT_REFLECTION_ENABLED 装配——LLM 模式用 LLMReflector（判不充分可追加
     一次受控查询），确定性模式用 DeterministicReflector（只判定留痕）。
     双检锁保护并发首调（就绪度评审 P3 卫生项处置：原工厂无锁且 _agent_lock

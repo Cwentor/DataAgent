@@ -42,6 +42,8 @@ from exec.guards import (
     execute_sql,
 )
 from exec.pool import default_pool
+from providers.context import pop_request_model, set_request_model
+from providers.errors import ERROR_MESSAGES, ProviderError
 from security.errors import SecurityError
 from semantic import catalog
 from semantic.dsl_schema import QueryDSL, RatioMetric, WindowMetric
@@ -149,6 +151,13 @@ _FRIENDLY_BY_ERROR_CLASS = {
     "UnsafeSqlError": "查询未通过安全校验，请调整问题后重试",
     "CompileError": "查询条件无法编译，请调整指标或过滤条件后重试",
     "SqlExecutionError": "查询执行出错，请调整条件后重试",
+    # Model Provider 网关（多供应商协议层）标准错误（DoD 4：401/429 可理解呈现）
+    "AuthenticationError": "模型服务鉴权失败，请检查 API Key 是否正确",
+    "RateLimitError": "模型服务请求过于频繁或配额超限（429），请稍后重试",
+    "ProviderTimeoutError": "模型服务请求超时，请重试或检查网络",
+    "ProtocolError": "模型服务返回异常，无法解析响应",
+    "ProviderNotConfiguredError": "未找到可用的模型供应商，请在设置中配置",
+    "ProviderError": "模型服务调用失败，请稍后重试",
 }
 
 _CIRCUIT_BY_ERROR_CLASS = {
@@ -163,6 +172,23 @@ def _friendly_by_class(error_type: str | None) -> str | None:
     if error_type is None:
         return None
     return _FRIENDLY_BY_ERROR_CLASS.get(error_type)
+
+
+# 供应商标准错误码 -> 可读文案（providers.errors.ERROR_MESSAGES 同源，
+# 401 鉴权失败 / 429 配额超限等向用户呈现可理解提示，DoD 4）
+_PROVIDER_FRIENDLY_BY_CODE = dict(ERROR_MESSAGES)
+
+
+def _friendly_provider_error(exc: Exception) -> str | None:
+    """供应商网关异常 -> 可读文案（非供应商异常返回 None 走通用映射）。"""
+    if isinstance(exc, ProviderError):
+        return ERROR_MESSAGES.get(exc.code)
+    # 兼容旧形态客户端（OpenAICompatClient / 测试桩）包装的 LLMError
+    if type(exc).__name__ == "LLMError" and "401" in str(exc):
+        return ERROR_MESSAGES["auth_failed"]
+    if type(exc).__name__ == "LLMError" and "429" in str(exc):
+        return ERROR_MESSAGES["rate_limited"]
+    return None
 
 
 _default_store: AuditStore | None = None
@@ -220,12 +246,19 @@ def run_query(
     request_id: str | None = None,
     session_id: str | None = None,
     user: str | None = None,
+    provider_id: str | None = None,
+    model_id: str | None = None,
     retrieval_context: dict[str, Any] | None = None,
     audit_store: AuditStore | None = None,
 ) -> dict[str, Any]:
     """执行完整链路，返回可直接交给前端渲染的字典；失败时写入 error 字段。
 
     conn 传入时复用该连接（测试用内存库），否则打开本地 DuckDB 文件只读。
+
+    provider_id / model_id：请求级模型切换（Chat 界面模型切换器透传）。
+    绑定到请求上下文后，本次查询内所有 LLM 调用（意图路由 / DSL 生成 /
+    工具规划 / 总结 / 反思 / 自愈重写）经分发代理统一转发到目标供应商；
+    请求结束自动清理上下文（含异常路径）。两者均为空时走默认分派。
 
     每次调用都会：
     1. 注入结构化日志上下文（request_id 贯穿），生成/复用 request_id；
@@ -235,6 +268,13 @@ def run_query(
     rid = set_request_context(request_id=request_id, session_id=session_id, user=user)
     logger.info("query_start", extra={"event": "query_start"})
 
+    # 请求级模型切换：入口先清残留绑定（防线程池复用的 ContextVar 泄漏），
+    # 再绑定本次目标；出口（审计写入后）统一清除。绑定后本次查询内所有
+    # LLM 调用经分发代理转发到目标供应商（provider_id, model_id）。
+    pop_request_model()
+    if provider_id or model_id:
+        set_request_model(provider_id or "", model_id or "")
+
     started = time.perf_counter()
     result: dict[str, Any] = {
         "query": query,
@@ -242,6 +282,10 @@ def run_query(
         "request_id": rid,
         "session_id": session_id,
     }
+    if provider_id or model_id:
+        # 响应契约回显：前端确认本次查询实际使用的供应商与模型
+        result["provider_id"] = provider_id
+        result["model_id"] = model_id
 
     dsl: QueryDSL | None = None
     sql: str | None = None
@@ -485,7 +529,9 @@ def run_query(
                     append_message(state, "assistant", agent_result.answer or "", dsl=dsl)
                     memory_store.update(session_id, owner, state)
     except Exception as exc:
-        error = _friendly_error(exc)
+        # 供应商网关错误（401/429/超时等）优先映射为可理解文案（DoD 4），
+        # 其余走通用安全提示映射
+        error = _friendly_provider_error(exc) or _friendly_error(exc)
         result["error"] = error
         result["error_detail"] = f"{type(exc).__name__}: {exc}"
         if isinstance(exc, QueryTimeoutError):
@@ -553,6 +599,9 @@ def run_query(
             store.write(record)
         except Exception:  # 审计失败绝不影响主链路
             logger.exception("audit_write_failed", extra={"event": "audit_write_failed"})
+
+    # 请求级模型切换上下文清理（正常 / 异常路径共用此出口）
+    pop_request_model()
 
     if error:
         logger.warning(
