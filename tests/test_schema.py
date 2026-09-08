@@ -28,6 +28,24 @@ def test_minimal_dsl_parses():
     assert dsl.metrics[0].alias == "gmv"
 
 
+def test_scalar_order_by_stripped_when_no_dimension():
+    """自洽性校验（模块 B）：无分组维度时的排序无意义，模型层强制抹除 order_by。"""
+    dsl = QueryDSL.model_validate(_base_dsl(order_by=[{"field": "gmv", "direction": "desc"}]))
+    assert dsl.dimensions == []
+    assert dsl.order_by == []
+
+
+def test_order_by_preserved_when_dimension_present():
+    """有分组维度时保留 order_by（非标量，排序有语义）。"""
+    dsl = QueryDSL.model_validate(
+        _base_dsl(
+            dimensions=[{"field": "product_name"}],
+            order_by=[{"field": "gmv", "direction": "desc"}],
+        )
+    )
+    assert [(o.field, o.direction.value) for o in dsl.order_by] == [("gmv", "desc")]
+
+
 def test_default_limit_is_100():
     dsl = QueryDSL.model_validate(
         {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]}

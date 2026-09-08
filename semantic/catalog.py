@@ -51,6 +51,7 @@ COLUMNS: dict[str, FieldMeta] = {
     "discount_amount": FieldMeta("fact_orders", "discount_amount", "float"),
     "pay_status": FieldMeta("fact_orders", "pay_status", "str"),
     "order_time": FieldMeta("fact_orders", "order_time", "timestamp"),
+    "shop_id": FieldMeta("fact_orders", "shop_id", "int"),
     # fact_refunds（第二事实表：退款）
     "refund_id": FieldMeta("fact_refunds", "refund_id", "int"),
     "refund_amount": FieldMeta("fact_refunds", "refund_amount", "float"),
@@ -64,6 +65,9 @@ COLUMNS: dict[str, FieldMeta] = {
     "category": FieldMeta("dim_product", "category", "str"),
     "brand": FieldMeta("dim_product", "brand", "str"),
     "unit_price": FieldMeta("dim_product", "unit_price", "float"),
+    "product_name": FieldMeta("dim_product", "product_name", "str"),
+    # dim_shop
+    "shop_name": FieldMeta("dim_shop", "shop_name", "str"),
 }
 
 # 表别名（编译器内部使用）
@@ -72,6 +76,7 @@ ALIASES: dict[str, str] = {
     "fact_refunds": "r",
     "dim_user": "u",
     "dim_product": "p",
+    "dim_shop": "s",
 }
 
 # 主事实表（查询锚点，FROM 主表）
@@ -84,6 +89,7 @@ FACT_TABLES: tuple[str, ...] = ("fact_orders", "fact_refunds")
 JOIN_RULES: dict[str, JoinRule] = {
     "dim_user": JoinRule("inner", (("user_id", "user_id"),)),
     "dim_product": JoinRule("inner", (("product_id", "product_id"),)),
+    "dim_shop": JoinRule("inner", (("shop_id", "shop_id"),)),
 }
 
 # 第二事实表 -> 主事实表 的受控连接（LEFT JOIN，业务上 1:1，无扇出）

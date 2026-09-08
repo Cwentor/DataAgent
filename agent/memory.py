@@ -377,9 +377,16 @@ def _collect_deltas(query: str) -> _Deltas:
 
 
 def _has_metric_term(query: str) -> bool:
-    """是否包含已定义的业务指标词（视为"完整新问题"而非省略指代）。"""
+    """是否包含已定义的业务指标词（视为"完整新问题"而非省略指代）。
+
+    除口径词典别名（订单数/GMV/去重用户…）外，数量式提问（"多少订单/几个用户/多少笔"）
+    同样命中：它们代表**全新计数指标**（heuristic._count_entity_metric），
+    必须推向 topic_switch（RESET），杜绝"仅凭时间词就继承上轮 SUM(gmv)"的贪婪判定。
+    """
     q = query.lower()
-    return any(term in q for term in METRIC_TERMS)
+    if any(term in q for term in METRIC_TERMS):
+        return True
+    return _h._count_entity_metric(query) is not None
 
 
 def _has_exclusive_term(query: str) -> bool:

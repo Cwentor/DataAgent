@@ -66,4 +66,5 @@ logs/
 
 # --- 开发工具缓存（DSH vision router 产物） ---
 .dsh-vision-router/
+.zcode/
 

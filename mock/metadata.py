@@ -18,11 +18,17 @@ FIELD_METADATA: dict[str, dict[str, str]] = {
         "category": "商品类目（数码/家电/服饰/美妆/食品/家居）",
         "brand": "品牌名称",
         "unit_price": "商品单价（元）",
+        "product_name": "商品名称（品牌-类目#编号，确定性生成）",
+    },
+    "dim_shop": {
+        "shop_id": "店铺ID，主键",
+        "shop_name": "店铺名称",
     },
     "fact_orders": {
         "order_id": "订单ID，主键",
         "user_id": "下单用户ID，关联 dim_user.user_id",
         "product_id": "商品ID，关联 dim_product.product_id",
+        "shop_id": "下单店铺ID，关联 dim_shop.shop_id",
         "order_amount": "实付金额（元），= 单价*数量 - 优惠金额",
         "discount_amount": "优惠金额（元）",
         "pay_status": "支付状态（SUCCESS=成功 / CANCELLED=取消）",
@@ -41,6 +47,7 @@ FIELD_METADATA: dict[str, dict[str, str]] = {
 TABLE_METADATA: dict[str, str] = {
     "dim_user": "用户维度表",
     "dim_product": "商品维度表",
+    "dim_shop": "店铺维度表",
     "fact_orders": "订单事实表（星型模型中心，主事实表）",
     "fact_refunds": "退款事实表（第二事实表，经 order_id 与订单 1:1 关联）",
 }

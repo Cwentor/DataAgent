@@ -31,7 +31,7 @@ class Policy:
 
 
 # 全表集合
-ALL_TABLES = frozenset({"fact_orders", "fact_refunds", "dim_user", "dim_product"})
+ALL_TABLES = frozenset({"fact_orders", "fact_refunds", "dim_user", "dim_product", "dim_shop"})
 
 # 主体属性表（P0-3）：供参数化 RLS 谓词引用（{"field": ..., "operator": ..., "param": "principal.provinces"}）。
 # 生产环境由 security.policy_loader.refresh_policies() 从 config/policies.json 重建，

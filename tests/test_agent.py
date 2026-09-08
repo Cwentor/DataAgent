@@ -7,6 +7,7 @@ import pytest
 from agent.agent import LLMNL2DSL, extract_json
 from agent.errors import PipelineError
 from agent.heuristic import DeterministicNL2DSL
+from compiler.sql_compiler import compile_sql
 from eval.eval_runner import load_golden
 from semantic.dsl_schema import QueryDSL
 
@@ -29,6 +30,84 @@ def test_heuristic_rejects_unknown_query():
     h = DeterministicNL2DSL()
     with pytest.raises(PipelineError):
         h.run("今天天气怎么样？")
+
+
+# --------------------------------------------------------------------------- #
+# 极值/实体维度（模块 A/B/C 回归：遗漏分组维度 + Top-N 极值失效）
+# --------------------------------------------------------------------------- #
+def test_heuristic_extreme_product_dimension():
+    """测试用例 1（极值单实体）：'2024年GMV最高的产品是什么'
+    -> 产品维度 + 按 gmv 降序 + limit 1 + SQL 含 JOIN dim_product / GROUP BY。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("2024年GMV最高的产品是什么")
+    assert [d.field for d in dsl.dimensions] == ["product_name"]
+    assert [(o.field, o.direction.value) for o in dsl.order_by] == [("gmv", "desc")]
+    assert dsl.limit == 1
+    sql = compile_sql(dsl)
+    assert "JOIN dim_product p ON p.product_id = f.product_id" in sql
+    assert "GROUP BY p.product_name" in sql
+    assert 'ORDER BY "gmv" DESC' in sql
+    assert 'SELECT p.product_name AS "product_name", SUM(f.order_amount) AS "gmv"' in sql
+
+
+def test_heuristic_extreme_shop_dimension():
+    """测试用例 2（极值多实体）：'上季度退款率最低的3个店铺有哪些'
+    -> 店铺维度 + 退款率升序 + limit 3 + SQL 含 JOIN dim_shop / GROUP BY。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("上季度退款率最低的3个店铺有哪些")
+    assert [d.field for d in dsl.dimensions] == ["shop_name"]
+    assert dsl.metrics[0].kind == "ratio" and dsl.metrics[0].alias == "refund_rate"
+    assert [(o.field, o.direction.value) for o in dsl.order_by] == [("refund_rate", "asc")]
+    assert dsl.limit == 3
+    sql = compile_sql(dsl)
+    assert "JOIN dim_shop s ON s.shop_id = f.shop_id" in sql
+    assert "LEFT JOIN fact_refunds r ON r.order_id = f.order_id" in sql
+    assert "GROUP BY s.shop_name" in sql
+    assert 'ORDER BY "refund_rate" ASC' in sql
+
+
+def test_heuristic_scalar_no_orderby_limit():
+    """测试用例 3（对照组纯标量）：'2024年总GMV是多少'
+    -> 无维度、无冗余 ORDER BY 与 LIMIT（编译器对纯全局聚合省略）。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("2024年总GMV是多少")
+    assert dsl.dimensions == []
+    assert dsl.order_by == []
+    sql = compile_sql(dsl)
+    assert "ORDER BY" not in sql
+    assert "LIMIT" not in sql
+
+
+def test_heuristic_time_plus_order_count():
+    """模块 B 验收 1：'2024年有多少订单' -> COUNT(order_id)，严禁生成 SUM(order_amount)。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("2024年有多少订单")
+    assert len(dsl.metrics) == 1
+    assert dsl.metrics[0].field == "order_id"
+    assert dsl.metrics[0].agg == "count"
+    assert dsl.metrics[0].alias == "order_count"
+    assert dsl.time_filter is not None  # 2024 年时间窗口
+    sql = compile_sql(dsl)
+    assert "SUM(" not in sql and "order_amount" not in sql
+    assert 'COUNT(f.order_id) AS "order_count"' in sql
+
+
+def test_heuristic_order_count_variants():
+    """模块 B 变体：'多少笔/几个订单/多少单' 均解析为 COUNT(order_id)。"""
+    h = DeterministicNL2DSL()
+    for q in ("2024年有多少笔订单", "上个月几个订单", "今年多少单", "有多少订单"):
+        dsl = h.run(q)
+        assert dsl.metrics[0].field == "order_id"
+        assert dsl.metrics[0].agg == "count"
+        assert dsl.metrics[0].alias == "order_count"
+
+
+def test_heuristic_user_count_variant():
+    """模块 B 用户：'有多少用户/多少客户' -> COUNT(DISTINCT user_id)。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("2024年有多少用户")
+    assert dsl.metrics[0].field == "user_id"
+    assert dsl.metrics[0].agg == "count_distinct"
 
 
 # --------------------------------------------------------------------------- #
@@ -72,7 +151,31 @@ def test_llm_agent_valid_output():
     assert fake.calls == 1
 
 
-def test_llm_agent_retries_then_succeeds():
+def test_llm_agent_semantic_retry_for_entity_ranking():
+    """合法但漏掉实体/排序/limit 的 DSL 必须触发语义重试。"""
+    import json as _json
+
+    bad = _json.dumps(
+        {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]}
+    )
+    good = _json.dumps(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": [{"field": "product_name"}],
+            "order_by": [{"field": "gmv", "direction": "desc"}],
+            "limit": 1,
+        }
+    )
+    fake = FakeLLM([bad, good])
+    agent = LLMNL2DSL(fake, max_retries=1)
+    dsl = agent.run("2024年GMV最高的产品是什么")
+    assert [d.field for d in dsl.dimensions] == ["product_name"]
+    assert dsl.order_by[0].field == "gmv"
+    assert dsl.limit == 1
+    assert fake.calls == 2
+
     import json as _json
 
     bad = "这不是 JSON"

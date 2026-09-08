@@ -770,7 +770,7 @@ def compile_sql(dsl: QueryDSL) -> str:
     if dim_exprs:
         sql += "\nGROUP BY " + ", ".join(dim_exprs)
 
-    if dsl.order_by:
+    if dsl.order_by and dim_exprs:
         parts: list[str] = []
         for o in dsl.order_by:
             if o.field in metric_aliases or o.field in dim_aliases:
@@ -781,5 +781,7 @@ def compile_sql(dsl: QueryDSL) -> str:
             parts.append(f"{_quote_ident(ref)} {direction}")
         sql += "\nORDER BY " + ", ".join(parts)
 
-    sql += f"\nLIMIT {int(dsl.limit)}"
+    # 纯全局标量（无维度、无排序）：只返回单行聚合，LIMIT 冗余，抹除以免误导
+    if dim_exprs or dsl.order_by:
+        sql += f"\nLIMIT {int(dsl.limit)}"
     return sql

@@ -137,6 +137,36 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "filters 中同一字段只允许出现一条过滤条件（同值既不重复 eq 又 in，也不追加多条 AND）。",
         (),
     ),
+    (
+        "极值/实体维度（问什么就出什么维度）："
+        "查询主体必须进入 dimensions —— 产品/商品 -> {field:product_name}，"
+        "店铺/门店 -> {field:shop_name}，品类 -> {field:category}，品牌 -> {field:brand}；"
+        "极值修饰词 -> order_by 方向：最高/最大/最好 -> desc，最低/最小/最差 -> asc（按主指标别名）；"
+        '单数极值（"最高的X是什么/哪一个"）-> limit 1；"最高的N个 / 前N / N个店铺" -> limit N；'
+        '例："2024年GMV最高的产品是什么" -> '
+        "metrics=[{field:order_amount,agg:sum,alias:gmv}], dimensions=[{field:product_name}], "
+        "order_by=[{field:gmv,direction:desc}], limit=1；"
+        '纯标量统计（无实体维度，如"2024年总GMV是多少"）不得设置 order_by —— '
+        "无维度时编译器会省略 ORDER BY 与 LIMIT。",
+        (),
+    ),
+    (
+        "多轮计数 vs 时间微调（继承判定关键）："
+        '"2024年呢？/那最近30天呢？/那华南地区呢？" 仅调整时间/筛选，**保留上一轮 metrics**；'
+        '但 "2024年有多少订单" 含明确新计数度量，metrics **必须重置**为 '
+        "COUNT(order_id)（alias: order_count），严禁继续沿用上一轮 GMV/SUM(order_amount)；"
+        '同理 "多少 [用户|商品]" -> COUNT(DISTINCT user_id / product_id)。'
+        "计数单元（订单/单/笔/用户/人/客户/商品/产品）一旦与数量词共同出现，一律视为新指标。",
+        ("order_id", "order_amount", "user_id", "product_id"),
+    ),
+    (
+        "语义角色必须落到 DSL（不可只在解释中保留）："
+        "先识别 metric（指标）、entity_dimension（实体维度）、ranking_direction（排序方向）、"
+        "result_cardinality（返回条数）和 time_window（时间窗口），再输出 JSON；"
+        '"2024年GMV最高的产品是什么" 必须同时生成 product_name 维度、gmv DESC 排序和 limit=1；'
+        '"2024年总GMV是多少" 是纯标量，不应虚构维度或排序；最高/最低、哪个/是什么等语义不能丢失。',
+        ("order_amount", "product_name"),
+    ),
 )
 
 # 无论主体如何都成立的安全约束（末尾附加）

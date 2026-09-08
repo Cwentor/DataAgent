@@ -306,13 +306,54 @@ class DeterministicNL2DSL:
                     }
                 )
             else:
-                # 维度基数探查：自动将维度字段映射为 count_distinct 指标
-                dim_count_metric = self._dim_count_fallback(q)
-                if dim_count_metric is not None:
-                    metrics.append(dim_count_metric)
+                # 数量提问 -> COUNT/COUNT_DISTINCT 度量映射（"有多少订单/几个用户/多少商品"），
+                # 优先于维度基数兜底：这类问法命中"多少/几个 + 实体"即视为全新计数度量。
+                count_entity = self._count_entity_metric(q)
+                if count_entity is not None:
+                    metrics.append(count_entity)
+                elif self._dim_count_fallback(q) is not None:
+                    # 维度基数探查：自动将维度字段映射为 count_distinct 指标
+                    metrics.append(self._dim_count_fallback(q))
                 else:
                     raise PipelineError("无法识别指标（需要 GMV/订单数/去重用户/ARPU/客单价 之一）")
         return metrics
+
+    def _count_entity_metric(self, q: str) -> dict[str, Any] | None:
+        """'数量提问 -> COUNT/COUNT_DISTINCT' 度量映射。
+
+        当问句命中"多少/几个 [订单|单|笔]"、"多少 [用户/客户/人]"、"多少 [商品/产品]"等
+        数量式提问时，返回对应主键的计数度量：订单 -> COUNT(order_id)，
+        用户/客户 -> COUNT(DISTINCT user_id)，商品/产品 -> COUNT(DISTINCT product_id)。
+
+        语义定位：这类问法代表**全新计数指标**而非对上一轮指标的微调继承，故与
+        memory._has_metric_term 同源——命中即把多轮判定推向 topic_switch（RESET），
+        从根源上阻断"仅凭时间词就沿用上轮 SUM(order_amount)/gmv"的贪婪判定。
+        """
+        # 触发数量语气词（不取裸"几"，避免误伤）
+        if not any(w in q for w in ("多少", "几个", "多少个", "几笔", "几单")):
+            return None
+        if any(k in q for k in ("订单", "单子", "笔", "单")):
+            return {
+                "kind": "aggregate",
+                "field": "order_id",
+                "agg": "count",
+                "alias": "order_count",
+            }
+        if any(k in q for k in ("用户", "客户", "人")) and "user_id" in catalog.COLUMNS:
+            return {
+                "kind": "aggregate",
+                "field": "user_id",
+                "agg": "count_distinct",
+                "alias": "active_users",
+            }
+        if any(k in q for k in ("商品", "产品")) and "product_id" in catalog.COLUMNS:
+            return {
+                "kind": "aggregate",
+                "field": "product_id",
+                "agg": "count_distinct",
+                "alias": "product_count",
+            }
+        return None
 
     def _dim_count_fallback(self, q: str) -> dict[str, Any] | None:
         """维度基数查询兜底：将维度字段映射为 count_distinct 聚合指标。
@@ -452,6 +493,13 @@ class DeterministicNL2DSL:
             add("category")
         if "品牌" in q:
             add("brand")
+        # 商品/店铺实体 -> 维度名称字段（"问什么就出什么维度"，仅当字段已在目录登记）
+        if any(k in q for k in ("产品", "商品")):
+            if "product_name" in catalog.COLUMNS:
+                add("product_name")
+        if any(k in q for k in ("店铺", "门店")):
+            if "shop_name" in catalog.COLUMNS:
+                add("shop_name")
         if any(k in q for k in ("各省", "按省份", "分省", "省份分布", "每省")):
             add("province")
         # "地区"分组语境（区别于 count 型"有几个地区"，后者不分组）
@@ -721,6 +769,15 @@ class DeterministicNL2DSL:
     # ------------------------------------------------------------------ #
     # 排序 / 截断
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _extreme_kind(q: str) -> str | None:
+        """极值修饰词方向：最高/最大/最好 -> max（降序）；最低/最小/最差 -> min（升序）。"""
+        if any(k in q for k in ("最高", "最大", "最好", "最多", "最强")):
+            return "max"
+        if any(k in q for k in ("最低", "最小", "最差", "最少", "最弱", "最便宜")):
+            return "min"
+        return None
+
     def _order_by(self, q: str) -> list[dict[str, Any]]:
         # 趋势/窗口/补零 -> 按时间主轴升序（退款时序用 refund_time）
         if any(
@@ -738,7 +795,13 @@ class DeterministicNL2DSL:
             )
         ):
             return [{"field": self._time_dim_field(q), "direction": "asc"}]
-        # 最高/前N -> 按主指标降序
+        # 极值修饰词优先："GMV最高的产品" -> 按主指标降序；"退款率最低的3个店铺" -> 升序
+        ek = self._extreme_kind(q)
+        if ek == "min":
+            return [{"field": self._primary_alias(q), "direction": "asc"}]
+        if ek == "max":
+            return [{"field": self._primary_alias(q), "direction": "desc"}]
+        # 最高/排名/前N -> 按主指标降序
         if any(k in q for k in ("最高", "排名", "前")):
             return [{"field": self._primary_alias(q), "direction": "desc"}]
         # 有维度且非"分布"型 -> 按主指标降序（可控默认；"分布"视为不排序的清单型问题）
@@ -748,14 +811,24 @@ class DeterministicNL2DSL:
 
     def _primary_alias(self, q: str) -> str:
         m = self._metrics(q)
-        if len(m) == 1 and m[0]["kind"] == "aggregate":
-            return m[0]["alias"]
+        if len(m) == 1 and isinstance(m[0], dict):
+            return m[0]["alias"]  # 聚合 / 比率 / 窗口指标均携带 alias
         return "gmv"
 
     def _limit(self, q: str) -> int:
-        m = re.search(r"前\s*(\d+)\s*个", q)
+        # 显式 Top-N：前N个 / 最高的N个 / N个[实体]
+        m = re.search(
+            r"(?:前|最高|最低|最大|最小|最好|最差|最)?\s*(\d+)\s*"
+            r"个(?:产品|商品|店铺|门店|品牌|品类|地区|省份|用户|订单)?",
+            q,
+        )
         if m:
             return int(m.group(1))
+        # 单数极值："最高的X是什么/哪一个" -> 只展示 1 条，避免硬编码返回 100 条标量
+        if self._extreme_kind(q) is not None and any(
+            k in q for k in ("是什么", "是哪个", "哪一个", "哪个")
+        ):
+            return 1
         # 维度基数统计只返回一个总数，不强制用户补充 limit。
         if any(k in q for k in ("有几个", "有多少个", "数量", "数目")):
             if self._dim_count_fallback(q) is not None:

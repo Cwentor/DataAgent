@@ -326,3 +326,15 @@ class QueryDSL(BaseModel):
         description="日期连续补零：按时间维度补齐缺失日期并用 0 填充指标",
     )
     top_n: TopN | None = Field(default=None, description="分组 Top-N（如每省 Top 3 品类）")
+
+    @model_validator(mode="after")
+    def _check_scalar_ordering(self) -> QueryDSL:
+        """自洽性校验：无分组维度时的排序无意义，强制抹除（纯全局聚合）。
+
+        ORDER BY 依赖分组后的行才有语义；标量聚合（dimensions 为空）只返回单行，
+        保留 order_by 会在编译器/展示层产生误导。此处拦截并清空，与编译器对
+        "纯标量不输出 ORDER BY/LIMIT" 的处理一致，保证 DSL 逻辑自洽。
+        """
+        if self.order_by and not self.dimensions:
+            return self.model_copy(update={"order_by": []})
+        return self

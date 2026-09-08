@@ -31,7 +31,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\nLIMIT 100"
+    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
   },
   {
     "id": "Q02",
@@ -97,7 +97,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nLIMIT 100"
+    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'"
   },
   {
     "id": "Q04",
@@ -133,7 +133,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nJOIN dim_product p ON p.product_id = f.product_id\nWHERE f.pay_status = 'SUCCESS' AND u.province = '广东' AND p.category = '数码'\nLIMIT 100"
+    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nJOIN dim_product p ON p.product_id = f.product_id\nWHERE f.pay_status = 'SUCCESS' AND u.province = '广东' AND p.category = '数码'"
   },
   {
     "id": "Q05",
@@ -237,7 +237,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT COUNT(f.order_id) AS \"order_count\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS'\nLIMIT 100"
+    "sql": "SELECT COUNT(f.order_id) AS \"order_count\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS'"
   },
   {
     "id": "Q08",
@@ -271,7 +271,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT COUNT(DISTINCT f.user_id) AS \"active_users\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\nLIMIT 100"
+    "sql": "SELECT COUNT(DISTINCT f.user_id) AS \"active_users\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
   },
   {
     "id": "Q09",
@@ -315,7 +315,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT (SUM(f.order_amount)) / NULLIF(COUNT(DISTINCT f.user_id), 0) AS \"arpu\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\nLIMIT 100"
+    "sql": "SELECT (SUM(f.order_amount)) / NULLIF(COUNT(DISTINCT f.user_id), 0) AS \"arpu\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
   },
   {
     "id": "Q10",
@@ -515,7 +515,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT (SUM(r.refund_amount)) / NULLIF(SUM(f.order_amount), 0) AS \"refund_rate\"\nFROM fact_orders f\nLEFT JOIN fact_refunds r ON r.order_id = f.order_id\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'\nLIMIT 100"
+    "sql": "SELECT (SUM(r.refund_amount)) / NULLIF(SUM(f.order_amount), 0) AS \"refund_rate\"\nFROM fact_orders f\nLEFT JOIN fact_refunds r ON r.order_id = f.order_id\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
   },
   {
     "id": "Q15",
@@ -780,69 +780,120 @@
     "question": "上季度的成功订单GMV是多少？",
     "scenario": "时间代数-calendar quarter",
     "dsl": {
-      "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+      "metrics": [
+        {
+          "kind": "aggregate",
+          "field": "order_amount",
+          "agg": "sum",
+          "alias": "gmv"
+        }
+      ],
       "dimensions": [],
       "time_filter": {
         "granularity": "quarter",
         "range_type": "relative",
-        "relative": {"amount": 1, "unit": "quarter", "mode": "calendar"},
+        "relative": {
+          "amount": 1,
+          "unit": "quarter",
+          "mode": "calendar"
+        },
         "comparison": "none",
         "reference_date": "2024-06-30"
       },
       "filters": [
-        {"field": "pay_status", "operator": "eq", "value": "SUCCESS"}
+        {
+          "field": "pay_status",
+          "operator": "eq",
+          "value": "SUCCESS"
+        }
       ],
       "order_by": [],
       "limit": 100,
       "fill_gaps": false,
       "top_n": null
     },
-    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-01-01 00:00:00' AND f.order_time < TIMESTAMP '2024-04-01 00:00:00'\nLIMIT 100"
+    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-01-01 00:00:00' AND f.order_time < TIMESTAMP '2024-04-01 00:00:00'"
   },
   {
     "id": "Q21",
     "question": "本月至今成功订单GMV是多少？",
     "scenario": "时间代数-MTD to_date",
     "dsl": {
-      "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+      "metrics": [
+        {
+          "kind": "aggregate",
+          "field": "order_amount",
+          "agg": "sum",
+          "alias": "gmv"
+        }
+      ],
       "dimensions": [],
       "time_filter": {
         "granularity": "day",
         "range_type": "relative",
-        "relative": {"amount": 1, "unit": "month", "mode": "to_date"},
+        "relative": {
+          "amount": 1,
+          "unit": "month",
+          "mode": "to_date"
+        },
         "comparison": "none",
         "reference_date": "2024-06-30"
       },
       "filters": [
-        {"field": "pay_status", "operator": "eq", "value": "SUCCESS"}
+        {
+          "field": "pay_status",
+          "operator": "eq",
+          "value": "SUCCESS"
+        }
       ],
       "order_by": [],
       "limit": 100,
       "fill_gaps": false,
       "top_n": null
     },
-    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-30 00:00:00'\nLIMIT 100"
+    "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-30 00:00:00'"
   },
   {
     "id": "Q22",
     "question": "6月每日成功订单GMV同比是多少？",
     "scenario": "时间维度×comparison按位配对",
     "dsl": {
-      "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-      "dimensions": [{"field": "order_time"}],
+      "metrics": [
+        {
+          "kind": "aggregate",
+          "field": "order_amount",
+          "agg": "sum",
+          "alias": "gmv"
+        }
+      ],
+      "dimensions": [
+        {
+          "field": "order_time"
+        }
+      ],
       "time_filter": {
         "granularity": "day",
         "range_type": "absolute",
         "relative": null,
-        "absolute": {"start": "2024-06-01", "end": "2024-07-01"},
+        "absolute": {
+          "start": "2024-06-01",
+          "end": "2024-07-01"
+        },
         "comparison": "yoy",
         "reference_date": null
       },
       "filters": [
-        {"field": "pay_status", "operator": "eq", "value": "SUCCESS"}
+        {
+          "field": "pay_status",
+          "operator": "eq",
+          "value": "SUCCESS"
+        }
       ],
       "order_by": [
-        {"field": "order_time", "direction": "asc"}
+        {
+          "field": "order_time",
+          "direction": "asc"
+        }
       ],
       "limit": 100,
       "fill_gaps": false,
@@ -855,19 +906,37 @@
     "question": "近30天每日退款金额是多少？",
     "scenario": "时间主轴解绑-time_field=refund_time",
     "dsl": {
-      "metrics": [{"kind": "aggregate", "field": "refund_amount", "agg": "sum", "alias": "refund_amount"}],
-      "dimensions": [{"field": "refund_time"}],
+      "metrics": [
+        {
+          "kind": "aggregate",
+          "field": "refund_amount",
+          "agg": "sum",
+          "alias": "refund_amount"
+        }
+      ],
+      "dimensions": [
+        {
+          "field": "refund_time"
+        }
+      ],
       "time_filter": {
         "granularity": "day",
         "range_type": "relative",
-        "relative": {"amount": 30, "unit": "day", "mode": "trailing"},
+        "relative": {
+          "amount": 30,
+          "unit": "day",
+          "mode": "trailing"
+        },
         "comparison": "none",
         "reference_date": "2024-06-30",
         "time_field": "refund_time"
       },
       "filters": [],
       "order_by": [
-        {"field": "refund_time", "direction": "asc"}
+        {
+          "field": "refund_time",
+          "direction": "asc"
+        }
       ],
       "limit": 100,
       "fill_gaps": false,
@@ -883,46 +952,83 @@
       {
         "question": "上个月华东地区的GMV是多少？",
         "dsl": {
-          "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+          "metrics": [
+            {
+              "kind": "aggregate",
+              "field": "order_amount",
+              "agg": "sum",
+              "alias": "gmv"
+            }
+          ],
           "dimensions": [],
           "time_filter": {
             "granularity": "month",
             "range_type": "relative",
-            "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+            "relative": {
+              "amount": 1,
+              "unit": "month",
+              "mode": "calendar"
+            },
             "comparison": "none",
             "reference_date": "2024-06-30"
           },
           "filters": [
-            {"field": "province", "operator": "in", "value": ["上海", "江苏", "浙江", "山东"]}
+            {
+              "field": "province",
+              "operator": "in",
+              "value": [
+                "上海",
+                "江苏",
+                "浙江",
+                "山东"
+              ]
+            }
           ],
           "order_by": [],
           "limit": 100,
           "fill_gaps": false,
           "top_n": null
         },
-        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nWHERE u.province IN ('上海', '江苏', '浙江', '山东') AND f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nLIMIT 100"
+        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nWHERE u.province IN ('上海', '江苏', '浙江', '山东') AND f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'"
       },
       {
         "question": "那华南呢？",
         "dsl": {
-          "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+          "metrics": [
+            {
+              "kind": "aggregate",
+              "field": "order_amount",
+              "agg": "sum",
+              "alias": "gmv"
+            }
+          ],
           "dimensions": [],
           "time_filter": {
             "granularity": "month",
             "range_type": "relative",
-            "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+            "relative": {
+              "amount": 1,
+              "unit": "month",
+              "mode": "calendar"
+            },
             "comparison": "none",
             "reference_date": "2024-06-30"
           },
           "filters": [
-            {"field": "province", "operator": "in", "value": ["广东"]}
+            {
+              "field": "province",
+              "operator": "in",
+              "value": [
+                "广东"
+              ]
+            }
           ],
           "order_by": [],
           "limit": 100,
           "fill_gaps": false,
           "top_n": null
         },
-        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nWHERE u.province IN ('广东') AND f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nLIMIT 100"
+        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_user u ON u.user_id = f.user_id\nWHERE u.province IN ('广东') AND f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'"
       }
     ]
   },
@@ -934,12 +1040,23 @@
       {
         "question": "上个月的GMV是多少？",
         "dsl": {
-          "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+          "metrics": [
+            {
+              "kind": "aggregate",
+              "field": "order_amount",
+              "agg": "sum",
+              "alias": "gmv"
+            }
+          ],
           "dimensions": [],
           "time_filter": {
             "granularity": "month",
             "range_type": "relative",
-            "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+            "relative": {
+              "amount": 1,
+              "unit": "month",
+              "mode": "calendar"
+            },
             "comparison": "none",
             "reference_date": "2024-06-30"
           },
@@ -949,17 +1066,33 @@
           "fill_gaps": false,
           "top_n": null
         },
-        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nLIMIT 100"
+        "sql": "SELECT SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nWHERE f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'"
       },
       {
         "question": "按品类展开",
         "dsl": {
-          "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-          "dimensions": [{"field": "category", "alias": null}],
+          "metrics": [
+            {
+              "kind": "aggregate",
+              "field": "order_amount",
+              "agg": "sum",
+              "alias": "gmv"
+            }
+          ],
+          "dimensions": [
+            {
+              "field": "category",
+              "alias": null
+            }
+          ],
           "time_filter": {
             "granularity": "month",
             "range_type": "relative",
-            "relative": {"amount": 1, "unit": "month", "mode": "calendar"},
+            "relative": {
+              "amount": 1,
+              "unit": "month",
+              "mode": "calendar"
+            },
             "comparison": "none",
             "reference_date": "2024-06-30"
           },

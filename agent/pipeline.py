@@ -45,8 +45,12 @@ def run_pipeline_with_status(query: str, principal: str | None = None) -> tuple[
     degraded = False
     try:
         dsl = _default_agent().run(query, principal=principal)
-    except LLMError:
-        dsl = DeterministicNL2DSL().run(query, principal=principal)
+    except (LLMError, PipelineError) as original_error:
+        # LLM 结构/语义重试耗尽时，仅对确定性覆盖范围内的问题安全降级。
+        try:
+            dsl = DeterministicNL2DSL().run(query, principal=principal)
+        except Exception:
+            raise original_error from original_error
         degraded = True
     return apply_policy(dsl, principal), degraded
 

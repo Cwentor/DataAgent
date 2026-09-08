@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from agent.errors import PipelineError
 from agent.llm import OpenAICompatClient
 from agent.prompts import build_fix_messages, build_messages, build_rewrite_messages
+from agent.semantic_check import validate_semantics
 from semantic.dsl_schema import QueryDSL
 
 BT = chr(96)  # backtick
@@ -74,7 +75,11 @@ class LLMNL2DSL:
                 obj = extract_json(raw)
                 if "error" in obj and obj.get("error"):
                     raise PipelineError("LLM 拒绝解析: " + str(obj["error"]))
-                return QueryDSL.model_validate(obj)
+                candidate = QueryDSL.model_validate(obj)
+                semantic_errors = validate_semantics(query, candidate, principal)
+                if semantic_errors:
+                    raise PipelineError("语义校验失败：" + "；".join(semantic_errors))
+                return candidate
             except (ValueError, TypeError, KeyError, ValidationError, PipelineError) as exc:
                 last_error = exc
                 messages = build_fix_messages(query, raw, str(exc)[:400], principal)

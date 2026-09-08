@@ -349,6 +349,36 @@ def test_resolve_inherit_still_works_after_reset_rule():
 
 
 # --------------------------------------------------------------------------- #
+# 时间修改贪婪判定 + 计数度量被覆盖（补 Bug 回归，验收 1 & 2）
+# --------------------------------------------------------------------------- #
+def test_resolve_time_plus_order_count_resets_metrics():
+    """验收 1：上轮 metrics=[gmv]、province=广东，当前问 '2024年有多少订单'
+    -> 必须判定为全新计数指标（NEW_QUERY/RESET_METRIC），而非"仅微调时间"。
+
+    即使问句含时间词"2024年"，也不得推断为时间微调继承：计数实体词（多少+订单）
+    一律把多轮判定推向 topic_switch，调用方重新解析出 COUNT(order_id)。
+    """
+    res = resolve_context("2024年有多少订单", _last_dsl(), None)
+    assert res.mode == "fresh" and res.reason == "topic_switch"
+    assert "已识别为新问题" in res.summary
+    # RESET 不产出基于上轮 DSL 的合并结果（严禁沿用 SUM(order_amount)/gmv）
+    assert res.dsl is None
+
+
+def test_resolve_pure_time_inherit_keeps_metric():
+    """验收 2（对照组）：上轮 metrics=[gmv]，当前问 '2024年的呢'
+    -> 无新度量表达，仅调整时间，必须保留 gmv 指标（inherit）。"""
+    res = resolve_context("2024年的呢", _last_dsl(), None)
+    assert res.mode == "inherit"
+    assert [m.alias for m in res.dsl.metrics] == ["gmv"]
+    # 时间窗口被替换为 2024 年绝对区间
+    assert res.dsl.time_filter is not None
+    assert res.dsl.time_filter.range_type.value == "absolute"
+    assert res.dsl.time_filter.absolute.start.isoformat() == "2024-01-01"
+    assert [m.field for m in res.dsl.metrics] == ["order_amount"]  # 仍是 SUM，未变 count
+
+
+# --------------------------------------------------------------------------- #
 # Filter 去重归一化（模块 B）
 # --------------------------------------------------------------------------- #
 def test_normalize_filters_collapses_eq_and_in_same_value():
