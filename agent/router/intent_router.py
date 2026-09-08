@@ -372,9 +372,11 @@ class IntentRouter:
         self.min_confidence = (
             min_confidence if min_confidence is not None else settings.ROUTER_MIN_CONFIDENCE
         )
-        # 未配置 API Key / 无可用供应商时不构造 LLM 客户端（守卫前移：绝不发起无意义网络请求）
+        # 无可用供应商 / API Key 时不构造 LLM 客户端（守卫前移：绝不发起无意义网络请求）。
+        # resolve_default_client 内部检查网关可用性（首位有 Key 的启用供应商 / 环境变量），
+        # 返回请求感知的分发代理或 None。
         self._llm = llm
-        if self._llm is None and enable_llm and settings.LLM_API_KEY:
+        if self._llm is None and enable_llm:
             self._llm = resolve_default_client()
 
     # ------------------------------------------------------------------ #
