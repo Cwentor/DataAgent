@@ -27,6 +27,7 @@
       <div id="userinfo" class="userinfo hidden">
         <span id="display-name" class="user-name"></span>
         <span id="principal-badge" class="principal-badge"></span>
+        <button type="button" id="settings-btn" class="ghost-btn" title="模型供应商设置">⚙ 模型设置</button>
         <button type="button" id="logout-btn" class="ghost-btn">退出</button>
       </div>
     </div>
@@ -34,6 +35,9 @@
 
   <main class="container">
     <section class="query-bar">
+      <select id="model-switch" class="model-switch" title="切换本次查询使用的模型供应商与模型">
+        <option value="">默认模型（自动选择）</option>
+      </select>
       <input id="query" type="text" placeholder="用自然语言提问，例如：各品类成功订单的GMV分布？"
              value="2024年6月成功订单的GMV是多少？" autocomplete="off">
       <button id="run" type="button">查询</button>
@@ -78,6 +82,74 @@
   </main>
 
   <footer class="footer">FutureBI · MIT · 本地 DuckDB 沙箱 · 统一身份认证 + 服务端强制 principal</footer>
+
+  <!-- 模型供应商设置弹窗（左右两栏：列表 + 详情表单） -->
+  <div id="settings-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>模型供应商设置</h2>
+        <button type="button" id="settings-close" class="ghost-btn" title="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <aside class="provider-pane">
+          <div class="pane-head">
+            <span>供应商</span>
+            <button type="button" id="provider-add" class="mini-btn">＋ 添加供应商</button>
+          </div>
+          <div id="provider-list" class="provider-list"></div>
+        </aside>
+        <section class="provider-detail">
+          <div id="provider-form" class="hidden">
+            <div class="form-row head-row">
+              <input id="pf-name" class="name-input" placeholder="供应商名称">
+              <label class="switch" title="启用 / 禁用">
+                <input id="pf-enabled" type="checkbox" checked>
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="form-row">
+              <label>API 协议格式</label>
+              <select id="pf-protocol">
+                <option value="openai_chat">OpenAI Chat Completions（/chat/completions）</option>
+                <option value="openai_responses">OpenAI Responses（/responses）</option>
+                <option value="anthropic">Anthropic Messages（/v1/messages）</option>
+                <option value="gemini">Google Gemini（generateContent）</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>Base URL</label>
+              <input id="pf-base-url" placeholder="例如 https://api.openai.com/v1">
+            </div>
+            <div class="form-row">
+              <label>API Key</label>
+              <div class="key-row">
+                <input id="pf-api-key" type="password" placeholder="粘贴密钥；保持脱敏串 = 不修改">
+                <button type="button" id="pf-eye" class="eye-btn" title="显示 / 隐藏">👁</button>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>模型列表</label>
+              <div id="pf-models" class="model-chips"></div>
+              <div class="model-add-row">
+                <input id="pf-model-input" placeholder="模型 ID，例如 glm-4.5-flash / gpt-4o">
+                <button type="button" id="pf-model-add" class="mini-btn">＋ 添加模型</button>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button type="button" id="pf-test" class="secondary-btn">测试连通性</button>
+              <span class="spacer"></span>
+              <button type="button" id="pf-delete" class="danger-btn hidden">删除供应商</button>
+              <button type="button" id="pf-save" class="primary-btn">保存</button>
+            </div>
+            <div id="pf-test-result" class="test-result hidden"></div>
+          </div>
+          <div id="provider-empty" class="provider-empty">选择左侧供应商，或点击「添加供应商」接入自定义中转站。</div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-box" class="toast-box"></div>
 
   <script src="/static/app.js"></script>
 </body>

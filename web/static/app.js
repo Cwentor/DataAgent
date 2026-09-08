@@ -27,6 +27,20 @@
     e.classList.remove("hidden");
   }
 
+  // ---------------------------------------------------------------- Toast
+  function toast(msg, type) {
+    var box = $("toast-box");
+    var el = document.createElement("div");
+    el.className = "toast " + (type || "info");
+    el.textContent = msg;
+    box.appendChild(el);
+    setTimeout(function () {
+      el.style.opacity = "0";
+      el.style.transition = "opacity .25s";
+      setTimeout(function () { el.remove(); }, 260);
+    }, type === "err" ? 6000 : 3000);
+  }
+
   // ---------------------------------------------------------------- 鉴权
   function getToken() { try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
   function setToken(t) { try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) {} }
@@ -90,6 +104,7 @@
           if (data.session_id) { setSid(data.session_id); }
           $("password").value = "";
           showUser(data.user);
+          fillModelSwitch();  // 登录后拉取供应商模型候选（模型切换器数据源）
         } else {
           showError(data.error || "登录失败");
         }
@@ -110,7 +125,7 @@
 
   function restoreSession() {
     api("/api/auth/me").then(function (data) {
-      if (data && data.username) { showUser(data); }
+      if (data && data.username) { showUser(data); fillModelSwitch(); }
       else { showLogin(); }
     }).catch(function () { showLogin(); });
   }
@@ -338,6 +353,301 @@
     showAnswer("分析结果", html || "（无）");
   }
 
+  // ---------------------------------------------------------------- 模型供应商设置
+  var PROTOCOL_LABELS = {
+    openai_chat: "Chat Completions",
+    openai_responses: "Responses",
+    anthropic: "Anthropic",
+    gemini: "Gemini"
+  };
+  var CAPABILITY_LABELS = { vision: "视觉", function_calling: "函数调用", json_schema: "JSON Schema" };
+  var providers = [];          // 全量供应商（脱敏视图）
+  var currentProviderId = "";  // 设置面板当前编辑的供应商
+  var CURRENT_SELECTION_KEY = "futurebi_model_selection";
+
+  function getCurrentSelection() {
+    try { return sessionStorage.getItem(CURRENT_SELECTION_KEY) || ""; } catch (e) { return ""; }
+  }
+  function setCurrentSelection(v) {
+    try { sessionStorage.setItem(CURRENT_SELECTION_KEY, v); } catch (e) {}
+  }
+
+  function selectedProviderModel() {
+    // 把 "provider|model" 选择值拆为请求体字段；空值 = 默认分派
+    var v = $("model-switch").value;
+    if (!v) return {};
+    var idx = v.indexOf("|");
+    return { provider_id: v.slice(0, idx), model_id: v.slice(idx + 1) };
+  }
+
+  function fillModelSwitch() {
+    var sel = $("model-switch");
+    var saved = getCurrentSelection();
+    fetchModelChoices(function (choices) {
+      var html = "<option value=''>默认模型（自动选择）</option>";
+      (choices || []).forEach(function (p) {
+        html += "<optgroup label='" + esc(p.provider_name) + "'>";
+        (p.models || []).forEach(function (m) {
+          var value = p.provider_id + "|" + m.id;
+          html += "<option value='" + esc(value) + "'>"
+            + esc(m.name || m.id) + " · " + (PROTOCOL_LABELS[p.protocol] || p.protocol) + "</option>";
+        });
+        html += "</optgroup>";
+      });
+      sel.innerHTML = html;
+      if (saved && sel.querySelector("option[value='" + saved.replace(/"/g, '\\"') + "']")) {
+        sel.value = saved;
+      }
+    });
+  }
+
+  function fetchModelChoices(cb) {
+    api("/api/settings/providers").then(function (data) {
+      providers = data.providers || [];
+      renderProviderList();
+      cb(data.choices || []);
+    }).catch(function () { cb([]); });
+  }
+
+  // ---------------------------------------------------------------- 设置弹窗渲染
+  function renderProviderList() {
+    var box = $("provider-list");
+    var html = "";
+    providers.forEach(function (p) {
+      var badge = p.is_preset
+        ? "<span class='p-badge preset'>预置</span>"
+        : "<span class='p-badge custom'>自定义</span>";
+      if (!p.enabled) { badge += "<span class='p-badge off'>已禁用</span>"; }
+      html += "<div class='provider-item" + (p.id === currentProviderId ? " active" : "") + "'"
+        + " data-id='" + esc(p.id) + "'>"
+        + "<span class='p-name'>" + esc(p.name) + "</span>" + badge + "</div>";
+    });
+    box.innerHTML = html || "<div class='provider-empty'>暂无供应商</div>";
+    box.querySelectorAll(".provider-item").forEach(function (el) {
+      el.addEventListener("click", function () { openProvider(el.getAttribute("data-id")); });
+    });
+  }
+
+  function openProvider(id) {
+    currentProviderId = id;
+    renderProviderList();
+    var p = providers.find(function (x) { return x.id === id; });
+    $("provider-form").classList.remove("hidden");
+    $("provider-empty").classList.add("hidden");
+    $("pf-delete").classList.toggle("hidden", !!(p && p.is_preset));
+    $("pf-test-result").classList.add("hidden");
+    $("pf-name").value = p ? p.name : "";
+    $("pf-enabled").checked = p ? !!p.enabled : true;
+    $("pf-protocol").value = p ? p.protocol : "openai_chat";
+    $("pf-base-url").value = p ? p.base_url : "";
+    $("pf-api-key").value = p ? p.api_key : "";   // 脱敏串（保持即不修改）
+    $("pf-api-key").type = "password";
+    renderModelChips(p ? p.models : []);
+  }
+
+  function openNewProvider() {
+    currentProviderId = "";
+    renderProviderList();
+    $("provider-form").classList.remove("hidden");
+    $("provider-empty").classList.add("hidden");
+    $("pf-delete").classList.add("hidden");
+    $("pf-test-result").classList.add("hidden");
+    $("pf-name").value = "";
+    $("pf-enabled").checked = true;
+    $("pf-protocol").value = "openai_chat";
+    $("pf-base-url").value = "";
+    $("pf-api-key").value = "";
+    $("pf-api-key").type = "password";
+    renderModelChips([]);
+    $("pf-name").focus();
+  }
+
+  function currentFormModels() {
+    return window.__pfModels || [];
+  }
+  function setCurrentFormModels(models) {
+    window.__pfModels = models || [];
+  }
+
+  function renderModelChips(models) {
+    setCurrentFormModels(models);
+    var box = $("pf-models");
+    if (!models || !models.length) {
+      box.innerHTML = "<div class='provider-empty' style='padding:8px 0'>尚未配置模型</div>";
+      return;
+    }
+    var html = "";
+    models.forEach(function (m, i) {
+      var tags = "";
+      (m.capabilities || []).forEach(function (c) {
+        if (CAPABILITY_LABELS[c]) { tags += "<span class='chip-tag'>" + CAPABILITY_LABELS[c] + "</span>"; }
+      });
+      if (m.context_window) {
+        tags += "<span class='chip-tag ctx'>上下文 " + fmt(m.context_window) + "</span>";
+      }
+      html += "<span class='model-chip'>"
+        + "<span class='m-id'>" + esc(m.id) + "</span>" + tags
+        + "<button type='button' class='chip-act' data-act='test' data-i='" + i + "' title='测试该模型连通性'>⚡</button>"
+        + "<button type='button' class='chip-act chip-del' data-act='del' data-i='" + i + "' title='移除模型'>✕</button>"
+        + "</span>";
+    });
+    box.innerHTML = html;
+    box.querySelectorAll(".chip-act").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var i = Number(btn.getAttribute("data-i"));
+        var act = btn.getAttribute("data-act");
+        var models2 = currentFormModels();
+        if (act === "del") {
+          models2.splice(i, 1);
+          renderModelChips(models2);
+        } else if (act === "test") {
+          testConnection({ model_id: models2[i].id });
+        }
+      });
+    });
+  }
+
+  function collectForm() {
+    return {
+      name: $("pf-name").value.trim(),
+      enabled: $("pf-enabled").checked,
+      protocol: $("pf-protocol").value,
+      base_url: $("pf-base-url").value.trim(),
+      api_key: $("pf-api-key").value,          // 原样提交：脱敏串由服务端识别为"不修改"
+      models: currentFormModels()
+    };
+  }
+
+  function saveProvider() {
+    var form = collectForm();
+    if (!form.name) { toast("请填写供应商名称", "err"); return; }
+    if (!form.base_url) { toast("请填写 Base URL", "err"); return; }
+    var body = JSON.stringify(form);
+    if (currentProviderId) {
+      api("/api/settings/providers/" + encodeURIComponent(currentProviderId), {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: body
+      }).then(handleSaved);
+    } else {
+      api("/api/settings/providers", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: body
+      }).then(handleSaved);
+    }
+  }
+
+  function handleSaved(data) {
+    if (data.error) { toast(data.error, "err"); return; }
+    toast("供应商配置已保存", "ok");
+    currentProviderId = data.provider ? data.provider.id : currentProviderId;
+    fetchModelChoices(function () { openProvider(currentProviderId); });
+    refreshModelSwitch();
+  }
+
+  function deleteProvider() {
+    if (!currentProviderId) { return; }
+    if (!window.confirm("确认删除该供应商？删除后不可恢复。")) { return; }
+    api("/api/settings/providers/" + encodeURIComponent(currentProviderId), { method: "DELETE" })
+      .then(function (data) {
+        if (data.error) { toast(data.error, "err"); return; }
+        toast("供应商已删除", "ok");
+        currentProviderId = "";
+        $("provider-form").classList.add("hidden");
+        $("provider-empty").classList.remove("hidden");
+        fetchModelChoices(function () {});
+        refreshModelSwitch();
+      });
+  }
+
+  function testConnection(extra) {
+    var payload = extra || {};
+    var form = collectForm();
+    if (currentProviderId && $("pf-api-key").value === "") {
+      // 未填写 Key 时按已保存配置测（服务端保留原 Key）
+      payload.provider_id = currentProviderId;
+      if (!payload.model_id) { payload.model_id = (form.models[0] || {}).id || ""; }
+    } else {
+      // 按当前表单临时配置测（未保存也能先验证连通性）
+      payload.base_url = form.base_url;
+      payload.api_key = form.api_key;
+      payload.protocol = form.protocol;
+      payload.custom_headers = {};
+      if (!payload.model_id) {
+        payload.model_id = (form.models[0] || {}).id || $("pf-model-input").value.trim();
+      }
+    }
+    if (!payload.model_id) { toast("请先添加或填写要测试的模型 ID", "err"); return; }
+    var btn = $("pf-test");
+    btn.disabled = true; btn.textContent = "测试中…";
+    api("/api/settings/providers/test", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (data) {
+      var box = $("pf-test-result");
+      box.classList.remove("hidden");
+      if (data.success) {
+        box.className = "test-result ok";
+        box.textContent = "✓ 连接成功 · 延时 " + fmt(data.latency_ms) + " ms";
+        toast("连接成功（" + fmt(data.latency_ms) + " ms）", "ok");
+      } else {
+        box.className = "test-result fail";
+        box.textContent = "✗ " + (data.error || "连接失败");
+        toast(data.error || "连接失败", "err");
+      }
+    }).catch(function (err) {
+      toast("测试请求失败：" + err, "err");
+    }).finally(function () {
+      btn.disabled = false; btn.textContent = "测试连通性";
+    });
+  }
+
+  function refreshModelSwitch() {
+    fillModelSwitch();
+  }
+
+  function openSettings() {
+    $("settings-modal").classList.remove("hidden");
+    fetchModelChoices(function () {});
+  }
+  function closeSettings() {
+    $("settings-modal").classList.add("hidden");
+    refreshModelSwitch();
+  }
+
+  function initSettingsUi() {
+    $("settings-btn").addEventListener("click", openSettings);
+    $("settings-close").addEventListener("click", closeSettings);
+    $("settings-modal").addEventListener("click", function (e) {
+      if (e.target === $("settings-modal")) { closeSettings(); }
+    });
+    $("provider-add").addEventListener("click", openNewProvider);
+    $("pf-model-add").addEventListener("click", function () {
+      var input = $("pf-model-input");
+      var id = input.value.trim();
+      if (!id) { toast("请输入模型 ID", "err"); return; }
+      var models = currentFormModels();
+      if (models.some(function (m) { return m.id === id; })) { toast("模型已存在", "err"); return; }
+      models.push({ id: id, name: id, capabilities: [], context_window: null });
+      input.value = "";
+      renderModelChips(models);
+    });
+    $("pf-model-input").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); $("pf-model-add").click(); }
+    });
+    $("pf-eye").addEventListener("click", function () {
+      var input = $("pf-api-key");
+      input.type = input.type === "password" ? "text" : "password";
+    });
+    $("pf-save").addEventListener("click", saveProvider);
+    $("pf-delete").addEventListener("click", deleteProvider);
+    $("pf-test").addEventListener("click", function () { testConnection(null); });
+    $("model-switch").addEventListener("change", function () {
+      setCurrentSelection($("model-switch").value);
+      var sel = selectedProviderModel();
+      if (sel.provider_id) {
+        toast("本次查询将使用：" + sel.provider_id + " / " + sel.model_id, "info");
+      }
+    });
+  }
+
   // ---------------------------------------------------------------- 主流程
   function render(data) {
     clearPipeline();
@@ -357,7 +667,12 @@
       renderDocuments(data.documents);
       return;
     }
-    if (data.error) { showError(data.error); return; }
+    if (data.error) {
+      showError(data.error);
+      // 供应商错误（鉴权失败 / 配额超限 / 超时等）额外 Toast 可理解提示（DoD 4）
+      if (/模型服务|鉴权|配额|供应商/.test(data.error)) { toast(data.error, "err"); }
+      return;
+    }
     hideError();
     renderInsight(data);
     $("dsl").textContent = JSON.stringify(data.dsl, null, 2);
@@ -375,11 +690,15 @@
     var btn = $("run");
     btn.disabled = true;
     btn.textContent = "查询中…";
-    // 客户端不再提交 principal：主体由服务端从身份映射（P0）
+    // 客户端不再提交 principal：主体由服务端从身份映射（P0）。
+    // 模型切换器取值随请求透传 provider_id / model_id（请求级模型切换）
+    var payload = { query: q };
+    var sel = selectedProviderModel();
+    if (sel.provider_id) { payload.provider_id = sel.provider_id; payload.model_id = sel.model_id; }
     api("/api/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: q })
+      body: JSON.stringify(payload)
     })
       .then(function (data) { render(data); })
       .catch(function (err) { showError("请求失败：" + err); })
@@ -394,7 +713,7 @@
   $("logout-btn").addEventListener("click", logout);
   $("run").addEventListener("click", run);
   $("query").addEventListener("keydown", function (e) { if (e.key === "Enter") run(); });
-
+  initSettingsUi();
   restoreSession();
   run();
 })();
