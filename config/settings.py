@@ -100,6 +100,14 @@ ROUTER_LLM_TIMEOUT: int = int(os.getenv("ROUTER_LLM_TIMEOUT", "15"))
 ROUTER_LLM_MODEL: str = os.getenv("ROUTER_LLM_MODEL", "")
 
 # --------------------------------------------------------------------------- #
+# Model Provider 网关层（多供应商接入）—— 见 providers/ 包
+# --------------------------------------------------------------------------- #
+# 供应商配置持久化文件（JSON；API Key 明文仅存于服务端文件，网络传输/展示脱敏）
+PROVIDERS_FILE: Path = PROJECT_ROOT / "config" / "providers.json"
+# 供应商连通性探测与对话请求的默认超时（秒）
+PROVIDER_TIMEOUT: int = int(os.getenv("PROVIDER_TIMEOUT", "60"))
+
+# --------------------------------------------------------------------------- #
 # 审计与结构化日志（P0）—— 见 audit/ 包
 # --------------------------------------------------------------------------- #
 # 是否开启审计写入（对象存储 JSONL + DuckDB 审计表）
