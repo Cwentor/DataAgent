@@ -3,6 +3,10 @@
 仅依赖 urllib 完成一次 Chat Completions 调用，支持任意 OpenAI 兼容端点
 （OpenAI / DeepSeek / Moonshot / vLLM 等）。未配置 API Key 时不会走到这里，
 Agent 会自动回退到确定性启发式实现。
+
+该模块同时承担 Model Provider 网关层的兼容底座：``resolve_default_client``
+从 ProviderFactory 解析默认适配器，供 pipeline / tool_agent / intent_router
+统一获取"当前启用的 LLM 客户端"（无可用配置返回 None）。
 """
 
 from __future__ import annotations
@@ -17,7 +21,11 @@ class LLMError(RuntimeError):
 
 
 class OpenAICompatClient:
-    """OpenAI 兼容 Chat Completions 客户端（零 SDK 依赖，纯标准库实现）。"""
+    """OpenAI 兼容 Chat Completions 客户端（零 SDK 依赖，纯标准库实现）。
+
+    保留本类作为向后兼容的轻量客户端：网关未启用 / 测试桩场景仍可使用；
+    生产链路已切换为由 ``providers.chat_text`` 统一抹平的适配器客户端。
+    """
 
     def __init__(
         self,
@@ -63,3 +71,17 @@ class OpenAICompatClient:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"LLM 响应缺少 choices[0].message.content: {exc}") from exc
+
+
+def resolve_default_client() -> Any | None:
+    """从 Model Provider 网关解析"当前启用的默认 LLM 客户端"。
+
+    优先级：首个已配置 API Key 的启用供应商 -> 环境变量（LLM_*）回退。
+    无任何可用配置返回 None（上层回退到确定性启发式实现）。
+    """
+    try:
+        from providers.factory import default_provider_factory
+
+        return default_provider_factory().resolve(None, None)
+    except Exception:
+        return None

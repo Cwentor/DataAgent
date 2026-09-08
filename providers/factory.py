@@ -50,13 +50,21 @@ class ProviderFactory:
     # 构造
     # ------------------------------------------------------------------ #
     def get_adapter(self, provider_id: str, model_id: str) -> BaseAdapter:
-        """按 (provider_id, model_id) 获取适配器（进程内缓存复用）。"""
+        """按 (provider_id, model_id) 获取适配器（进程内缓存复用）。
+
+        provider_id 为 ``env``（环境变量回退虚拟供应商）时，从运行时配置
+        构造——不要求落在持久化 store 中。
+        """
         key = (provider_id, model_id)
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
                 return cached
         provider = self._store.get_provider(provider_id)
+        if provider is None:
+            env = _env_provider_config()
+            if env is not None and provider_id == env.id:
+                provider = env
         if provider is None or not provider.enabled:
             raise ProviderNotConfiguredError(f"供应商不存在或未启用: {provider_id}")
         adapter = build_adapter(provider, model_id)
@@ -67,12 +75,15 @@ class ProviderFactory:
         return adapter
 
     def default_adapter(self) -> BaseAdapter | None:
-        """未指定供应商时的默认适配器：首个启用供应商 -> 环境变量回退 -> None。"""
+        """未指定供应商时的默认适配器。
+
+        优先级：首位「已配置 API Key 且启用」的供应商 -> 环境变量（LLM_*）
+        回退 -> None。无 Key 的预置供应商不参与默认分派（避免空 Key 误判为
+        LLM 模式），用户在前端配置 Key 后自动成为默认。
+        """
         for provider in self._store.list_providers():
-            if provider.enabled:
-                model_id = provider.models[0].id if provider.models else ""
-                if model_id:
-                    return self.get_adapter(provider.id, model_id)
+            if provider.enabled and provider.api_key and provider.models:
+                return self.get_adapter(provider.id, provider.models[0].id)
         env = _env_provider_config()
         if env is not None:
             return self.get_adapter(env.id, env.models[0].id)
@@ -85,6 +96,10 @@ class ProviderFactory:
             mid = model_id or ""
             provider = self._store.get_provider(pid)
             if provider is None:
+                env = _env_provider_config()
+                if env is not None and pid == env.id:
+                    provider = env
+            if provider is None:
                 raise ProviderNotConfiguredError(f"供应商不存在: {provider_id}")
             if not mid and provider.models:
                 mid = provider.models[0].id
@@ -95,9 +110,9 @@ class ProviderFactory:
         return adapter
 
     def has_provider(self) -> bool:
-        """是否存在可用供应商（启用且有模型），供上层决定 LLM/确定性模式。"""
+        """是否存在可用供应商（启用、有模型且有 Key），供上层决定 LLM/确定性模式。"""
         for provider in self._store.list_providers():
-            if provider.enabled and provider.models:
+            if provider.enabled and provider.api_key and provider.models:
                 return True
         return _env_provider_config() is not None
 

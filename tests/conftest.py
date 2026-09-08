@@ -33,3 +33,24 @@ def _clean_session_memory():
 
     default_session_store().clear_all()
     default_slot_store().clear_all()
+
+
+@pytest.fixture(autouse=True)
+def _offline_llm(monkeypatch, tmp_path):
+    """测试默认离线（确定性可复现铁律）：屏蔽本地 .env / providers.json 中的
+    真实 LLM Key，重置 Model Provider 网关单例，杜绝用例发起真实网络调用。
+
+    需要 LLM 行为的用例应显式注入 stub 客户端（如 _FakeLLM）或通过
+    ``reset_default_provider_store`` 指向临时配置文件，不依赖外部环境。
+    """
+    from config import settings
+    from providers.factory import reset_provider_factory
+    from providers.store import reset_default_provider_store
+
+    monkeypatch.setattr(settings, "LLM_API_KEY", "")
+    # 单例重置：避免复用进程早前从真实 providers.json 构造的工厂 / 存储
+    reset_provider_factory(None)
+    reset_default_provider_store(None)
+    yield
+    reset_provider_factory(None)
+    reset_default_provider_store(None)

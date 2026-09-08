@@ -39,9 +39,10 @@ from agent.agent import extract_json
 from agent.clarify import detect_clarifications
 from agent.glossary import METRIC_TERMS
 from agent.heuristic import REGIONS, DeterministicNL2DSL, dimension_members
-from agent.llm import LLMError, OpenAICompatClient
+from agent.llm import LLMError, resolve_default_client
 from audit.logging import get_logger
 from config import settings
+from providers import ProviderError, chat_text
 
 logger = get_logger("agent.router.intent")
 
@@ -364,23 +365,17 @@ class IntentRouter:
     def __init__(
         self,
         min_confidence: float | None = None,
-        llm: OpenAICompatClient | None = None,
+        llm: Any = None,
         enable_llm: bool = True,
     ) -> None:
-        """初始化置信度阈值与 LLM 客户端（未配置 API Key 则纯规则路由）。"""
+        """初始化置信度阈值与 LLM 客户端（未配置供应商时纯规则路由）。"""
         self.min_confidence = (
             min_confidence if min_confidence is not None else settings.ROUTER_MIN_CONFIDENCE
         )
-        # 未配置 API Key 时不构造 LLM 客户端（守卫前移：绝不发起无意义网络请求）
+        # 未配置 API Key / 无可用供应商时不构造 LLM 客户端（守卫前移：绝不发起无意义网络请求）
         self._llm = llm
         if self._llm is None and enable_llm and settings.LLM_API_KEY:
-            self._llm = OpenAICompatClient(
-                base_url=settings.LLM_BASE_URL,
-                api_key=settings.LLM_API_KEY,
-                model=settings.ROUTER_LLM_MODEL or settings.LLM_MODEL,
-                temperature=0.0,
-                timeout=settings.ROUTER_LLM_TIMEOUT,
-            )
+            self._llm = resolve_default_client()
 
     # ------------------------------------------------------------------ #
     # 主入口
@@ -470,9 +465,18 @@ class IntentRouter:
         user_content += f"用户输入：{query}"
         messages.append({"role": "user", "content": user_content})
         try:
-            raw = self._llm.chat(messages)
+            # 经 providers.chat_text 统一流转：适配器（UnifiedChatRequest）与
+            # 旧形态 client（chat(messages)->str）两种客户端透明兼容
+            raw = chat_text(self._llm, messages)
             data = extract_json(raw)
-        except (LLMError, ValueError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        except (
+            LLMError,
+            ProviderError,
+            ValueError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+        ) as exc:
             logger.warning(
                 "router_llm_fallback",
                 extra={

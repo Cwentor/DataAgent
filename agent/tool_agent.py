@@ -34,10 +34,11 @@ from agent.agent import extract_json
 from agent.clarify import Clarification, detect_clarifications
 from agent.errors import PipelineError
 from agent.heuristic import REGIONS, dimension_members
-from agent.llm import OpenAICompatClient
+from agent.llm import resolve_default_client
 from agent.router import IntentType
 from audit.logging import get_logger
 from config import settings
+from providers import chat_text
 from semantic.dsl_schema import QueryDSL
 from tools.base import ToolContext, ToolResult
 from tools.registry import ToolRegistry, default_registry
@@ -430,7 +431,7 @@ class LLMPlanner(Planner):
 
     def __init__(
         self,
-        client: OpenAICompatClient,
+        client: Any,
         registry: ToolRegistry | None = None,
         max_retries: int = 2,
     ):
@@ -521,7 +522,7 @@ class LLMPlanner(Planner):
         """共享决策核：调 LLM -> 解析校验 -> 非法输出反馈重试（plan/plan_next 共用）。"""
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "answer" in obj:
@@ -622,7 +623,7 @@ class LLMPlanner(Planner):
             },
         ]
         try:
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             obj = extract_json(raw)
             name = str(obj.get("tool", ""))
             args = obj.get("args") or {}
@@ -777,8 +778,8 @@ class DeterministicSynthesizer(Synthesizer):
 class LLMSynthesizer(Synthesizer):
     """LLM 总结：把工具输出喂回 LLM 合成最终洞察（含图表指令）。"""
 
-    def __init__(self, client: OpenAICompatClient):
-        """绑定 LLM 客户端（Bind the OpenAI-compatible client）。"""
+    def __init__(self, client: Any):
+        """绑定 LLM 客户端（适配器或 OpenAI 兼容客户端，经 providers.chat_text 流转）。"""
         self.client = client
 
     def synthesize(self, result: AgentResult, outputs: list[ToolResult], query: str) -> None:
@@ -813,7 +814,7 @@ class LLMSynthesizer(Synthesizer):
             },
         ]
         try:
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             obj = extract_json(raw)
             result.answer = str(obj.get("answer", ""))
             if obj.get("chart") and result.chart_spec is None:
@@ -909,7 +910,7 @@ class LLMReflector(Reflector):
 
     def __init__(
         self,
-        client: OpenAICompatClient,
+        client: Any,
         registry: ToolRegistry | None = None,
         max_retries: int = 1,
     ):
@@ -954,7 +955,7 @@ class LLMReflector(Reflector):
         ]
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 sufficient = bool(obj.get("sufficient"))
@@ -1389,11 +1390,13 @@ _agent_lock = threading.Lock()
 
 
 def default_tool_agent() -> ToolAgent:
-    """进程内复用的默认 ToolAgent（LLM 已配置 -> LLM 规划 + 总结；否则确定性）。
+    """进程内复用的默认 ToolAgent（LLM 可用 -> LLM 规划 + 总结；否则确定性）。
 
-    反思层（R3）：AGENT_REFLECTION_ENABLED 开启时装配——LLM 模式用 LLMReflector
-    （判不充分可追加一次受控查询），确定性模式用 DeterministicReflector（只判定
-    留痕）。双检锁保护并发首调（就绪度评审 P3 卫生项处置：原工厂无锁且 _agent_lock
+    LLM 客户端从 Model Provider 网关解析（`resolve_default_client`：首位已
+    配置 Key 的启用供应商 -> 环境变量回退）；反思层（R3）按
+    AGENT_REFLECTION_ENABLED 装配——LLM 模式用 LLMReflector（判不充分可追加
+    一次受控查询），确定性模式用 DeterministicReflector（只判定留痕）。
+    双检锁保护并发首调（就绪度评审 P3 卫生项处置：原工厂无锁且 _agent_lock
     为死变量，并发首调可能重复构造）。
     """
     global _default_agent
@@ -1401,15 +1404,9 @@ def default_tool_agent() -> ToolAgent:
         with _agent_lock:
             if _default_agent is None:
                 registry = default_registry()
+                client = resolve_default_client()
                 reflector: Reflector | None = None
-                if settings.LLM_API_KEY:
-                    client = OpenAICompatClient(
-                        base_url=settings.LLM_BASE_URL,
-                        api_key=settings.LLM_API_KEY,
-                        model=settings.LLM_MODEL,
-                        temperature=settings.LLM_TEMPERATURE,
-                        timeout=settings.LLM_TIMEOUT,
-                    )
+                if client is not None:
                     planner = LLMPlanner(
                         client, registry=registry, max_retries=settings.LLM_MAX_RETRIES
                     )

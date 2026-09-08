@@ -19,9 +19,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from agent.errors import PipelineError
-from agent.llm import OpenAICompatClient
 from agent.prompts import build_fix_messages, build_messages, build_rewrite_messages
 from agent.semantic_check import validate_semantics
+from providers import chat_text
 from semantic.dsl_schema import QueryDSL
 
 BT = chr(96)  # backtick
@@ -54,9 +54,13 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 class LLMNL2DSL:
-    """基于 LLM 的 NL -> DSL Agent。"""
+    """基于 LLM 的 NL -> DSL Agent。
 
-    def __init__(self, client: OpenAICompatClient, max_retries: int = 2) -> None:
+    client 兼容两种形态：Model Provider 适配器（``BaseAdapter``，走统一
+    chat_text / JSON Mode 抹平）或旧形态 OpenAI 兼容客户端（``chat(messages)``）。
+    """
+
+    def __init__(self, client: Any, max_retries: int = 2) -> None:
         """绑定 LLM 客户端与重试上限（Bind the client and retry budget）。"""
         self.client = client
         self.max_retries = max_retries
@@ -70,7 +74,7 @@ class LLMNL2DSL:
         last_error: Exception | None = None
         messages = build_messages(query, principal)
         for _ in range(self.max_retries + 1):
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "error" in obj and obj.get("error"):
@@ -104,7 +108,7 @@ class LLMNL2DSL:
         last_error: Exception | None = None
         messages = build_rewrite_messages(query, dsl.model_dump(mode="json"), error, principal)
         for _ in range(max(attempts, 1)):
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "error" in obj and obj.get("error"):
