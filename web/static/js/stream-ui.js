@@ -1,8 +1,9 @@
-/* 左栏执行流渲染（AgentChatStream）。
+/* 左栏执行流渲染（AgentChatStream，窗口化虚拟渲染）。
  *
- * 渲染 store.timelineEvents 全量重绘为轻量 DOM（事件量级：几十条/轮，
- * 超过 60 条后仅保留最近 60 条的 DOM 节点，避免长会话内存与布局抖动）。
- * 自动滚动：贴底时跟随；用户上滚后暂停跟随，重新贴底恢复（无回弹抖动）。
+ * 数据模型：store.timelineEvents 全量保留（不丢任何事件）；
+ * DOM 模型：超过 VIRTUALIZE_THRESHOLD 条后仅渲染可视窗口 ±BUFFER 的条目，
+ * 窗口外用上下 spacer 撑起滚动高度（高度 = 实测缓存 itemH[i] 或估算值），
+ * 滚动时 rAF 节流滑动窗口。≤阈值时保持简单追加渲染（零虚拟化开销）。
  */
 (function () {
   "use strict";
@@ -11,10 +12,17 @@
   var PLAN_STATUS_ICON = { pending: "○", running: "◌", done: "●", failed: "✕" };
   var PLAN_STATUS_TEXT = { pending: "等待", running: "执行中", done: "完成", failed: "失败" };
   var TOOL_LABELS = AgentProtocol.TOOL_LABELS;
-  var MAX_DOM_ITEMS = 60;
+  var VIRTUALIZE_THRESHOLD = 50; // 超过该事件数后启用窗口化（规格：>50 步虚拟化）
+  var BUFFER = 6;                // 视口上下各多渲染的条目数
+  var EST_H = { user: 44, plan: 130, tool: 46, reflection: 64, hitl: 150, done: 52, error: 44 };
 
   var scrollBox, listBox;
+  var spacerTop, spacerBottom;
   var stickBottom = true;
+  var itemH = [];        // index -> 实测高度（null = 未渲染，用估算）
+  var windowStart = 0;   // 当前窗口起点
+  var windowEnd = -1;    // 当前窗口终点（不含）
+  var rafPending = false;
 
   function $(id) { return document.getElementById(id); }
 
@@ -26,20 +34,49 @@
   function initScroll() {
     scrollBox = $("stream-scroll");
     listBox = $("stream");
+    // 虚拟化结构：上下 spacer + 窗口内容
+    spacerTop = document.createElement("div");
+    spacerTop.className = "virtual-spacer";
+    spacerBottom = document.createElement("div");
+    spacerBottom.className = "virtual-spacer";
+    listBox.insertBefore(spacerTop, listBox.firstChild);
+    listBox.appendChild(spacerBottom);
     scrollBox.addEventListener("scroll", function () {
       var near = scrollBox.scrollHeight - scrollBox.scrollTop - scrollBox.clientHeight;
       stickBottom = near < 40; // 距底 40px 内视为贴底
+      scheduleWindow();
     });
+    window.addEventListener("resize", scheduleWindow);
   }
 
   function autoScroll() {
     if (stickBottom) { scrollBox.scrollTop = scrollBox.scrollHeight; }
   }
 
-  function pruneDom() {
-    while (listBox.children.length > MAX_DOM_ITEMS) {
-      listBox.removeChild(listBox.firstChild);
-    }
+  /** rAF 节流的窗口滑动（scroll/resize 高频触发）。 */
+  function scheduleWindow() {
+    if (rafPending) { return; }
+    rafPending = true;
+    requestAnimationFrame(function () {
+      rafPending = false;
+      renderWindow();
+    });
+  }
+
+  // ------------------------------------------------------------ 高度模型
+  function estHeight(items, i) {
+    if (itemH[i]) { return itemH[i]; }
+    return EST_H[items[i].kind] || 56;
+  }
+
+  function offsets(items) {
+    var prefix = [0];
+    for (var i = 0; i < items.length; i++) { prefix.push(prefix[i] + estHeight(items, i)); }
+    return prefix;
+  }
+
+  function measureNode(node, idx) {
+    if (node && node.offsetHeight) { itemH[idx] = node.offsetHeight; }
   }
 
   // ------------------------------------------------------------ 各类型节点渲染
@@ -198,45 +235,107 @@
     return div;
   }
 
-  // ------------------------------------------------------------ 全量重绘入口
+  // ------------------------------------------------------------ 窗口化虚拟渲染
+  function elItemFor(item) {
+    if (item.kind === "user") { return elUserMessage(item); }
+    if (item.kind === "plan") { return elPlanCard(item); }
+    if (item.kind === "tool") { return elTool(item); }
+    if (item.kind === "reflection") { return elReflection(item); }
+    if (item.kind === "hitl") { return elHitl(item); }
+    if (item.kind === "done") { return elDone(item); }
+    if (item.kind === "error") { return elError(item); }
+    return null;
+  }
+
+  /** 计算可视窗口边界（前缀和二分 + BUFFER 外扩，钳制到 [0, n]）。 */
+  function windowBounds(items, prefix) {
+    var viewportH = scrollBox.clientHeight || 600;
+    var top = Math.max(scrollBox.scrollTop, 0);
+    var bottom = top + viewportH;
+    // 二分找第一个 offset > top 的条目
+    var lo = 0, hi = items.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (prefix[mid + 1] <= top) { lo = mid + 1; } else { hi = mid; }
+    }
+    var start = Math.max(lo - BUFFER, 0);
+    var end = start;
+    while (end < items.length && prefix[end] < bottom) { end++; }
+    return { start: start, end: Math.min(end + BUFFER, items.length) };
+  }
+
+  /** 渲染当前窗口：移除窗外 DOM、补齐窗内 DOM、更新 spacer。 */
+  function renderWindow() {
+    var items = AgentStore.get().timelineEvents;
+    if (items.length <= VIRTUALIZE_THRESHOLD) { return; } // 非虚拟化模式
+    var prefix = offsets(items);
+    var w = windowBounds(items, prefix);
+    windowStart = w.start;
+    windowEnd = w.end;
+
+    // 移除窗外节点
+    var rendered = listBox.querySelectorAll("[data-timeline-idx]");
+    for (var k = 0; k < rendered.length; k++) {
+      var idx = Number(rendered[k].dataset.timelineIdx);
+      if (idx < w.start || idx >= w.end) { rendered[k].remove(); }
+    }
+    // 补齐窗内节点（按序插入：SpacerTop 后、SpacerBottom 前）
+    for (var i = w.start; i < w.end; i++) {
+      if (listBox.querySelector('[data-timeline-idx="' + i + '"]')) { continue; }
+      var node = elItemFor(items[i]);
+      if (!node) { continue; }
+      node.dataset.timelineIdx = String(i);
+      listBox.insertBefore(node, spacerBottom);
+      measureNode(node, i);
+    }
+    spacerTop.style.height = prefix[w.start] + "px";
+    spacerBottom.style.height = (prefix[items.length] - prefix[w.end]) + "px";
+  }
+
+  /** 全量渲染入口：≤阈值走简单追加；>阈值走窗口化（数据永不丢弃）。 */
   function render(state) {
     // 计划卡状态就地刷新（避免整卡重排）
     if (state.activePlan.length) { updatePlanCard(state.activePlan); }
 
     var items = state.timelineEvents;
-    var rendered = listBox.querySelectorAll("[data-timeline-idx]");
-    var renderedCount = rendered.length;
-
-    if (items.length < renderedCount) {
-      // 会话重置：全量重建
+    if (items.length < itemH.length) {
+      // 会话重置：全量重建（含高度缓存与窗口状态）
       listBox.innerHTML = "";
-      renderedCount = 0;
+      listBox.appendChild(spacerTop);
+      listBox.appendChild(spacerBottom);
+      itemH = [];
+      windowStart = 0;
+      windowEnd = -1;
     }
 
     // 移除旧的 thinking 指示
     var oldThinking = listBox.querySelector("[data-thinking]");
     if (oldThinking) { oldThinking.remove(); }
 
-    for (var i = renderedCount; i < items.length; i++) {
-      var item = items[i];
-      var node = null;
-      if (item.kind === "user") { node = elUserMessage(item); }
-      else if (item.kind === "plan") { node = elPlanCard(item); }
-      else if (item.kind === "tool") { node = elTool(item); }
-      else if (item.kind === "reflection") { node = elReflection(item); }
-      else if (item.kind === "hitl") { node = elHitl(item); }
-      else if (item.kind === "done") { node = elDone(item); }
-      else if (item.kind === "error") { node = elError(item); }
+    if (items.length > VIRTUALIZE_THRESHOLD) {
+      // 虚拟化模式：贴底时先滚到末尾坐标，再渲染当前窗口
+      renderWindow();
+      if (state.running) { listBox.appendChild(elThinking()); }
+      autoScroll();
+      return;
+    }
+
+    // 简单模式：尾部增量追加（高度缓存同步维护，避免模式切换时错位）
+    for (var i = itemH.length; i < items.length; i++) {
+      var node = elItemFor(items[i]);
       if (node) {
         node.dataset.timelineIdx = String(i);
-        listBox.appendChild(node);
+        listBox.insertBefore(node, spacerBottom);
+        measureNode(node, i);
+      } else {
+        itemH[i] = EST_H.error; // 未知类型占位高度
       }
     }
+    if (itemH.length > items.length) { itemH.length = items.length; }
 
     // 运行中显示 thinking 尾巴
     if (state.running) { listBox.appendChild(elThinking()); }
 
-    pruneDom();
     autoScroll();
   }
 
