@@ -71,7 +71,7 @@
                   opts.onEvent({ event: "__stream_end__", payload: {}, turn_id: "", timestamp: 0 });
                   return;
                 }
-                buf += decoder.decode(chunk, { stream: true });
+                buf += decoder.decode(chunk.value, { stream: true });
                 var idx;
                 while ((idx = buf.indexOf("\n\n")) >= 0) {
                   var frame = buf.slice(0, idx);

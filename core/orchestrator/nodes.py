@@ -348,7 +348,9 @@ def dsl_query_node(state: AgentState) -> AgentState:
                     phase="done",
                     report=f"取数在 {MAX_RETRIES} 次自愈后仍失败，已终止。\n最后一次错误：{exc}",
                 )
-            events.emit_reflection(f"取数失败：{exc}", "retry", "错误已喂回规划节点重写 DSL 计划自愈")
+            events.emit_reflection(
+                f"取数失败：{exc}", "retry", "错误已喂回规划节点重写 DSL 计划自愈"
+            )
             return updated.apply(phase="plan")  # 自愈：回到规划节点重写计划
     return updated.apply(phase="analyze")
 
@@ -454,7 +456,13 @@ def code_exec_node(state: AgentState) -> AgentState:
                 )
                 events.emit_event(
                     events.EVENT_ARTIFACT_EMIT,
-                    {"artifact": {"type": "echarts", "title": f"{step.id}_chart", "content": result.echarts_spec}},
+                    {
+                        "artifact": {
+                            "type": "echarts",
+                            "title": f"{step.id}_chart",
+                            "content": result.echarts_spec,
+                        }
+                    },
                 )
             updated.plan_steps = [
                 s.model_copy(update={"status": "done"}) if s.id == step.id else s
@@ -471,7 +479,9 @@ def code_exec_node(state: AgentState) -> AgentState:
             ]
             if not keep:
                 return updated.apply(phase="critique")  # 让 Critic 决定如实放弃
-            events.emit_reflection(f"沙箱执行失败：{result.error}", "retry", "回到规划节点修正分析代码")
+            events.emit_reflection(
+                f"沙箱执行失败：{result.error}", "retry", "回到规划节点修正分析代码"
+            )
             return updated.apply(phase="plan")
     return updated.apply(phase="critique")
 
@@ -496,12 +506,16 @@ def critic_node(state: AgentState) -> AgentState:
 
     if not has_data:
         if exhausted:
-            events.emit_reflection("未获得任何数据集且重试额度耗尽", "proceed", "转入综合节点如实报告失败")
+            events.emit_reflection(
+                "未获得任何数据集且重试额度耗尽", "proceed", "转入综合节点如实报告失败"
+            )
             return state.apply(phase="synthesize")
         events.emit_reflection("未获得任何数据集", "replan", "取数失败，回到规划节点重写计划")
         return state.apply(phase="plan")
     if diagnostic and not has_summary and not exhausted:
-        events.emit_reflection("诊断类问题缺少归因 summary 产物", "replan", "补齐沙箱归因分析后再综合")
+        events.emit_reflection(
+            "诊断类问题缺少归因 summary 产物", "replan", "补齐沙箱归因分析后再综合"
+        )
         return state.apply(phase="plan")
     # LLM Reflector 增强（可选；失败不影响确定性判定）
     llm = _resolve_llm()

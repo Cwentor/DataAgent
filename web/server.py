@@ -31,11 +31,11 @@ X-Request-ID 请求头（或服务端生成）贯穿请求处理与审计链路�
 from __future__ import annotations
 
 import json
+import queue
 import sys
 import threading
 import time
 import uuid as uuid_mod
-import queue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -674,7 +674,6 @@ class Handler(BaseHTTPRequestHandler):
         worker = threading.Thread(target=_run_orchestration, daemon=True)
         worker.start()
 
-        sent_any = False
         try:
             while True:
                 try:
@@ -691,7 +690,6 @@ class Handler(BaseHTTPRequestHandler):
                 if event is None:
                     break
                 self._sse_write(event)
-                sent_any = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             return  # 客户端断开：编排线程继续跑完（结果弃置），响应流终止
         finally:
@@ -704,7 +702,7 @@ class Handler(BaseHTTPRequestHandler):
     def _sse_write(self, event: dict) -> None:
         """写一帧 SSE 事件（``data: <json>\\n\\n``）并立即 flush。"""
         frame = json.dumps(event, ensure_ascii=False)
-        self.wfile.write(f"data: {frame}\n\n".encode("utf-8"))
+        self.wfile.write(f"data: {frame}\n\n".encode())
         self.wfile.flush()
 
     # ------------------------------------------------------------------ #

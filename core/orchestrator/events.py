@@ -72,7 +72,9 @@ def emit_event(event: str, payload: dict[str, Any]) -> None:
     try:
         fn({"event": event, "timestamp": int(time.time() * 1000), "payload": payload})
     except Exception as exc:  # pragma: no cover - 观察者自身错误的防御性兜底
-        logger.warning("event_observer_error", extra={"event": "event_observer_error", "error": str(exc)})
+        logger.warning(
+            "event_observer_error", extra={"event": "event_observer_error", "error": str(exc)}
+        )
 
 
 def emit_step_start(node: str) -> None:

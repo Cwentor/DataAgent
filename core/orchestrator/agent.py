@@ -144,9 +144,7 @@ def run_agent(
                 events.emit_event(events.EVENT_DONE, {"report": final.report})
     except Exception as exc:
         if on_event is not None:
-            events.emit_event(
-                events.EVENT_ERROR, {"error": f"{type(exc).__name__}: {exc}"}
-            )
+            events.emit_event(events.EVENT_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
         raise
     finally:
         if token is not None:
