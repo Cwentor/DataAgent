@@ -44,6 +44,8 @@ from auth.ratelimit import LoginRateLimitError, default_login_limiter
 from auth.session import default_session_store
 from auth.tokens import create_token
 from config import settings
+from core.orchestrator.agent import run_agent
+from core.orchestrator.state import AgentState
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
 from web import providers_api
 from web.service import ensure_db, run_query
@@ -64,6 +66,9 @@ MIME = {
 
 _access_logger = get_logger("web.access")
 _auth_logger = get_logger("web.auth")
+
+# HITL 暂停态（进程内存；属主绑定）：resume_token -> {owner, state}
+_AGENT_PAUSED_STATES: dict[str, dict] = {}
 
 
 def _level_from_str(level: str) -> int:
@@ -170,6 +175,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_query()
         if parsed.path == "/api/query/async":
             return self._post_query_async()
+        if parsed.path == "/api/agent/run":
+            return self._post_agent_run()
         if parsed.path == "/api/settings/providers":
             return self._post_providers()
         if parsed.path == "/api/settings/providers/test":
@@ -463,6 +470,70 @@ class Handler(BaseHTTPRequestHandler):
         )
         result["auth"] = ctx.to_dict()
         return self._send_json(result)
+
+    # ------------------------------------------------------------------ #
+    # 受保护：/api/agent/run（Data Agent 编排：多步分析 + 沙箱 + 归因）
+    # ------------------------------------------------------------------ #
+    def _post_agent_run(self) -> None:
+        """POST /api/agent/run：编排器同步执行（多步分析可能较慢）。
+
+        请求体：{"query": "...", "human_reply": 可选（HITL 答复）,
+                 "resume_token": 可选（上一次 clarify 暂停态的恢复句柄）}
+        响应：
+        - phase=clarify（需要澄清）：{"phase": "clarify", "clarification": "...",
+          "resume_token": "..."} —— 用户答复后携 token+human_reply 重调；
+        - phase=done：AgentTrace（report/steps/artifacts/self_heal_count）。
+        暂停态仅驻留本进程内存（属主绑定），进程重启后 token 失效。
+        """
+        ctx = self._authenticate()
+        if ctx is None:
+            return self._send_json({"error": "unauthorized"}, 401)
+        body = self._read_body()
+        if body is None:
+            return self._send_json({"error": "invalid json"}, 400)
+        query = str(body.get("query", "")).strip()
+        if not query:
+            return self._send_json({"error": "query is required"}, 400)
+        human_reply = body.get("human_reply")
+        human_reply = str(human_reply).strip() if isinstance(human_reply, str) else None
+        resume_token = str(body.get("resume_token") or "").strip() or None
+
+        set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+
+        resume_state: AgentState | None = None
+        if resume_token:
+            paused = _AGENT_PAUSED_STATES.pop(resume_token, None)
+            if paused is None or paused.get("owner") != ctx.username:
+                return self._send_json({"error": "resume token 无效或已过期"}, 404)
+            resume_state = AgentState.model_validate(paused["state"])
+            resume_state = resume_state.model_copy(update={"human_reply": human_reply})
+
+        result = run_agent(
+            query,
+            session_id=ctx.session_id or ctx.username,
+            human_reply=None if resume_state else human_reply,
+            resume_state=resume_state,
+        )
+        if isinstance(result, AgentState):
+            # HITL 中断：登记属主化的暂停态，返回恢复句柄
+            import uuid
+
+            token = f"hitl-{uuid.uuid4().hex[:16]}"
+            _AGENT_PAUSED_STATES[token] = {
+                "owner": ctx.username,
+                "state": result.model_dump(mode="json"),
+            }
+            return self._send_json(
+                {
+                    "phase": "clarify",
+                    "clarification": result.clarification,
+                    "resume_token": token,
+                    "session_id": result.session_id,
+                }
+            )
+        result_dict = result.to_dict()
+        result_dict["auth"] = ctx.to_dict()
+        return self._send_json(result_dict)
 
     # ------------------------------------------------------------------ #
     # 受保护：/api/export/<id>（导出文件下载，P0-4 表格导出链路）

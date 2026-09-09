@@ -92,7 +92,7 @@ def test_error_context_retry_cap():
 
 def test_tool_history_pruning():
     state = AgentState(user_query="x")
-    for i in range(50):
+    for _ in range(50):
         state.tool_calls.append(ToolRecord(tool="t", summary="s" * 5000))
     state.prune_tool_history(budget_chars=30_000)
     total = sum(len(r.summary) for r in state.tool_calls)
