@@ -32,6 +32,10 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
+import uuid as uuid_mod
+import queue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -46,6 +50,7 @@ from auth.tokens import create_token
 from config import settings
 from core.orchestrator.agent import run_agent
 from core.orchestrator.state import AgentState
+from providers.context import pop_request_model, set_request_model
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
 from web import providers_api
 from web.service import ensure_db, run_query
@@ -141,7 +146,7 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ #
     def do_GET(self) -> None:
         # 每个请求入口注入结构化日志上下文（request_id 贯穿）
-        """GET 路由：健康检查 / 指标 / 审计 / 导出下载 / 静态前端文件。"""
+        """GET 路由：健康检查 / 指标 / 审计 / 导出下载 / SSE 流 / 静态前端文件。"""
         set_request_context(request_id=self.headers.get("X-Request-ID"))
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
@@ -154,6 +159,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_me()
         if parsed.path.startswith("/api/tasks/"):
             return self._get_task(parsed.path[len("/api/tasks/") :])
+        if parsed.path == "/api/v1/agent/chat/stream":
+            return self._get_agent_chat_stream()
         if parsed.path == "/api/settings/providers":
             return self._protected(providers_api.list_providers)
         if parsed.path in ("/", "/index.html"):
@@ -534,6 +541,171 @@ class Handler(BaseHTTPRequestHandler):
         result_dict = result.to_dict()
         result_dict["auth"] = ctx.to_dict()
         return self._send_json(result_dict)
+
+    # ------------------------------------------------------------------ #
+    # 受保护：/api/v1/agent/chat/stream（SSE 流式 Data Agent 会话）
+    # ------------------------------------------------------------------ #
+    def _get_agent_chat_stream(self) -> None:
+        """SSE 流式编排端点（EventSource 语义走 GET，鉴权用 Bearer/会话头）。
+
+        协议：``text/event-stream``，每帧 ``data: <AgentStreamEvent JSON>\\n\\n``；
+        事件类型与前端 ``AgentEventType`` 契约一一对应（plan_created / step_start /
+        tool_start / tool_end / reflection / hitl_request / artifact_emit / done /
+        error）。编排器在后台线程同步执行，事件经有界队列转发到响应流——
+        编排异常 / 客户端断开都不会崩流，异常统一收敛为 error 事件后正常收尾。
+
+        查询参数：query（必填）、human_reply / resume_token（HITL 恢复）、
+        provider_id / model_id（请求级模型切换）。
+        """
+        ctx = self._authenticate()
+        if ctx is None:
+            # 未认证：以普通 401 JSON 响应（EventSource onerror 可感知）
+            return self._send_json({"error": "unauthorized"}, 401)
+
+        parsed = urlparse(self.path)
+        params: dict[str, str] = {}
+        if parsed.query:
+            from urllib.parse import parse_qs
+
+            for key, values in parse_qs(parsed.query).items():
+                if values:
+                    params[key] = values[0]
+        query = params.get("query", "").strip()
+        if not query:
+            return self._send_json({"error": "query is required"}, 400)
+        human_reply = params.get("human_reply", "").strip() or None
+        resume_token = params.get("resume_token", "").strip() or None
+        provider_id = params.get("provider_id", "").strip() or None
+        model_id = params.get("model_id", "").strip() or None
+
+        set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+
+        # SSE 响应头：close-delimited 流（无 Content-Length，写完关闭连接）
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        events_q: queue.Queue[dict | None] = queue.Queue(maxsize=256)
+
+        def _observer(event: dict) -> None:
+            """编排事件 -> 队列（有界：队列满时丢弃最旧事件，防止编排线程阻塞）。
+
+            run_agent 内置的 hitl_request（不含 resume_token）在此丢弃——
+            SSE 端点在编排返回后用带 resume_token 的版本统一下发。
+            """
+            if event.get("event") == "hitl_request":
+                return
+            try:
+                events_q.put_nowait(event)
+            except queue.Full:
+                try:
+                    events_q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    events_q.put_nowait(event)
+                except queue.Full:
+                    pass
+
+        def _run_orchestration() -> None:
+            """后台执行编排（同线程 contextvar 对观察者可见）。"""
+            pop_request_model()
+            if provider_id or model_id:
+                set_request_model(provider_id or "", model_id or "")
+            try:
+                resume_state: AgentState | None = None
+                if resume_token:
+                    paused = _AGENT_PAUSED_STATES.pop(resume_token, None)
+                    if paused is None or paused.get("owner") != ctx.username:
+                        events_q.put(
+                            {
+                                "turn_id": "",
+                                "event": "error",
+                                "timestamp": int(time.time() * 1000),
+                                "payload": {"error": "resume token 无效或已过期"},
+                            }
+                        )
+                        return
+                    resume_state = AgentState.model_validate(paused["state"])
+                    resume_state = resume_state.model_copy(update={"human_reply": human_reply})
+                result = run_agent(
+                    query,
+                    session_id=ctx.session_id or ctx.username,
+                    human_reply=None if resume_state else human_reply,
+                    resume_state=resume_state,
+                    on_event=_observer,
+                )
+                if isinstance(result, AgentState):
+                    # HITL 中断：登记属主化暂停态，经事件流下发恢复句柄
+                    token = f"hitl-{uuid_mod.uuid4().hex[:16]}"
+                    _AGENT_PAUSED_STATES[token] = {
+                        "owner": ctx.username,
+                        "state": result.model_dump(mode="json"),
+                    }
+                    events_q.put(
+                        {
+                            "turn_id": result.turn_id,
+                            "event": "hitl_request",
+                            "timestamp": int(time.time() * 1000),
+                            "payload": {
+                                "hitl": {
+                                    "question": result.clarification or "请补充分析需求",
+                                    "resume_token": token,
+                                }
+                            },
+                        }
+                    )
+            except Exception as exc:  # 编排异常收敛为 error 事件（不崩流）
+                events_q.put(
+                    {
+                        "turn_id": "",
+                        "event": "error",
+                        "timestamp": int(time.time() * 1000),
+                        "payload": {"error": f"{type(exc).__name__}: {exc}"},
+                    }
+                )
+            finally:
+                pop_request_model()
+                events_q.put(None)  # 哨兵：流结束
+
+        worker = threading.Thread(target=_run_orchestration, daemon=True)
+        worker.start()
+
+        sent_any = False
+        try:
+            while True:
+                try:
+                    event = events_q.get(timeout=300)
+                except queue.Empty:
+                    event = {
+                        "turn_id": "",
+                        "event": "error",
+                        "timestamp": int(time.time() * 1000),
+                        "payload": {"error": "编排超时（300s 无事件），连接已终止"},
+                    }
+                    self._sse_write(event)
+                    break
+                if event is None:
+                    break
+                self._sse_write(event)
+                sent_any = True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return  # 客户端断开：编排线程继续跑完（结果弃置），响应流终止
+        finally:
+            try:
+                self.wfile.flush()
+                self.close_connection = True
+            except OSError:
+                pass
+
+    def _sse_write(self, event: dict) -> None:
+        """写一帧 SSE 事件（``data: <json>\\n\\n``）并立即 flush。"""
+        frame = json.dumps(event, ensure_ascii=False)
+        self.wfile.write(f"data: {frame}\n\n".encode("utf-8"))
+        self.wfile.flush()
 
     # ------------------------------------------------------------------ #
     # 受保护：/api/export/<id>（导出文件下载，P0-4 表格导出链路）
