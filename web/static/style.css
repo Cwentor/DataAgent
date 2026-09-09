@@ -348,6 +348,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .switch input:checked + .slider::before { transform: translateX(18px); }
 
 .key-row { display: flex; gap: 8px; }
+.key-badge {
+  margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600;
+  background: #e6f7ee; color: #0b8a4a; border: 1px solid #b8e8cf;
+}
 .eye-btn {
   padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff;
   cursor: pointer; font-size: 14px;

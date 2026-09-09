@@ -544,6 +544,14 @@
       ? "已配置密钥（留空 = 不修改；输入新值 = 替换）"
       : "粘贴 API Key";
     $("pf-api-key").type = "password";
+    // 可见指示：密钥已持久化在服务端（落盘加密），刷新/重开不丢失
+    var badge = $("pf-key-badge");
+    if (p && p.has_api_key) {
+      badge.textContent = "✓ 已保存";
+      badge.classList.remove("hidden");
+    } else {
+      badge.classList.add("hidden");
+    }
     renderModelChips(p ? p.models : []);
   }
 
@@ -561,6 +569,7 @@
     $("pf-api-key").value = "";
     $("pf-api-key").placeholder = "粘贴 API Key";
     $("pf-api-key").type = "password";
+    $("pf-key-badge").classList.add("hidden");
     renderModelChips([]);
     $("pf-name").focus();
   }
@@ -576,7 +585,7 @@
     setCurrentFormModels(models);
     var box = $("pf-models");
     if (!models || !models.length) {
-      box.innerHTML = "<div class='provider-empty' style='padding:8px 0'>尚未配置模型</div>";
+      box.innerHTML = "<div class='provider-empty' style='padding:8px 0'>尚未配置模型——输入模型 ID 后点「＋添加模型」（保存时输入框内容会自动收编）</div>";
       return;
     }
     var html = "";
@@ -610,14 +619,31 @@
     });
   }
 
+  // 把「模型列表」输入框里未点「＋添加模型」确认的内容收进当前模型列表。
+  // 修复：用户输入模型 ID 后直接点保存，输入被静默丢弃 -> 供应商没有模型
+  // -> 模型切换器不收录该供应商（看起来像"配置没保存"）。
+  function absorbPendingModelInput() {
+    var input = $("pf-model-input");
+    var id = input.value.trim();
+    if (!id) { return currentFormModels(); }
+    var models = currentFormModels();
+    if (!models.some(function (m) { return m.id === id; })) {
+      models.push({ id: id, name: id, capabilities: [], context_window: null });
+    }
+    input.value = "";
+    renderModelChips(models);
+    return models;
+  }
+
   function collectForm() {
+    var models = absorbPendingModelInput(); // 保存/测试前先收纳未确认的模型输入
     return {
       name: $("pf-name").value.trim(),
       enabled: $("pf-enabled").checked,
       protocol: $("pf-protocol").value,
       base_url: $("pf-base-url").value.trim(),
       api_key: $("pf-api-key").value,          // 空串 = 保留服务端原 Key；新值 = 替换
-      models: currentFormModels()
+      models: models
     };
   }
 
@@ -625,6 +651,11 @@
     var form = collectForm();
     if (!form.name) { toast("请填写供应商名称", "err"); return; }
     if (!form.base_url) { toast("请填写 Base URL", "err"); return; }
+    if (!form.models || !form.models.length) {
+      // 空模型供应商无法出现在模型切换器中，直接拦截避免"配了却选不到"
+      toast("请至少添加一个模型（输入模型 ID 后点「＋添加模型」）", "err");
+      return;
+    }
     var body = JSON.stringify(form);
     if (currentProviderId) {
       api("/api/settings/providers/" + encodeURIComponent(currentProviderId), {
