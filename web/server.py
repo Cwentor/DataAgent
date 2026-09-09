@@ -161,6 +161,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_task(parsed.path[len("/api/tasks/") :])
         if parsed.path == "/api/v1/agent/chat/stream":
             return self._get_agent_chat_stream()
+        if parsed.path == "/api/schema/summary":
+            return self._protected(self._schema_summary)
         if parsed.path == "/api/settings/providers":
             return self._protected(providers_api.list_providers)
         if parsed.path in ("/", "/index.html"):
@@ -702,8 +704,33 @@ class Handler(BaseHTTPRequestHandler):
     def _sse_write(self, event: dict) -> None:
         """写一帧 SSE 事件（``data: <json>\\n\\n``）并立即 flush。"""
         frame = json.dumps(event, ensure_ascii=False)
-        self.wfile.write(f"data: {frame}\n\n".encode())
+        self.wfile.write(f"data: {frame}\n\n".encode("utf-8"))
         self.wfile.flush()
+
+    # ------------------------------------------------------------------ #
+    # 受保护：/api/schema/summary（知识上下文：语义目录字段清单）
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _schema_summary(ctx: AuthContext) -> tuple[int, dict]:
+        """语义目录摘要（Header「Schema 选择器」数据源）。
+
+        输出按物理表分组的字段清单（逻辑字段名 / 物理列 / 类型），
+        供前端展示"知识上下文 & DuckDB Schema"；只读目录，不触库。
+        """
+        from semantic.catalog import COLUMNS
+
+        tables: dict[str, list[dict]] = {}
+        for logical, meta in sorted(COLUMNS.items()):
+            tables.setdefault(meta.table, []).append(
+                {"field": logical, "column": meta.column, "dtype": meta.dtype}
+            )
+        return 200, {
+            "principal": ctx.principal,
+            "tables": [
+                {"table": name, "fields": fields} for name, fields in sorted(tables.items())
+            ],
+        }
+
 
     # ------------------------------------------------------------------ #
     # 受保护：/api/export/<id>（导出文件下载，P0-4 表格导出链路）

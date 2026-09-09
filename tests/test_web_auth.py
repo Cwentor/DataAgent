@@ -553,3 +553,43 @@ def test_query_shares_tool_layer_connection_pool(warehouse, monkeypatch):
     assert "error" not in result, result.get("error_detail")
     assert result["columns"] == ["gmv"]
     assert acquired["n"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 知识上下文：语义目录 Schema 摘要（/api/schema/summary）
+# --------------------------------------------------------------------------- #
+def test_schema_summary_requires_auth():
+    """未认证 -> 401。"""
+    server, port = _start_server()
+    try:
+        status, body, _ = _request(port, "GET", "/api/schema/summary")
+        assert status == 401 and body["error"] == "unauthorized"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_schema_summary_groups_by_table():
+    """认证后返回按物理表分组的字段清单（逻辑字段/物理列/类型）。"""
+    server, port = _start_server()
+    try:
+        _, login, _ = _login(port, "admin", "admin123")
+        status, body, _ = _request(
+            port,
+            "GET",
+            "/api/schema/summary",
+            headers={"Authorization": f"Bearer {login['token']}"},
+        )
+        assert status == 200
+        tables = body["tables"]
+        assert isinstance(tables, list) and tables
+        names = [t["table"] for t in tables]
+        assert "fact_orders" in names
+        orders = next(t for t in tables if t["table"] == "fact_orders")
+        fields = {f["field"] for f in orders["fields"]}
+        assert "order_amount" in fields
+        gmv_meta = next(f for f in orders["fields"] if f["field"] == "order_amount")
+        assert gmv_meta == {"field": "order_amount", "column": "order_amount", "dtype": "float"}
+    finally:
+        server.shutdown()
+        server.server_close()
