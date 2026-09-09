@@ -58,8 +58,13 @@
   - **归因技能包**：维度熵/信息增益下钻、乘法对数链式指标分解树（GMV=UV×CR×AOV）、加法差额分解、DTW 相似性、Holt-Winters 异常检测、Shapley 值公平归因——全部与已知解析解对拍
   - **数据交换协议**：DSL 查询结果 PII 脱敏（列名启发式 + 值形态正则，确定性哈希掩码）后物化为 ParquetRef（sha256 可审计），沙箱零网络零 DB socket
   - **裸 SQL 网关**：字符串载荷 / SQL 键 / 自由文本 SQL 形态在网关层直接拒绝（`GuardrailViolation`），"LLM 永不产出裸 SQL"三重防线
-  - **HTTP 入口**：`POST /api/agent/run`（鉴权 + HITL 澄清中断/恢复，resume_token 属主绑定）
-- **可解释交付**：DSL → 中文话术 + 图表自适应推荐 + Web UI，零前端框架
+  - **HTTP 入口**：`POST /api/agent/run`（同步编排，鉴权 + HITL 澄清中断/恢复，resume_token 属主绑定）与
+    `GET /api/v1/agent/chat/stream`（SSE 流式：plan_created / step_start / tool_start / tool_end /
+    reflection / hitl_request / artifact_emit / done / error 九类事件实时推送，异常收敛为 error 事件不崩流）
+  - **双栏交互式工作台**：左栏执行与对话流（任务 DAG 时间线、DSL/沙箱工具手风琴、反思自愈节点、
+    HITL 澄清交互卡），右栏产物画布（执行报告 / ECharts 交互图表 / 沙箱代码与输出 / 数据审计表 +
+    Markdown/HTML 导出），零前端框架（原生 JS + vendored ECharts/PrismJS）
+- **可解释交付**：DSL → 中文话术 + 图表自适应推荐，零前端框架
 - **可观测**：全链路审计快照、结构化日志、QPS/分位数指标
 
 ## 🚀 快速开始
@@ -200,6 +205,17 @@ ruff check --fix .
 curl -X POST http://127.0.0.1:8000/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"analyst","password":"analyst123"}'
+```
+
+**SSE 流式 Data Agent 会话**（每帧 `data: <AgentStreamEvent JSON>`）：
+
+```bash
+curl -N "http://127.0.0.1:8000/api/v1/agent/chat/stream?query=2024%E5%B9%B45%E6%9C%88%E6%88%90%E5%8A%9F%E8%AE%A2%E5%8D%95%E7%9A%84GMV" \
+  -H "Authorization: Bearer <token>"
+# data: {"turn_id":"t-ab12cd34","timestamp":1725868800000,"event":"plan_created",
+#        "payload":{"plan":[{"id":"s1","title":"...","kind":"query","status":"pending"}]}}
+# data: {..., "event":"tool_start", "payload":{"tool":{"name":"futurebi_dsl_query","input":{...}}}}
+# data: {..., "event":"done", "payload":{"report":"## 分析报告..."}}
 ```
 
 **执行查询**：
