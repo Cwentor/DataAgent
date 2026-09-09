@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DataAgent · Spec-Driven Data Agent</title>
+  <title>DataAgent · 企业级 Data Agent 工作台</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/workspace.css">
 </head>
 <body>
   <header class="topbar">
@@ -13,11 +14,17 @@
       <span class="logo">D</span>
       <div>
         <h1>DataAgent</h1>
-        <p class="tag">Spec-Driven Data Agent · 自然语言 → DSL → 确定性 SQL → 结果 → 解释 + 图表</p>
+        <p class="tag">Spec-Driven Data Agent · 自然语言 → DSL → 确定性 SQL → 多步分析 → 报告</p>
       </div>
     </div>
 
     <div class="header-right">
+      <!-- Agent 状态指示灯：Idle / Planning / Executing / Awaiting User -->
+      <div id="agent-status" class="agent-status idle" title="Agent 当前状态">
+        <span id="agent-status-dot" class="agent-status-dot" aria-hidden="true"></span>
+        <span id="agent-status-text">空闲</span>
+      </div>
+
       <!-- 轻量级模型状态指示（纯信息展示；供应商配置统一入口在「设置」） -->
       <div id="model-indicator" class="model-indicator"
            title="当前生效模型（可在查询栏切换；供应商在「设置」中配置）">
@@ -27,7 +34,7 @@
         </span>
       </div>
 
-      <!-- 常驻设置入口：模型供应商等系统配置统一收纳于此，用户可随时开关 -->
+      <!-- 常驻设置入口：模型供应商等系统配置统一收纳于此 -->
       <button type="button" id="settings-btn" class="settings-btn"
               title="模型供应商设置" aria-haspopup="dialog">⚙ 设置</button>
 
@@ -63,8 +70,8 @@
     </div>
   </header>
 
-  <main class="container">
-    <!-- 一体化 Command Bar：模型切换器 + 自然语言查询 + 提交 -->
+  <main class="workspace-root">
+    <!-- 顶部 Command Bar：模型切换 + 自然语言提问 + 提交 -->
     <section class="command-bar">
       <div class="command-inner">
         <select id="model-switch" class="model-switch"
@@ -73,13 +80,13 @@
         </select>
         <span class="command-divider" aria-hidden="true"></span>
         <input id="query" type="text" class="command-input"
-               placeholder="用自然语言提问，例如：各品类成功订单的GMV分布？"
-               value="2024年6月成功订单的GMV是多少？" autocomplete="off">
-        <button id="run" type="button" class="command-run">查询</button>
+               placeholder="用自然语言提问，Agent 将自动规划取数、沙箱分析并生成报告"
+               value="分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位" autocomplete="off">
+        <button id="run" type="button" class="command-run">开始分析</button>
       </div>
     </section>
 
-    <!-- 未配置可用模型时的轻量引导横幅（不弹窗打断） -->
+    <!-- 未配置可用模型时的轻量引导横幅 -->
     <section id="model-banner" class="model-banner hidden">
       <span class="mb-text">尚未配置可用模型，</span>
       <button type="button" id="goto-model-settings" class="mb-link">前往配置模型 →</button>
@@ -87,45 +94,47 @@
 
     <section id="error" class="error hidden"></section>
 
-    <section id="answer" class="answer hidden">
-      <div id="answer-title" class="answer-title"></div>
-      <div id="answer-body" class="answer-body"></div>
-    </section>
-
-    <!-- 两栏工作区：左 = Agent 执行流程；右 = 数据结果 / SQL -->
-    <section class="workspace">
-      <div class="flow-col">
-        <div class="card">
-          <h2>① Agent 调度轨迹</h2>
-          <div id="steps" class="steps"></div>
-        </div>
-        <div class="card">
-          <h2>② 自然语言解释</h2>
-          <div id="explain" class="explain"></div>
-        </div>
-        <div class="card">
-          <h2>③ 可视化</h2>
-          <div id="chart" class="chart"></div>
+    <!-- 双栏工作区：左 = 执行与对话流（40%）；右 = 产物画布（60%） -->
+    <section class="split-workspace">
+      <!-- 左栏：AgentChatStream -->
+      <div id="stream-pane" class="stream-pane">
+        <div id="stream-scroll" class="stream-scroll">
+          <div id="stream" class="stream"></div>
         </div>
       </div>
-      <div class="data-col">
-        <div class="card">
-          <h2>④ 结构化 DSL</h2>
-          <pre id="dsl" class="code"></pre>
+
+      <!-- 右栏：ArtifactCanvas（多标签页） -->
+      <div class="canvas-pane">
+        <div class="canvas-tabs" role="tablist">
+          <button type="button" class="canvas-tab active" data-tab="report" role="tab">执行报告</button>
+          <button type="button" class="canvas-tab" data-tab="charts" role="tab">图表</button>
+          <button type="button" class="canvas-tab" data-tab="code" role="tab">代码沙箱</button>
+          <button type="button" class="canvas-tab" data-tab="data" role="tab">数据审计</button>
+          <span class="spacer"></span>
+          <button type="button" id="export-md" class="mini-btn" title="导出 Markdown 报告">⬇ Markdown</button>
+          <button type="button" id="export-html" class="mini-btn" title="导出 HTML 报告">⬇ HTML</button>
         </div>
-        <div class="card">
-          <h2>⑤ 确定性 SQL</h2>
-          <pre id="sql" class="code"></pre>
-        </div>
-        <div class="card">
-          <h2>⑥ 数据结果</h2>
-          <div id="table" class="table-wrap"></div>
+        <div class="canvas-body">
+          <div id="tab-report" class="canvas-view active" role="tabpanel">
+            <div id="report-empty" class="canvas-empty">Agent 运行后，这里展示执行摘要与归因报告。</div>
+            <div id="report-content" class="report-content hidden"></div>
+          </div>
+          <div id="tab-charts" class="canvas-view" role="tabpanel">
+            <div id="charts-empty" class="canvas-empty">Agent 生成的交互式图表将展示在这里。</div>
+            <div id="charts-content" class="charts-content hidden"></div>
+          </div>
+          <div id="tab-code" class="canvas-view" role="tabpanel">
+            <div id="code-empty" class="canvas-empty">Agent 编写的沙箱分析代码与运行输出将展示在这里。</div>
+            <div id="code-content" class="code-content hidden"></div>
+          </div>
+          <div id="tab-data" class="canvas-view" role="tabpanel">
+            <div id="data-empty" class="canvas-empty">各取数步骤返回的数据切片将展示在这里。</div>
+            <div id="data-content" class="data-content hidden"></div>
+          </div>
         </div>
       </div>
     </section>
   </main>
-
-  <footer class="footer">DataAgent · MIT · 本地 DuckDB 沙箱 · 统一身份认证 + 服务端强制 principal</footer>
 
   <!-- 模型供应商设置弹窗（左右两栏：列表 + 详情表单；仅从用户菜单触发） -->
   <div id="settings-modal" class="modal-backdrop hidden">
@@ -195,6 +204,16 @@
 
   <div id="toast-box" class="toast-box"></div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/vendor/echarts.min.js"></script>
+  <script src="/static/vendor/prism-core.min.js"></script>
+  <script src="/static/vendor/prism-python.min.js"></script>
+  <script src="/static/vendor/prism-sql.min.js"></script>
+  <script src="/static/vendor/prism-markdown.min.js"></script>
+  <script src="/static/js/protocol.js"></script>
+  <script src="/static/js/store.js"></script>
+  <script src="/static/js/markdown.js"></script>
+  <script src="/static/js/stream.js"></script>
+  <script src="/static/js/canvas.js"></script>
+  <script src="/static/js/app.js"></script>
 </body>
 </html>
