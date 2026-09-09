@@ -151,3 +151,66 @@ def test_run_agent_simple_query_path(tmp_path, monkeypatch):
     trace = run_agent("2024 年 5 月成功支付订单的 GMV 总额是多少？", session_id="simple")
     assert trace.phase == "done"
     assert any(s["tool"] == "execute_dsl_query" and s["ok"] for s in trace.steps)
+
+
+# --------------------------------------------------------------------------- #
+# LLM DSL 草稿规范化（宽容接受，严格校验）
+# --------------------------------------------------------------------------- #
+def test_normalize_dsl_draft_repairs_common_llm_typos():
+    """裸字符串维度 / time_range 笔误 / ge-le 操作符自动纠正为契约形态。"""
+    from core.orchestrator.nodes import _normalize_dsl_draft
+
+    d = _normalize_dsl_draft(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": ["province", {"field": "category"}],
+            "time_range": {
+                "range_type": "absolute",
+                "absolute": {"start": "2024-05-01", "end": "2024-05-08"},
+            },
+            "filters": [
+                {"field": "pay_status", "operator": "eq", "value": "SUCCESS"},
+                {"field": "order_amount", "operator": "ge", "value": 10},
+            ],
+        }
+    )
+    assert d["dimensions"] == [{"field": "province"}, {"field": "category"}]
+    assert "time_range" not in d and "time_filter" in d
+    assert [f["operator"] for f in d["filters"]] == ["eq", "gte"]
+
+
+def test_normalize_dsl_draft_passes_valid_payload_unchanged():
+    """合法载荷规范化后语义不变（可继续通过网关契约校验）。"""
+    from core.orchestrator.nodes import _normalize_dsl_draft
+    from core.retrieval.guardrails import validate_dsl_payload
+
+    d = _normalize_dsl_draft(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": [{"field": "province"}],
+            "time_filter": {
+                "range_type": "absolute",
+                "absolute": {"start": "2024-05-01", "end": "2024-05-08"},
+            },
+        }
+    )
+    validate_dsl_payload(d, where="test")  # 不抛即通过契约
+
+
+def test_planner_prompt_contract_examples_align_with_schema():
+    """提示词中的 DSL 示例必须与真实契约对齐（防再次系统性带偏 LLM）。
+
+    回归锚点：dimensions 示例是对象数组、时间字段名是 time_filter、
+    操作符白名单不含 like/ge/le。
+    """
+    from core.orchestrator.prompts import PLANNER_SYSTEM
+
+    assert 'dimensions: [{"field"' in PLANNER_SYSTEM
+    assert "严禁写成裸字符串" in PLANNER_SYSTEM
+    assert "time_filter" in PLANNER_SYSTEM
+    assert '"time_range"' not in PLANNER_SYSTEM
+    assert 'operator": "eq|ne|in|gt|gte|lt|lte|between"' in PLANNER_SYSTEM

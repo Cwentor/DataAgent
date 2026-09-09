@@ -260,6 +260,36 @@ def _preview_rows(path: str, limit: int = 30) -> list[list[Any]]:
         return []
 
 
+def _normalize_dsl_draft(dsl: dict[str, Any]) -> dict[str, Any]:
+    """LLM DSL 草稿的确定性规范化（宽容接受，严格校验）。
+
+    只做无歧义的常见笔误纠正，修不动的原样透传——契约层（网关 validate）
+    仍是唯一裁决者，错误信息继续喂回规划节点自愈：
+    - dimensions: ["province"]（裸字符串）-> [{"field": "province"}]；
+    - time_range -> time_filter（字段名笔误，契约 extra="forbid" 必拒）；
+    - 过滤操作符 ge/le -> gte/lte（白名单写法）。
+    """
+    d = dict(dsl)
+    dims = d.get("dimensions")
+    if isinstance(dims, list):
+        d["dimensions"] = [
+            {"field": item} if isinstance(item, str) else item
+            for item in dims
+            if isinstance(item, (str, dict))
+        ]
+    if "time_range" in d and "time_filter" not in d:
+        d["time_filter"] = d.pop("time_range")
+    filters = d.get("filters")
+    if isinstance(filters, list):
+        fixed: list[Any] = []
+        for f in filters:
+            if isinstance(f, dict) and f.get("operator") in ("ge", "le"):
+                f = {**f, "operator": "gte" if f["operator"] == "ge" else "lte"}
+            fixed.append(f)
+        d["filters"] = fixed
+    return d
+
+
 def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, ToolRecord]:
     """执行单个 query 步骤：DSL -> 门面 -> ParquetRef。"""
     from config import settings
@@ -269,9 +299,9 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
     workspace = settings.WORKSPACE_ROOT / f"{state.session_id}" / state.turn_id
     prepare_workspace(workspace)
 
-    # 步骤 DSL：LLM 给出则用（经网关强校验），否则诊断兜底 DSL 对
+    # 步骤 DSL：LLM 给出则规范化后交网关强校验，否则诊断兜底 DSL 对
     if step.dsl is not None:
-        dsl_variants = [step.dsl]
+        dsl_variants = [_normalize_dsl_draft(step.dsl)]
     else:
         baseline_dsl, current_dsl = _diagnostic_dsl_pair(state.user_query)
         dsl_variants = [baseline_dsl, current_dsl]
@@ -526,11 +556,17 @@ def critic_node(state: AgentState) -> AgentState:
             '仅输出 JSON：{"verdict": "sufficient"|"insufficient", "reasons": [...]}',
             f"用户问题：{state.user_query}\n执行轨迹：\n{trace_digest}",
         )
-        if verdict and verdict.get("verdict") == "insufficient" and not exhausted:
+        if verdict and verdict.get("verdict") == "insufficient":
+            # LLM 反思重规划与工具自愈共用重试预算（防"不耗额度的无限重规划"，
+            # 只能靠迭代护栏兜底而空烧 LLM 调用）
+            keep = state.error_context.record(f"LLM 反思判定产物不充分: {verdict.get('reasons')}")
             state.scratchpad.append(f"[critic-llm] {verdict.get('reasons')}")
             events.emit_reflection(
                 str(verdict.get("reasons", "")), "replan", "LLM 反思判定产物不充分，触发重规划"
             )
+            if not keep:
+                events.emit_reflection("重规划额度耗尽", "proceed", "转入综合节点如实报告")
+                return state.apply(phase="synthesize")
             return state.apply(phase="plan")
     events.emit_reflection("完整性/正确性/一致性三检通过", "proceed", "转入综合报告")
     return state.apply(phase="synthesize")

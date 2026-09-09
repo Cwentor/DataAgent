@@ -21,16 +21,19 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
       "goal": "该步骤要回答的子问题（中文）",
       "kind": "query" | "analyze" | "synthesize",
       "depends_on": [],
-      "dsl": {"metrics": [...], "dimensions": [...], "filters": [...], "time_range": {...}},
+      "dsl": {"metrics": [...], "dimensions": [...], "filters": [...], "time_filter": {...}},
       "code": null | "analyze 步骤的 Python 代码"
     }
   ]
 }
 
-# DSL 契约要点（完整 Schema 见系统注入的语义目录）
+# DSL 契约要点（完整 Schema 见系统注入的语义目录；字段名与结构必须逐字对齐，写错即整计划被拒）
 - metrics: [{"kind": "aggregate", "field": "<语义字段>", "agg": "sum|count|avg|min|max|count_distinct", "alias": "<英文标识符>"}]
-- dimensions: ["<语义维度字段>"]；filters: [{"field": ..., "operator": "eq|ne|gt|ge|lt|le|in|between|like", "value": ...}]
-- time_filter: {"range_type": "absolute", "absolute": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}
+- dimensions: [{"field": "<语义维度字段>", "alias": "<可选英文标识符>"}]
+  —— 注意是对象数组，每个维度形如 {"field": "province"}，严禁写成裸字符串 "province"
+- filters: [{"field": ..., "operator": "eq|ne|in|gt|gte|lt|lte|between", "value": ...}]（没有 like/ge/le）
+- 时间过滤字段名是 time_filter（不是 time_range）：
+  {"range_type": "absolute", "absolute": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}
   或 {"range_type": "relative", "relative": {"unit": "day|week|month|quarter", "value": N, "offset": 0}}
 - 严禁出现任何 SQL；字段必须来自语义目录，禁止臆造
 

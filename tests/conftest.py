@@ -45,12 +45,14 @@ def _offline_llm(monkeypatch, tmp_path):
     """
     from config import settings
     from providers.factory import reset_provider_factory
-    from providers.store import reset_default_provider_store
+    from providers.store import ProviderStore, reset_default_provider_store
 
     monkeypatch.setattr(settings, "LLM_API_KEY", "")
-    # 单例重置：避免复用进程早前从真实 providers.json 构造的工厂 / 存储
+    # 空配置存储：彻底隔离磁盘 config/providers.json——用户在 Web 界面配置的
+    # 真实供应商（含 API Key）不得泄漏进测试进程（否则 has_provider() 为真，
+    # planner/critic 走真实 LLM，破坏确定性并可能产生真实网络调用）。
+    reset_default_provider_store(ProviderStore(tmp_path / "empty-providers.json"))
     reset_provider_factory(None)
-    reset_default_provider_store(None)
     yield
     reset_provider_factory(None)
     reset_default_provider_store(None)
