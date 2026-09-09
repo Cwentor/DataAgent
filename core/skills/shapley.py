@@ -55,9 +55,9 @@ def shapley_attribution(
     if model == "multiplicative" and any(baseline[f] <= 0 or current[f] <= 0 for f in factors):
         raise ValueError("乘法模型要求所有因子在两期均 > 0")
 
-    full: Callable[[frozenset[str]], float] = lambda c: _coalition_value(
-        factors, c, baseline, current, model
-    )
+    def full(coalition: frozenset[str]) -> float:
+        return _coalition_value(factors, coalition, baseline, current, model)
+
     total_delta = full(frozenset(factors)) - full(frozenset())
 
     n = len(factors)

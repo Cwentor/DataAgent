@@ -25,6 +25,9 @@ load_dotenv(PROJECT_ROOT / ".env")
 # 本地开发零成本数仓文件（模块 C 生成）
 DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 
+# 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
+WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
+
 # 数据与评测统一锚点日期
 AS_OF_DATE: date = date(2024, 6, 30)
 
