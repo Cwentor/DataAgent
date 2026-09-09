@@ -709,7 +709,7 @@ class Handler(BaseHTTPRequestHandler):
     def _sse_write(self, event: dict) -> None:
         """写一帧 SSE 事件（``data: <json>\\n\\n``）并立即 flush。"""
         frame = json.dumps(event, ensure_ascii=False)
-        self.wfile.write(f"data: {frame}\n\n".encode("utf-8"))
+        self.wfile.write(f"data: {frame}\n\n".encode())
         self.wfile.flush()
 
     # ------------------------------------------------------------------ #
@@ -735,7 +735,6 @@ class Handler(BaseHTTPRequestHandler):
                 {"table": name, "fields": fields} for name, fields in sorted(tables.items())
             ],
         }
-
 
     # ------------------------------------------------------------------ #
     # 受保护：/api/export/<id>（导出文件下载，P0-4 表格导出链路）
