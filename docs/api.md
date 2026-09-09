@@ -20,6 +20,7 @@ python -m web.server 8000
 | `/api/query` | POST | 执行受保护的数据查询 |
 | `/api/agent/run` | POST | Data Agent 同步编排（多步分析 + 沙箱 + HITL 恢复） |
 | `/api/v1/agent/chat/stream` | GET | Data Agent SSE 流式编排（AgentStreamEvent 事件流） |
+| `/api/schema/summary` | GET | 语义目录摘要：按物理表分组的可查询字段清单（知识上下文） |
 | `/static/` | GET | 双栏工作台前端 |
 
 ## 查询示例

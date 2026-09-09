@@ -62,8 +62,10 @@
     `GET /api/v1/agent/chat/stream`（SSE 流式：plan_created / step_start / tool_start / tool_end /
     reflection / hitl_request / artifact_emit / done / error 九类事件实时推送，异常收敛为 error 事件不崩流）
   - **双栏交互式工作台**：左栏执行与对话流（任务 DAG 时间线、DSL/沙箱工具手风琴、反思自愈节点、
-    HITL 澄清交互卡），右栏产物画布（执行报告 / ECharts 交互图表 / 沙箱代码与输出 / 数据审计表 +
-    Markdown/HTML 导出），零前端框架（原生 JS + vendored ECharts/PrismJS）
+    HITL 澄清交互卡，>50 步自动切换窗口化虚拟渲染——事件数据全量保留、DOM 仅渲染可视窗口），
+    右栏产物画布（执行报告 / ECharts 交互图表 / 沙箱代码与输出 / 数据审计表 +
+    Markdown/HTML 导出），Header 含知识上下文 Schema 选择器（`/api/schema/summary`
+    语义目录字段清单）与会话历史/新线程 CTA，零前端框架（原生 JS + vendored ECharts/PrismJS）
 - **可解释交付**：DSL → 中文话术 + 图表自适应推荐，零前端框架
 - **可观测**：全链路审计快照、结构化日志、QPS/分位数指标
 
