@@ -52,6 +52,13 @@
 - **受控执行**：只读白名单、超时取消、扫描行数熔断、返回行数上限、SQL 自愈
 - **对话式体验**：意图路由、多轮指代继承（"那华南呢？"）、口径澄清与槽位回填、多工具编排
 - **观察驱动重规划**：执行后把调度轨迹喂回规划器继续决策（继续查 / 作答 / 反问 / 终止），受 Max Steps 硬预算约束；对比型问题自动分解为多次单实体查询并跨步对比作答；反思层在调度终止后自检结果充分性（必要时受控追加一次查询）
+- **企业级 Data Agent（core/ 升级层）**：
+  - **图式编排**：StateGraph 六节点（澄清 HITL → 规划 → 受控取数 → 沙箱分析 → 反思重规划 → 综合报告），计划为步骤 DAG，受控自愈 ≤3 次
+  - **沙箱代码解释器**：AST 静态守卫（黑名单 import/调用/dunder 逃逸）+ 限权 runner（模块白名单 import、workspace 受限 open）+ 可插拔后端（Docker `--net=none --cap-drop=ALL` 强隔离 / 子进程兜底），聚合矩阵 ≤100 行防数据外泄
+  - **归因技能包**：维度熵/信息增益下钻、乘法对数链式指标分解树（GMV=UV×CR×AOV）、加法差额分解、DTW 相似性、Holt-Winters 异常检测、Shapley 值公平归因——全部与已知解析解对拍
+  - **数据交换协议**：DSL 查询结果 PII 脱敏（列名启发式 + 值形态正则，确定性哈希掩码）后物化为 ParquetRef（sha256 可审计），沙箱零网络零 DB socket
+  - **裸 SQL 网关**：字符串载荷 / SQL 键 / 自由文本 SQL 形态在网关层直接拒绝（`GuardrailViolation`），"LLM 永不产出裸 SQL"三重防线
+  - **HTTP 入口**：`POST /api/agent/run`（鉴权 + HITL 澄清中断/恢复，resume_token 属主绑定）
 - **可解释交付**：DSL → 中文话术 + 图表自适应推荐 + Web UI，零前端框架
 - **可观测**：全链路审计快照、结构化日志、QPS/分位数指标
 
@@ -222,6 +229,9 @@ curl -X POST http://127.0.0.1:8000/api/query \
 FutureBI/
 ├── semantic/     # 语义层：受限 DSL 契约 + 数据驱动字段目录
 ├── agent/        # NL -> DSL：LLM / 启发式双路径、意图路由、RAG、多轮记忆、重规划与反思
+├── core/         # Data Agent 升级层：retrieval 门面（typed Tool + PII 脱敏 + 裸 SQL 网关）、
+│                 # orchestrator（StateGraph 六节点编排）、sandbox（AST 守卫 + 限权 runner +
+│                 # Docker/子进程后端）、skills（熵下钻 / 分解树 / DTW / HW / Shapley）
 ├── compiler/     # DSL -> 确定性 SQL
 ├── exec/         # SQL 执行层：只读 AST 校验 / 超时 / 熔断 / 连接池 / 自愈
 ├── tools/        # 多工具编排：查数 / 趋势 / 导出 / 口径解释
@@ -229,7 +239,7 @@ FutureBI/
 ├── security/     # 权限：表级 / 列级 / 行级 RLS（配置驱动）
 ├── auth/         # 身份认证：JWT + Session + 登录限流
 ├── audit/        # 审计快照 + 可观测性指标
-├── web/          # Web UI / HTTP 服务 / 异步查询
+├── web/          # Web UI / HTTP 服务 / 异步查询 / 编排端点
 ├── eval/         # Golden 评测（25 用例，含多轮对话序列，双模式）
 ├── mock/         # 确定性 DuckDB 数仓
 ├── tests/        # 25 个测试文件（364 用例）

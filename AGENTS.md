@@ -87,11 +87,28 @@ eval/       Golden 评测骨架与用例
 mock/       确定性 mock 数仓（DuckDB）
 present/    展示层（解释 + 可视化推荐）
 security/   权限控制（表级/列级/行级 RLS）
+core/       Data Agent 核心（企业级升级层，见下方四包说明）
 config/     全局配置
 tests/      单元测试
 tools/      生产工具包（工具注册中心、内置工具等）
 web/        Web 可视化 UI（service + server + static 前端）
 ```
+
+### core/ 四包（Data Agent 升级层）
+
+```
+core/retrieval/     检索门面：DSL 管道 typed Tool 化（execute_dsl_query -> ParquetRef）、
+                    PII 脱敏导出、裸 SQL 网关守卫（GuardrailViolation）
+core/orchestrator/  图式编排：StateGraph（六节点 + 条件边 + HITL 中断恢复 +
+                    反思重规划 ≤3 次自愈）；Planner/Coder/Reflector 提示词与 Few-Shot
+core/sandbox/       沙箱代码解释器：AST 静态守卫 + 限权 runner（模块白名单 import +
+                    workspace 受限 open）+ 可插拔后端（Docker 强隔离 / 子进程兜底）
+core/skills/        归因技能包：熵下钻 / 指标分解树（乘法对数链式 + 加法）/
+                    DTW / Holt-Winters 异常检测 / Shapley 值归因
+```
+
+依赖方向铁律：orchestrator -> retrieval / sandbox / skills / agent；retrieval 不依赖
+orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy + 标准库。
 
 ## 语言与交互铁律 (Strict Language & Output Rules)
 
