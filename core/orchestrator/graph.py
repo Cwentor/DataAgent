@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from core.orchestrator import events
 from core.orchestrator.state import AgentState
 
 NodeFn = Callable[[AgentState], AgentState]
@@ -93,6 +94,7 @@ class StateGraph:
                     report=(state.report or "") + "\n[编排器] 迭代步数超限，强制终止。",
                 )
             node_fn = self._nodes[current]
+            events.emit_step_start(current)
             state = node_fn(state)
             # HITL 中断语义：clarify 阶段挂起等待用户回复（记录暂停节点供 resume）
             if state.phase == "clarify":
@@ -141,6 +143,7 @@ class StateGraph:
             state.iteration += 1
             if state.iteration > self._max_iterations:
                 return state.apply(phase="done")
+            events.emit_step_start(current)
             state = self._nodes[current](state)
             if state.phase == "clarify":
                 return state

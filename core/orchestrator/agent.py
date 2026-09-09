@@ -15,10 +15,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from core.orchestrator import events
 from core.orchestrator.graph import StateGraph
 from core.orchestrator.nodes import (
     clarify_node,
@@ -101,24 +103,54 @@ def run_agent(
     trace_id: str | None = None,
     human_reply: str | None = None,
     resume_state: AgentState | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> AgentTrace | AgentState:
-    """运行一次编排（同步简化版；HITL 恢复经 resume_state 传入）。"""
+    """运行一次编排（同步简化版；HITL 恢复经 resume_state 传入）。
+
+    on_event：可选事件观察者（SSE 流式前端注入）。注册后编排过程实时发射
+    plan_created / step_start / tool_* / reflection / artifact_emit 事件，
+    终态补发 done/error 收尾事件；不传时零开销、行为与旧契约完全一致。
+    """
     import uuid
 
-    if resume_state is not None:
-        graph = build_graph()
-        final = graph.resume(resume_state)
-    else:
-        state = AgentState(
+    # turn/trace 标识先于观察者注册生成：保证每条流式事件都可归属到本次会话轮次
+    resolved_turn = turn_id or f"t-{uuid.uuid4().hex[:8]}"
+    resolved_trace = trace_id or f"tr-{uuid.uuid4().hex[:8]}"
+
+    def _observer(raw: dict[str, Any]) -> None:
+        """事件包装器：统一附加 turn_id / trace_id（前端 AgentStreamEvent 契约）。"""
+        raw["turn_id"] = resolved_turn
+        raw["trace_id"] = resolved_trace
+        on_event(raw)
+
+    token = events.set_observer(_observer) if on_event is not None else None
+    try:
+        final = _run_agent_inner(
+            question,
             session_id=session_id,
-            turn_id=turn_id or f"t-{uuid.uuid4().hex[:8]}",
-            trace_id=trace_id or f"tr-{uuid.uuid4().hex[:8]}",
-            user_query=question,
+            turn_id=resolved_turn,
+            trace_id=resolved_trace,
             human_reply=human_reply,
-            phase="clarify" if human_reply is None else "plan",
+            resume_state=resume_state,
         )
-        graph = build_graph()
-        final = graph.run(state)
+        if on_event is not None:
+            # 终态收尾事件（复位观察者前发射，否则为 no-op）
+            if final.phase == "clarify":
+                events.emit_event(
+                    events.EVENT_HITL_REQUEST,
+                    {"hitl": {"question": final.clarification or "请补充分析需求"}},
+                )
+            else:
+                events.emit_event(events.EVENT_DONE, {"report": final.report})
+    except Exception as exc:
+        if on_event is not None:
+            events.emit_event(
+                events.EVENT_ERROR, {"error": f"{type(exc).__name__}: {exc}"}
+            )
+        raise
+    finally:
+        if token is not None:
+            events.reset_observer(token)
 
     if final.phase == "clarify":
         # HITL：返回含澄清问题的中间态（调用方展示问题 -> 收集答复 -> 再次调用）
@@ -136,6 +168,31 @@ def run_agent(
         turn_id=final.turn_id,
         trace_id=final.trace_id,
     )
+
+
+def _run_agent_inner(
+    question: str,
+    *,
+    session_id: str,
+    turn_id: str,
+    trace_id: str,
+    human_reply: str | None,
+    resume_state: AgentState | None,
+) -> AgentState:
+    """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。"""
+    if resume_state is not None:
+        graph = build_graph()
+        return graph.resume(resume_state)
+    state = AgentState(
+        session_id=session_id,
+        turn_id=turn_id,
+        trace_id=trace_id,
+        user_query=question,
+        human_reply=human_reply,
+        phase="clarify" if human_reply is None else "plan",
+    )
+    graph = build_graph()
+    return graph.run(state)
 
 
 __all__ = ["AgentTrace", "build_graph", "run_agent"]

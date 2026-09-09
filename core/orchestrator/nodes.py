@@ -22,8 +22,10 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
+from core.orchestrator import events
 from core.orchestrator.prompts import PLANNER_SYSTEM, planner_prompt
 from core.orchestrator.state import (
     MAX_RETRIES,
@@ -197,6 +199,7 @@ def planner_node(state: AgentState) -> AgentState:
         planner_used = "heuristic"
     else:
         planner_used = "llm"
+    events.emit_plan(steps)
     return state.apply(plan_steps=steps, phase="query", scratchpad=[f"[planner] {planner_used}"])
 
 
@@ -251,6 +254,8 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
     notes: list[str] = []
     for i, dsl_payload in enumerate(dsl_variants):
         name = f"{step.id}_v{i}" if len(dsl_variants) > 1 else step.id
+        events.emit_tool_start("futurebi_dsl_query", step.id, {"dataset": name, "dsl": dsl_payload})
+        started = time.perf_counter()
         ref = execute_dsl_query(
             dsl_payload,
             principal="admin",  # RLS 主体由服务端身份决定（与 web 链路一致）
@@ -260,6 +265,13 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
         )
         state.datasets[name] = ref.model_dump(by_alias=True)
         notes.append(f"{name}: {ref.rows} 行 × {len(ref.columns)} 列")
+        events.emit_tool_end(
+            "futurebi_dsl_query",
+            step.id,
+            ok=True,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            output={"dataset": name, "rows": ref.rows, "columns": list(ref.columns)},
+        )
 
     # 数据集经 state.datasets 传递（ParquetRef 契约），parquet 产物在 synthesize 汇总
     summary = f"[{step.id}] 取数完成：{'; '.join(notes)}"
@@ -280,6 +292,13 @@ def dsl_query_node(state: AgentState) -> AgentState:
             ]
         except Exception as exc:
             keep = updated.error_context.record(f"{type(exc).__name__}: {exc}")
+            events.emit_tool_end(
+                "futurebi_dsl_query",
+                step.id,
+                ok=False,
+                duration_ms=0.0,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             updated.tool_calls.append(
                 ToolRecord(
                     step_id=step.id,
@@ -297,6 +316,7 @@ def dsl_query_node(state: AgentState) -> AgentState:
                     phase="done",
                     report=f"取数在 {MAX_RETRIES} 次自愈后仍失败，已终止。\n最后一次错误：{exc}",
                 )
+            events.emit_reflection(f"取数失败：{exc}", "retry", "错误已喂回规划节点重写 DSL 计划自愈")
             return updated.apply(phase="plan")  # 自愈：回到规划节点重写计划
     return updated.apply(phase="analyze")
 
@@ -360,6 +380,7 @@ def code_exec_node(state: AgentState) -> AgentState:
     for step in [s for s in updated.plan_steps if s.kind == "analyze" and s.status == "pending"]:
         code = _analysis_template(updated, step)
         workspace = settings.WORKSPACE_ROOT / updated.session_id / updated.turn_id
+        events.emit_tool_start("python_sandbox", step.id, {"code": code})
         result = run_code(code, workspace, name=f"analysis_{step.id}")
         updated.tool_calls.append(
             ToolRecord(
@@ -373,13 +394,35 @@ def code_exec_node(state: AgentState) -> AgentState:
                 error=result.error,
             )
         )
+        events.emit_tool_end(
+            "python_sandbox",
+            step.id,
+            ok=result.ok,
+            duration_ms=result.duration_ms,
+            summary=json.dumps(result.summary, ensure_ascii=False)[:400] if result.summary else "",
+            error=result.error,
+        )
         if result.ok and result.summary:
             updated.artifacts.append(
                 Artifact(kind="summary", name=step.id, payload={"summary": result.summary})
             )
+            events.emit_event(
+                events.EVENT_ARTIFACT_EMIT,
+                {
+                    "artifact": {
+                        "type": "table",
+                        "title": (result.summary or {}).get("title", step.id),
+                        "content": result.summary,
+                    }
+                },
+            )
             if result.echarts_spec:
                 updated.artifacts.append(
                     Artifact(kind="echarts", name=f"{step.id}_chart", payload=result.echarts_spec)
+                )
+                events.emit_event(
+                    events.EVENT_ARTIFACT_EMIT,
+                    {"artifact": {"type": "echarts", "title": f"{step.id}_chart", "content": result.echarts_spec}},
                 )
             updated.plan_steps = [
                 s.model_copy(update={"status": "done"}) if s.id == step.id else s
@@ -396,6 +439,7 @@ def code_exec_node(state: AgentState) -> AgentState:
             ]
             if not keep:
                 return updated.apply(phase="critique")  # 让 Critic 决定如实放弃
+            events.emit_reflection(f"沙箱执行失败：{result.error}", "retry", "回到规划节点修正分析代码")
             return updated.apply(phase="plan")
     return updated.apply(phase="critique")
 
@@ -420,9 +464,12 @@ def critic_node(state: AgentState) -> AgentState:
 
     if not has_data:
         if exhausted:
+            events.emit_reflection("未获得任何数据集且重试额度耗尽", "proceed", "转入综合节点如实报告失败")
             return state.apply(phase="synthesize")
+        events.emit_reflection("未获得任何数据集", "replan", "取数失败，回到规划节点重写计划")
         return state.apply(phase="plan")
     if diagnostic and not has_summary and not exhausted:
+        events.emit_reflection("诊断类问题缺少归因 summary 产物", "replan", "补齐沙箱归因分析后再综合")
         return state.apply(phase="plan")
     # LLM Reflector 增强（可选；失败不影响确定性判定）
     llm = _resolve_llm()
@@ -435,7 +482,11 @@ def critic_node(state: AgentState) -> AgentState:
         )
         if verdict and verdict.get("verdict") == "insufficient" and not exhausted:
             state.scratchpad.append(f"[critic-llm] {verdict.get('reasons')}")
+            events.emit_reflection(
+                str(verdict.get("reasons", "")), "replan", "LLM 反思判定产物不充分，触发重规划"
+            )
             return state.apply(phase="plan")
+    events.emit_reflection("完整性/正确性/一致性三检通过", "proceed", "转入综合报告")
     return state.apply(phase="synthesize")
 
 
@@ -466,7 +517,12 @@ def synthesize_node(state: AgentState) -> AgentState:
         lines.append(f"> 自愈记录：{len(state.error_context.errors)} 次错误被捕获并重试。")
     lines.append("")
     lines.append(f"（执行轨迹 {len(state.tool_calls)} 步；数据集 {len(state.datasets)} 个）")
-    return state.apply(report="\n".join(lines), phase="done")
+    report = "\n".join(lines)
+    events.emit_event(
+        events.EVENT_ARTIFACT_EMIT,
+        {"artifact": {"type": "markdown_report", "title": "分析报告", "content": report}},
+    )
+    return state.apply(report=report, phase="done")
 
 
 __all__ = [
