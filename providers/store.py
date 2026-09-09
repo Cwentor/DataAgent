@@ -1,12 +1,17 @@
-"""Model Provider 配置持久化：JSON 文件 CRUD + API Key 脱敏 + 预置供应商种子。
+"""Model Provider 配置持久化：JSON 文件 CRUD + API Key 落盘加密 + 预置种子。
 
 设计说明：
 - 存储于服务端 JSON 文件（``config/providers.json``），线程锁保护并发读写；
-- API Key 明文仅存在于服务端文件（与 .env 同级信任边界）；网络传输与前端
-  展示一律走脱敏视图（``public_view``）；
-- 更新时若提交的 Key 为脱敏串或空串，保留服务端原 Key（禁止脱敏串覆盖明文）；
+- API Key **落盘加密**（``providers/crypto.py``，Encrypt-then-MAC）：文件内容
+  不含明文，备份 / 泄露 / 误提交仓库时不直接暴露；内存中为明文（适配器调用
+  上游 API 必需）；
+- 对外视图（``public_view`` / ``public_list``）**完全不含 api_key 字段**：
+  前端不再回填任何脱敏串，杜绝「把脱敏串当真 Key 用」；需要查看密钥走
+  ``reveal_key``（受认证保护的显式端点，并记审计日志）；
+- 更新时若提交的 Key 为历史脱敏串或空串，保留服务端原 Key（向后兼容旧客户端）；
 - 预置供应商（智谱 / OpenAI / Anthropic / Gemini）首次加载自动写入，
-  ``is_preset=True`` 不可删除（可禁用 / 编辑）。
+  ``is_preset=True`` 不可删除（可禁用 / 编辑）；
+- 历史明文文件在加载时自动迁移为加密格式（一次性写回）。
 """
 
 from __future__ import annotations
@@ -18,12 +23,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from providers.crypto import decrypt_secret, encrypt_secret, is_encrypted, normalize_master
 from providers.models import (
     ApiProtocol,
     ModelItem,
     ProviderConfig,
     is_masked_key,
-    mask_api_key,
 )
 
 PRESET_PROVIDERS: list[dict[str, Any]] = [
@@ -121,7 +126,7 @@ def _new_id() -> str:
 
 
 class ProviderStore:
-    """供应商配置持久化存储（JSON 文件；线程安全）。"""
+    """供应商配置持久化存储（JSON 文件；线程安全；Key 落盘加密）。"""
 
     def __init__(self, path: str | Path | None = None) -> None:
         """打开（或初始化）供应商配置文件；路径缺省取 config/providers.json。"""
@@ -132,36 +137,69 @@ class ProviderStore:
         self.path = Path(path)
         self._lock = threading.RLock()
         self._providers: dict[str, ProviderConfig] = {}
+        self._master: bytes | None = None  # 惰性初始化（依赖 settings）
         self._load()
 
     # ------------------------------------------------------------------ #
-    # 内部读写（明文）
+    # 加密主密钥
+    # ------------------------------------------------------------------ #
+    def _key(self) -> bytes:
+        """落盘加密主密钥（PROVIDERS_ENC_SECRET 优先，回退 AUTH_JWT_SECRET）。"""
+        if self._master is None:
+            from config import settings
+
+            secret = settings.PROVIDERS_ENC_SECRET or settings.AUTH_JWT_SECRET
+            self._master = normalize_master(secret)
+        return self._master
+
+    # ------------------------------------------------------------------ #
+    # 内部读写（磁盘加密 <-> 内存明文）
     # ------------------------------------------------------------------ #
     def _load(self) -> None:
-        """从文件加载；文件不存在时写入预置种子。"""
+        """从文件加载并解密 Key；文件不存在时写入预置种子。"""
         if self.path.exists():
             try:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
-                self._providers = {
-                    item["id"]: ProviderConfig.model_validate(item)
-                    for item in raw
-                    if isinstance(item, dict) and item.get("id")
-                }
-                return
-            except (json.JSONDecodeError, OSError, ValueError):
+                items = [item for item in raw if isinstance(item, dict) and item.get("id")]
+            except (json.JSONDecodeError, OSError):
                 # 损坏文件不吞错：备份后重建（保证配置表永远可用）
                 backup = self.path.with_suffix(self.path.suffix + ".bak")
                 try:
                     backup.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
                 except OSError:
                     pass
+                items = []
+            if items:
+                self._providers = {
+                    item["id"]: ProviderConfig.model_validate(item) for item in items
+                }
+                migrated = self._decrypt_all()
+                if migrated:
+                    self._save()  # 历史明文自动迁移为加密格式
+                return
         self._providers = {p["id"]: ProviderConfig.model_validate(p) for p in PRESET_PROVIDERS}
         self._save()
 
+    def _decrypt_all(self) -> bool:
+        """把内存中各供应商的落盘密文解密为明文；返回是否发生明文迁移。"""
+        migrated = False
+        for provider in self._providers.values():
+            if not provider.api_key:
+                continue
+            if is_encrypted(provider.api_key):
+                provider.api_key = decrypt_secret(provider.api_key, self._key())
+            else:
+                migrated = True  # 历史明文：加载即触发一次性加密写回
+        return migrated
+
     def _save(self) -> None:
-        """全量写回 JSON 文件（原子替换，避免半写残留）。"""
+        """全量写回 JSON 文件（原子替换；api_key 加密后落盘）。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        items = [p.model_dump(mode="json") for p in self._providers.values()]
+        items = []
+        for p in self._providers.values():
+            item = p.model_dump(mode="json")
+            item["api_key"] = encrypt_secret(str(p.api_key or ""), self._key())
+            items.append(item)
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self.path)
@@ -179,7 +217,7 @@ class ProviderStore:
             return list(items)
 
     def get_provider(self, provider_id: str) -> ProviderConfig | None:
-        """按 ID 取供应商（含明文 Key，仅服务端内部使用）。"""
+        """按 ID 取供应商（内存明文 Key，仅服务端内部使用）。"""
         with self._lock:
             return self._providers.get(provider_id)
 
@@ -196,6 +234,9 @@ class ProviderStore:
                 raise ValueError(f"供应商 ID 已存在: {payload['id']}")
             payload.setdefault("is_preset", False)
             payload.setdefault("enabled", True)
+            # 兼容旧客户端：创建时提交脱敏串无原始 Key 可还原，按未配置处理
+            if payload.get("api_key") and is_masked_key(str(payload["api_key"])):
+                payload["api_key"] = ""
             payload.setdefault("api_key", "")
             payload.setdefault("models", [])
             payload.setdefault("custom_headers", {})
@@ -210,7 +251,12 @@ class ProviderStore:
             return provider
 
     def update_provider(self, provider_id: str, data: dict[str, Any]) -> ProviderConfig | None:
-        """按 ID 更新供应商；预置 id / 不存在时返回 None。api_key 为脱敏串或空则保留原值。"""
+        """按 ID 更新供应商；预置 id / 不存在时返回 None。
+
+        Key 语义：空串 / 缺省 / 历史脱敏串 => 保留服务端原 Key；其余值 =>
+        视为用户重新输入的新明文（服务端加密落盘）。前端不再回填脱敏串，
+        该保护仅为兼容旧客户端保留。
+        """
         with self._lock:
             current = self._providers.get(provider_id)
             if current is None:
@@ -218,10 +264,9 @@ class ProviderStore:
             payload = dict(data)
             payload.pop("id", None)  # ID 不可变更
             payload.pop("is_preset", None)  # 预置标记不可变更
-            # Key 脱敏保护：提交值为脱敏串 / 空串时保留服务端原 Key
             submitted_key = payload.get("api_key")
             if submitted_key is None or submitted_key == "" or is_masked_key(str(submitted_key)):
-                payload.pop("api_key", None)
+                payload.pop("api_key", None)  # 保留原 Key
             merged = current.model_copy(update=payload, deep=True)
             if "models" in payload:
                 merged.models = self._normalize_models(merged.models)
@@ -262,17 +307,28 @@ class ProviderStore:
         return normalized
 
     # ------------------------------------------------------------------ #
-    # 对外脱敏视图
+    # 对外视图（不含 Key；查看走 reveal_key）
     # ------------------------------------------------------------------ #
     def public_view(self, provider: ProviderConfig) -> dict[str, Any]:
-        """序列化为前端可安全展示的字典（API Key 一律脱敏）。"""
+        """序列化为前端可安全展示的字典（不含 api_key；仅暴露 has_api_key 布尔位）。"""
         view = provider.model_dump(mode="json")
-        view["api_key"] = mask_api_key(str(provider.api_key or ""))
+        view.pop("api_key", None)
+        view["has_api_key"] = bool(provider.api_key)
         return view
 
     def public_list(self) -> list[dict[str, Any]]:
         """返回脱敏后的供应商列表（前端设置面板 / 模型切换器数据源）。"""
         return [self.public_view(p) for p in self.list_providers()]
+
+    def reveal_key(self, provider_id: str) -> str | None:
+        """返回供应商的真实 API Key（明文）。
+
+        仅供受认证保护的「查看密钥」端点调用（调用方负责审计日志）；
+        供应商不存在返回 None。
+        """
+        with self._lock:
+            provider = self._providers.get(provider_id)
+            return provider.api_key if provider else None
 
 
 # --------------------------------------------------------------------------- #

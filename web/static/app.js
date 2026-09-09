@@ -537,7 +537,12 @@
     $("pf-enabled").checked = p ? !!p.enabled : true;
     $("pf-protocol").value = p ? p.protocol : "openai_chat";
     $("pf-base-url").value = p ? p.base_url : "";
-    $("pf-api-key").value = p ? p.api_key : "";   // 脱敏串（保持即不修改）
+    // 列表响应不含 api_key：输入框一律留空（占位提示"未修改则保持原 Key"），
+    // 杜绝把脱敏串当真 Key 用；需要查看走「👁 查看」从服务端取回明文。
+    $("pf-api-key").value = "";
+    $("pf-api-key").placeholder = p && p.has_api_key
+      ? "已配置密钥（留空 = 不修改；输入新值 = 替换）"
+      : "粘贴 API Key";
     $("pf-api-key").type = "password";
     renderModelChips(p ? p.models : []);
   }
@@ -554,6 +559,7 @@
     $("pf-protocol").value = "openai_chat";
     $("pf-base-url").value = "";
     $("pf-api-key").value = "";
+    $("pf-api-key").placeholder = "粘贴 API Key";
     $("pf-api-key").type = "password";
     renderModelChips([]);
     $("pf-name").focus();
@@ -610,7 +616,7 @@
       enabled: $("pf-enabled").checked,
       protocol: $("pf-protocol").value,
       base_url: $("pf-base-url").value.trim(),
-      api_key: $("pf-api-key").value,          // 原样提交：脱敏串由服务端识别为"不修改"
+      api_key: $("pf-api-key").value,          // 空串 = 保留服务端原 Key；新值 = 替换
       models: currentFormModels()
     };
   }
@@ -749,9 +755,46 @@
     $("pf-model-input").addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); $("pf-model-add").click(); }
     });
+    // 「👁 查看」：从服务端取回已保存的真实 Key（显式受控动作，服务端记审计）。
+    // 不再回填脱敏串——脱敏串无法用于请求，只会造成"Key 无法使用"。
     $("pf-eye").addEventListener("click", function () {
       var input = $("pf-api-key");
-      input.type = input.type === "password" ? "text" : "password";
+      if (input.type === "text") {
+        input.type = "password";
+        this.textContent = "👁";
+        this.title = "查看已保存的密钥";
+        return;
+      }
+      if (!currentProviderId) {
+        // 新建未保存：无服务端密钥可看，仅切换本地输入框明/密文
+        input.type = input.type === "password" ? "text" : "password";
+        this.textContent = input.type === "text" ? "🙈" : "👁";
+        return;
+      }
+      if (input.value) {
+        // 输入框已有手动输入的新值：只切换显示，无需请求
+        input.type = input.type === "password" ? "text" : "password";
+        this.textContent = input.type === "text" ? "🙈" : "👁";
+        return;
+      }
+      var btn = this;
+      btn.disabled = true;
+      api("/api/settings/providers/" + encodeURIComponent(currentProviderId) + "/reveal", {
+        method: "POST"
+      }).then(function (data) {
+        btn.disabled = false;
+        if (!data) { return; }
+        if (data.error) { toast(data.error, "err"); return; }
+        if (!data.api_key) { toast("该供应商尚未配置 API Key", "info"); return; }
+        input.value = data.api_key;
+        input.type = "text";
+        btn.textContent = "🙈";
+        btn.title = "再次点击隐藏";
+        toast("密钥已取回显示（服务端已记录本次查看）", "info");
+      }).catch(function () {
+        btn.disabled = false;
+        toast("获取密钥失败", "err");
+      });
     });
     $("pf-save").addEventListener("click", saveProvider);
     $("pf-delete").addEventListener("click", deleteProvider);

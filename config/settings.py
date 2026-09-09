@@ -102,8 +102,10 @@ ROUTER_LLM_MODEL: str = os.getenv("ROUTER_LLM_MODEL", "")
 # --------------------------------------------------------------------------- #
 # Model Provider 网关层（多供应商接入）—— 见 providers/ 包
 # --------------------------------------------------------------------------- #
-# 供应商配置持久化文件（JSON；API Key 明文仅存于服务端文件，网络传输/展示脱敏）
+# 供应商配置持久化文件（JSON；API Key 落盘加密存储，网络/展示不回传明文）
 PROVIDERS_FILE: Path = PROJECT_ROOT / "config" / "providers.json"
+# API Key 落盘加密主密钥（留空回退 AUTH_JWT_SECRET）；更换会使已存密钥无法解密
+PROVIDERS_ENC_SECRET: str = os.getenv("PROVIDERS_ENC_SECRET", "")
 # 供应商连通性探测与对话请求的默认超时（秒）
 PROVIDER_TIMEOUT: int = int(os.getenv("PROVIDER_TIMEOUT", "60"))
 

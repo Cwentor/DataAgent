@@ -1,16 +1,17 @@
-"""Model Provider 管理端点：配置 CRUD（脱敏）+ 连通性探测（Test Connection）。
+"""Model Provider 管理端点：配置 CRUD（不回传 Key）+ 连通性探测 + 密钥查看。
 
 路由（均需认证，与 /api/query 同一鉴权语义）：
-- GET    /api/settings/providers       -> 全量供应商列表（API Key 脱敏）+ 模型切换器候选
-- POST   /api/settings/providers       -> 创建自定义供应商
-- PUT    /api/settings/providers/<id>  -> 更新（id / is_preset 不可变更；脱敏 Key 视为未修改）
-- DELETE /api/settings/providers/<id>  -> 删除（预置供应商拒绝，返回 400）
-- POST   /api/settings/providers/test  -> 连通性探测（极小 ping 文本，返回 HTTP 200 + 延时）
+- GET    /api/settings/providers             -> 全量供应商列表（不含 api_key）+ 模型切换器候选
+- POST   /api/settings/providers             -> 创建自定义供应商
+- PUT    /api/settings/providers/<id>        -> 更新（id / is_preset 不可变更；空 Key 保留原值）
+- DELETE /api/settings/providers/<id>        -> 删除（预置供应商拒绝，返回 400）
+- POST   /api/settings/providers/test        -> 连通性探测（极小 ping 文本，返回 HTTP 200 + 延时）
+- POST   /api/settings/providers/<id>/reveal -> 查看已保存的真实 API Key（显式动作，记审计日志）
 
 设计约束：
-- API Key 明文只在服务端流转；任何响应体只含脱敏视图（``store.public_view``）；
-- 写操作成功后按 provider_id 失效适配器缓存（``factory.invalidate``），保证
-  配置变更对下一次查询立即生效；
+- API Key 落盘加密存储（providers.crypto），文件内容不含明文；
+- 列表/详情响应**完全不含 api_key 字段**：前端不再回填脱敏串，杜绝
+  「把脱敏串当真 Key 用」导致的连通失败；编辑时留空 = 保持原 Key；
 - 连通性探测的业务失败（401/429/超时等）以 HTTP 200 + ``success=false`` 返回，
   与传输层错误（404 供应商不存在 / 400 参数非法）严格区分，前端据此渲染
   可理解的 Toast 提示。
@@ -32,6 +33,7 @@ __all__ = [
     "create_provider",
     "delete_provider",
     "list_providers",
+    "reveal_provider_key",
     "test_provider",
     "update_provider",
 ]
@@ -150,6 +152,22 @@ def delete_provider(provider_id: str) -> tuple[int, dict[str, Any]]:
     invalidate_provider_caches(provider_id)
     logger.info("provider_deleted", extra={"event": "provider_deleted", "provider_id": provider_id})
     return 200, {"ok": True}
+
+
+def reveal_provider_key(provider_id: str) -> tuple[int, dict[str, Any]]:
+    """POST /api/settings/providers/<id>/reveal：查看已保存的真实 API Key。
+
+    显式授权动作（前端「👁 查看」按钮触发）：响应含明文 Key，访问行为记
+    审计日志（provider_key_revealed）。供应商不存在返回 404。
+    """
+    key = _store().reveal_key(provider_id.strip())
+    if key is None:
+        return 404, {"error": f"供应商不存在: {provider_id}"}
+    logger.info(
+        "provider_key_revealed",
+        extra={"event": "provider_key_revealed", "provider_id": provider_id},
+    )
+    return 200, {"api_key": key}
 
 
 def test_provider(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:

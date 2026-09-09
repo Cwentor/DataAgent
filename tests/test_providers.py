@@ -1,14 +1,16 @@
-"""Model Provider 网关层单元测试：存储脱敏 / 协议适配器 / 工厂分派 / 请求级切换 / HTTP API。
+"""Model Provider 网关层单元测试：存储加密 / 协议适配器 / 工厂分派 / 请求级切换 / HTTP API。
 
 覆盖（对应任务 DoD）：
-- ProviderStore：预置种子、CRUD、API Key 脱敏（展示串不可覆盖明文）、预置拒绝删除；
+- ProviderStore：预置种子、CRUD、API Key 落盘加密（文件不含明文）+ 历史明文自动迁移、
+  对外视图不含 api_key（仅 has_api_key）、历史脱敏串不覆盖明文、预置拒绝删除；
 - extract_json_object：裸 JSON / Markdown 围栏 / 前后杂文本的安全清洗；
 - 适配器：openai_chat 透传 response_format + 降级重试、openai_responses 的
   input/text.format 规范、anthropic 的 system 顶级字段与 x-api-key 鉴权头、
   gemini 的 responseMimeType；401 -> AuthenticationError、429 -> RateLimitError；
 - ProviderFactory：显式分派 / 无 Key 供应商不参与默认分派 / 失效缓存；
 - 请求级模型切换：ContextVar 绑定 -> DispatchingAdapter 转发目标供应商；
-- HTTP API：未认证 401、CRUD 全流程（脱敏回显）、连通性探测业务失败 200+success=false。
+- HTTP API：未认证 401、CRUD 全流程（响应不含 api_key）、reveal 查看密钥、
+  连通性探测业务失败 200+success=false。
 """
 
 from __future__ import annotations
@@ -78,27 +80,72 @@ class _HttpStub:
 # --------------------------------------------------------------------------- #
 # ProviderStore
 # --------------------------------------------------------------------------- #
-def test_store_preset_seed_and_masked_view(tmp_path):
+def test_store_preset_seed_and_keyless_view(tmp_path):
+    """预置种子自动写入；对外视图不含 api_key（仅 has_api_key 布尔位）。"""
     store = ProviderStore(tmp_path / "providers.json")
     ids = [p.id for p in store.list_providers()]
     assert "zhipu" in ids and "openai" in ids  # 预置种子自动写入
     view = store.public_view(store.get_provider("zhipu"))
-    assert view["api_key"] == ""  # 未配置 Key 展示为空
-    # 配置 Key 后对外视图一律脱敏
+    assert "api_key" not in view and view["has_api_key"] is False
+    # 配置 Key 后对外视图仍不含 Key 明文 / 脱敏串
     store.update_provider("zhipu", {"api_key": "zhpu-secret-key-abcdef123456"})
-    masked = store.public_view(store.get_provider("zhipu"))["api_key"]
-    assert masked.endswith("**") and "secret" not in masked
+    view = store.public_view(store.get_provider("zhipu"))
+    assert "api_key" not in view and view["has_api_key"] is True
+    assert "secret" not in json.dumps(view, ensure_ascii=False)
+
+
+def test_store_key_encrypted_at_rest(tmp_path):
+    """API Key 落盘加密：文件不含明文；reveal_key 可还原明文。"""
+    path = tmp_path / "providers.json"
+    store = ProviderStore(path)
+    store.create_provider(
+        {"id": "c1", "name": "C1", "base_url": "https://c1/v1", "api_key": "plain-key-abcdef"}
+    )
+    raw = path.read_text(encoding="utf-8")
+    assert "plain-key-abcdef" not in raw  # 落盘不含明文
+    assert "enc1$" in raw  # 加密格式标记
+    assert store.reveal_key("c1") == "plain-key-abcdef"  # 受控查看可还原
+    assert store.reveal_key("nope") is None
+
+
+def test_store_legacy_plaintext_migrated_on_load(tmp_path):
+    """历史明文文件：加载即迁移为加密格式，读取方仍拿到原 Key。"""
+    path = tmp_path / "providers.json"
+    legacy = [
+        {
+            "id": "old1",
+            "name": "Old",
+            "is_preset": False,
+            "enabled": True,
+            "base_url": "https://old/v1",
+            "api_key": "legacy-plain-key",
+            "protocol": "openai_chat",
+            "models": [],
+            "custom_headers": {},
+            "created_at": 0,
+            "updated_at": 0,
+        }
+    ]
+    path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+    store = ProviderStore(path)
+    assert store.reveal_key("old1") == "legacy-plain-key"
+    assert "legacy-plain-key" not in path.read_text(encoding="utf-8")  # 已加密迁移
 
 
 def test_store_masked_key_does_not_overwrite_plaintext(tmp_path):
+    """兼容旧客户端：回传历史脱敏串 => 服务端保留原明文（不落垃圾 Key）。"""
+    from providers.models import mask_api_key
+
     store = ProviderStore(tmp_path / "providers.json")
     store.create_provider(
         {"id": "c1", "name": "C1", "base_url": "https://c1/v1", "api_key": "plain-key-abcdef"}
     )
-    masked = store.public_view(store.get_provider("c1"))["api_key"]
-    # 前端回传脱敏串 -> 服务端保留原明文
-    store.update_provider("c1", {"api_key": masked})
+    store.update_provider("c1", {"api_key": mask_api_key("plain-key-abcdef")})
     assert store.get_provider("c1").api_key == "plain-key-abcdef"
+    # 空串 / 缺省同样保留原值
+    store.update_provider("c1", {"api_key": "", "name": "C1-renamed"})
+    assert store.get_provider("c1").api_key == "plain-key-abcdef"
+    assert store.get_provider("c1").name == "C1-renamed"
 
 
 def test_store_preset_delete_rejected_and_custom_deleted(tmp_path):
@@ -425,17 +472,27 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
         )
         assert status == 200
         created = body["provider"]
-        assert created["api_key"].startswith("sk-a") and created["api_key"].endswith("**")
-        # 更新（传脱敏串 -> 保留原 Key）+ 名称变更
+        # 响应不含 api_key（前端不回填脱敏串），仅暴露 has_api_key 布尔位
+        assert "api_key" not in created and created["has_api_key"] is True
+        # 更新（api_key 缺省 -> 保留原 Key）+ 名称变更
         status, body = _req(
             port,
             "PUT",
             f"/api/settings/providers/{created['id']}",
-            {"name": "API测试站2", "api_key": created["api_key"]},
+            {"name": "API测试站2"},
             headers=H,
         )
         assert status == 200 and body["provider"]["name"] == "API测试站2"
         assert isolated.get_provider(created["id"]).api_key == "sk-api-test-987654321"
+        # 查看密钥（reveal）：认证后返回明文，未认证 401，未知 id 404
+        status, body = _req(
+            port, "POST", f"/api/settings/providers/{created['id']}/reveal", headers=H
+        )
+        assert status == 200 and body["api_key"] == "sk-api-test-987654321"
+        status, _ = _req(port, "POST", f"/api/settings/providers/{created['id']}/reveal")
+        assert status == 401
+        status, _ = _req(port, "POST", "/api/settings/providers/p_none/reveal", {"x": 1}, headers=H)
+        assert status == 404
         # 连通性探测：业务失败 -> 200 + success=false（不抛 4xx/5xx）
         status, body = _req(
             port,

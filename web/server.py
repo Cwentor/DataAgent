@@ -14,9 +14,10 @@
 
 受保护路由:
     POST /api/query     -> 完整链路（需 Bearer JWT 或会话）
-    GET/POST /api/settings/providers        -> 供应商列表 / 创建（API Key 脱敏）
+    GET/POST /api/settings/providers        -> 供应商列表 / 创建（响应不含 api_key）
     PUT/DELETE /api/settings/providers/<id> -> 供应商更新 / 删除（预置供应商拒绝删除）
     POST /api/settings/providers/test       -> 连通性探测（极小 ping 文本，返回延时）
+    POST /api/settings/providers/<id>/reveal -> 查看已保存 API Key（显式动作，记审计）
 
 P0 安全约束（网关层强制）：
 - principal 只由服务端从已认证身份映射（auth.gateway.authenticate），
@@ -170,6 +171,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_providers()
         if parsed.path == "/api/settings/providers/test":
             return self._post_providers_test()
+        if parsed.path.startswith("/api/settings/providers/") and parsed.path.endswith("/reveal"):
+            # 查看已保存的真实 API Key（显式动作；响应含明文，记审计日志）
+            provider_id = parsed.path[len("/api/settings/providers/") : -len("/reveal")]
+            return self._protected(providers_api.reveal_provider_key, provider_id)
         return self._send_json({"error": "not found"}, 404)
 
     def do_PUT(self) -> None:
