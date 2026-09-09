@@ -320,8 +320,9 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
         )
         state.datasets[name] = ref.model_dump(by_alias=True)
         notes.append(f"{name}: {ref.rows} 行 × {len(ref.columns)} 列")
-        # 审计预览：读取物化 Parquet 前 30 行随 tool_end 下发（数据审计 Tab）
-        preview_rows = _preview_rows(str(workspace / ref.path))
+        # 审计预览：读取物化 Parquet 前 30 行随 tool_end 下发（数据审计 Tab）。
+        # ParquetRef.path 相对 workspace/inputs/（沙箱 read_input 同一约定）
+        preview_rows = _preview_rows(str(workspace / "inputs" / ref.path))
         events.emit_tool_end(
             "futurebi_dsl_query",
             step.id,
@@ -575,8 +576,50 @@ def critic_node(state: AgentState) -> AgentState:
 # --------------------------------------------------------------------------- #
 # 6) Synthesize
 # --------------------------------------------------------------------------- #
+def _dataset_markdown(name: str, ref: dict[str, Any], workspace: Any) -> tuple[str, dict | None]:
+    """把一个已物化数据集渲染为报告片段 + 前端 table 载荷（确定性，不编造）。
+
+    - 单行单列（标量聚合，如 count_distinct）=> 直接给答案行；
+    - 多行 => 附前 5 行 Markdown 预览表；读取失败降级为行列摘要。
+    """
+    cols = [str(c) for c in ref.get("columns", [])]
+    total = ref.get("rows", 0)
+    lines = [
+        f"### 查询结果：{name}",
+        f"- {total} 行 × {len(cols)} 列（{', '.join(cols) or '无列'}）",
+    ]
+    preview = _preview_rows(str(workspace / "inputs" / ref.get("path", "")), limit=30)
+    if total == 1 and len(cols) == 1 and preview:
+        lines.append(f"- **{cols[0]} = {preview[0][0]}**")
+    artifact: dict[str, Any] | None = None
+    if preview:
+        head = preview[:5]
+        lines.append("")
+        lines.append("| " + " | ".join(cols) + " |")
+        lines.append("|" + "|".join([" --- "] * len(cols)) + "|")
+        for row in head:
+            lines.append("| " + " | ".join(str(v) for v in row) + " |")
+        if total > 5:
+            lines.append(f"（预览前 5 行，共 {total} 行）")
+        artifact = {
+            "type": "table",
+            "title": f"查询结果 · {name}",
+            "columns": cols,
+            "rows": preview,
+            "totalRows": total,
+        }
+    return "\n".join(lines), artifact
+
+
 def synthesize_node(state: AgentState) -> AgentState:
-    """综合节点：执行轨迹 + 产物 => Markdown 报告（需求 §2.A SynthesizerNode）。"""
+    """综合节点：执行轨迹 + 产物 => Markdown 报告（需求 §2.A SynthesizerNode）。
+
+    消费两类来源：沙箱 summary/echarts 产物（analyze 步骤）与已物化数据集
+    （纯 query 步骤，如基数/枚举问题）——只呈现真实取数结果，不编造。
+    """
+    from config import settings
+
+    workspace = settings.WORKSPACE_ROOT / state.session_id / state.turn_id
     lines: list[str] = [f"## 分析报告：{state.user_query}", ""]
     if state.artifacts:
         for artifact in state.artifacts:
@@ -592,7 +635,14 @@ def synthesize_node(state: AgentState) -> AgentState:
                     lines.append(f"- 关键指标：{json.dumps(metrics, ensure_ascii=False)}")
             elif artifact.kind == "echarts":
                 lines.append(f"- 图表产物：`{artifact.name}`（ECharts 规格已生成）")
-    else:
+    # 纯查询结果直接呈现（取数成功但没有沙箱分析的场景）
+    for name, ref in state.datasets.items():
+        section, table_artifact = _dataset_markdown(name, ref, workspace)
+        lines.append("")
+        lines.append(section)
+        if table_artifact is not None:
+            events.emit_event(events.EVENT_ARTIFACT_EMIT, {"artifact": table_artifact})
+    if not state.artifacts and not state.datasets:
         lines.append("未能获得有效的分析产物。")
     if state.error_context.errors:
         lines.append("")

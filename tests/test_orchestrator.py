@@ -153,6 +153,48 @@ def test_run_agent_simple_query_path(tmp_path, monkeypatch):
     assert any(s["tool"] == "execute_dsl_query" and s["ok"] for s in trace.steps)
 
 
+def test_synthesize_consumes_datasets_for_pure_query(tmp_path, monkeypatch):
+    """纯查询问题（无沙箱 analyze 步骤）报告必须消费取数结果。
+
+    回归锚点：此前 synthesize 只认沙箱 summary 产物，基数/标量问题即使
+    取数成功也输出"未能获得有效的分析产物"（用户可见的能力缺口）。
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    trace = run_agent("2024 年 5 月成功支付订单的 GMV 总额是多少？", session_id="pureq")
+    assert trace.phase == "done"
+    assert "查询结果" in trace.report
+    assert "未能获得有效的分析产物" not in trace.report
+    # 标量聚合直接给答案行（gmv 总额为非零真实数值）
+    assert "gmv =" in trace.report
+
+
+def test_tool_end_preview_rows_points_at_inputs_dir(tmp_path, monkeypatch):
+    """tool_end 审计预览必须读到物化 Parquet（路径 = workspace/inputs/<ref.path>）。
+
+    回归锚点：此前拼成 workspace/<ref.path> 导致 preview_rows 恒为空。
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    events: list[dict] = []
+    trace = run_agent(
+        "2024 年 5 月成功支付订单的 GMV 总额是多少？", session_id="preview", on_event=events.append
+    )
+    assert trace.phase == "done"
+    ends = [
+        e
+        for e in events
+        if e["event"] == "tool_end" and e["payload"]["tool"]["name"] == "futurebi_dsl_query"
+    ]
+    assert ends
+    for e in ends:
+        preview = e["payload"]["tool"]["output"].get("preview_rows")
+        assert preview, "预览行不应为空（物化文件在 workspace/inputs/ 下）"
+        assert all(len(r) >= 1 for r in preview)
+
+
 # --------------------------------------------------------------------------- #
 # LLM DSL 草稿规范化（宽容接受，严格校验）
 # --------------------------------------------------------------------------- #

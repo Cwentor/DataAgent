@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import codecs
 import http.client
 import json
 import threading
@@ -61,11 +62,13 @@ def _sse_events(port: int, qs: str, token: str, timeout: float = 120.0):
         content_type = resp.headers.get("Content-Type", "")
         events: list[dict] = []
         buf = ""
+        decoder = codecs.getincrementaldecoder("utf-8")()
         while True:
             chunk = resp.read(1024)
             if not chunk:
                 break
-            buf += chunk.decode("utf-8")
+            # 增量解码：固定字节切块可能切开多字节字符（报告含中文表格）
+            buf += decoder.decode(chunk)
             while "\n\n" in buf:
                 frame, buf = buf.split("\n\n", 1)
                 for line in frame.splitlines():
