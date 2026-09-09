@@ -60,7 +60,14 @@
               if (window.App && App.onAuthExpired) { App.onAuthExpired("会话已过期，请重新登录"); }
               throw new Error("unauthorized");
             }
-            if (!resp.ok || !resp.body) { throw new Error("stream HTTP " + resp.status); }
+            if (!resp.ok || !resp.body) {
+              if (resp.status === 404) {
+                // 404 = 路由不存在：前端是新代码但服务端进程是旧版本
+                //（静态文件实时读盘，浏览器总是拿到新前端 -> 撞旧端点表）
+                throw new Error("后端服务缺少流式端点（服务进程版本过旧）。请重启 DataAgent Web 服务（python -m web.server）后刷新页面重试");
+              }
+              throw new Error("stream HTTP " + resp.status);
+            }
             var reader = resp.body.getReader();
             var decoder = new TextDecoder("utf-8");
             var buf = "";
