@@ -72,3 +72,6 @@ logs/
 .dsh-vision-router/
 .zcode/
 
+# --- Mimosa 安全插件本地状态（hook 会话缓存，不属仓库内容） ---
+.mimosa/
+
