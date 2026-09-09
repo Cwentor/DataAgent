@@ -19,6 +19,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import ClassVar
 
+from tests.fixture_keys import fake_key
+
+# Mock 服务的 Bearer / x-api-key：运行时生成，源码不落凭据字面量
+MOCK_RELAY_KEY = fake_key("relay")
+MOCK_ANT_KEY = fake_key("ant")
+
 DSL = {
     "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
     "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
@@ -126,13 +132,13 @@ class MockHandler(BaseHTTPRequestHandler):
         with self.lock:
             self.received.append((self.path, payload, headers))
         if self.path.endswith("/chat/completions"):
-            if headers.get("authorization", "") != "Bearer mock-key-123":
+            if headers.get("authorization", "") != f"Bearer {MOCK_RELAY_KEY}":
                 return self._reply({"error": {"message": "invalid api key"}}, 401)
             return self._reply(_mock_llm_payload(self.path, payload))
         if self.path.endswith("/responses"):
             return self._reply(_mock_llm_payload(self.path, payload))
         if self.path.endswith("/v1/messages"):
-            if headers.get("x-api-key") != "ant-key-456":
+            if headers.get("x-api-key") != MOCK_ANT_KEY:
                 return self._reply({"error": {"message": "unauthorized"}}, 401)
             if "system" not in payload:
                 # 连通性探测的极小 ping 无 system 字段，直接回显即可
@@ -170,7 +176,7 @@ def main() -> None:
             "id": "mock-relay",
             "name": "Mock中转",
             "base_url": f"http://127.0.0.1:{port}/v1",
-            "api_key": "mock-key-123",
+            "api_key": MOCK_RELAY_KEY,
             "protocol": "openai_chat",
             "models": [{"id": "mock-chat"}],
         }
@@ -180,7 +186,7 @@ def main() -> None:
             "id": "mock-resp",
             "name": "MockResponses",
             "base_url": f"http://127.0.0.1:{port}/v1",
-            "api_key": "mock-key-123",
+            "api_key": MOCK_RELAY_KEY,
             "protocol": "openai_responses",
             "models": [{"id": "mock-resp-model"}],
         }
@@ -190,7 +196,7 @@ def main() -> None:
             "id": "mock-ant",
             "name": "MockAnthropic",
             "base_url": f"http://127.0.0.1:{port}",
-            "api_key": "ant-key-456",
+            "api_key": MOCK_ANT_KEY,
             "protocol": "anthropic",
             "models": [{"id": "mock-ant-model"}],
         }
@@ -241,7 +247,7 @@ def main() -> None:
         )
 
     # 5) 错误码映射（错误 Key -> auth_failed）
-    store.update_provider("mock-relay", {"api_key": "wrong-key"})
+    store.update_provider("mock-relay", {"api_key": fake_key("wrong")})
     factory.invalidate("mock-relay")
     r5 = run_query(
         "2024年5月成功订单的GMV是多少？", "admin", provider_id="mock-relay", model_id="mock-chat"

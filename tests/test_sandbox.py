@@ -17,7 +17,6 @@ import pytest
 
 from core.sandbox.api import prepare_workspace, run_code
 from core.sandbox.ast_guard import static_check
-from core.sandbox.backends import SubprocessBackend
 
 GOOD = """
 df = read_input("sales")
