@@ -1,6 +1,6 @@
 """OpenAI 兼容 LLM 客户端（纯标准库实现，无额外依赖）。
 
-仅依赖 urllib 完成一次 Chat Completions 调用，支持任意 OpenAI 兼容端点
+仅依赖 http.client 完成一次 Chat Completions 调用，支持任意 OpenAI 兼容端点
 （OpenAI / DeepSeek / Moonshot / vLLM 等）。未配置 API Key 时不会走到这里，
 Agent 会自动回退到确定性启发式实现。
 
@@ -11,9 +11,13 @@ Agent 会自动回退到确定性启发式实现。
 
 from __future__ import annotations
 
+import http.client
 import json
-import urllib.request
+import urllib.parse
 from typing import Any
+
+# 出站协议白名单（SSRF 边界校验；目标 host 来自管理员配置的 base_url）
+_ALLOWED_URL_SCHEMES = ("http", "https")
 
 
 class LLMError(RuntimeError):
@@ -50,27 +54,38 @@ class OpenAICompatClient:
             "temperature": self.temperature,
         }
         body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.base_url + "/chat/completions",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
+        # 出站边界校验：协议白名单 + 主机名非空；http.client 显式建连不跟随重定向
+        parsed = urllib.parse.urlparse(self.base_url + "/chat/completions")
+        if parsed.scheme not in _ALLOWED_URL_SCHEMES or not parsed.hostname:
+            raise LLMError(f"LLM base_url 非法（协议需 http/https 且主机名非空）: {self.base_url}")
+        conn_cls = (
+            http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         )
+        conn = conn_cls(parsed.hostname, parsed.port, timeout=self.timeout)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
+            conn.request(
+                "POST",
+                parsed.path or "/",
+                body=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+            )
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8")
+        except (http.client.HTTPException, OSError) as exc:
             raise LLMError(f"LLM 网络/服务错误: {exc}") from exc
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            raise LLMError(f"LLM 响应解析失败: {exc}") from exc
+        finally:
+            conn.close()
+        if resp.status >= 400:
+            raise LLMError(f"LLM 服务返回 HTTP {resp.status}: {raw[:300]}")
 
         try:
+            data = json.loads(raw)
             return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError(f"LLM 响应缺少 choices[0].message.content: {exc}") from exc
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise LLMError(f"LLM 响应解析失败: {exc}") from exc
 
 
 def resolve_default_client() -> Any | None:

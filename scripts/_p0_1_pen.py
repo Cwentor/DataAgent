@@ -33,7 +33,8 @@ with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
 print("written secret to", path)
 conn = duckdb.connect()
 try:
-    rows = conn.execute(f"SELECT * FROM read_csv('{path}')").fetchall()
+    # 渗透测试本意即验证任意路径读取可达性；路径经参数绑定传入，避免 SQL 文本拼接
+    rows = conn.execute("SELECT * FROM read_csv(?)", [path]).fetchall()
     print("read_csv EXFILTRATED:", rows)
 finally:
     conn.close()

@@ -23,11 +23,11 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -111,6 +111,24 @@ def _inject_strict_json(system_prompt: str | None) -> str:
 # --------------------------------------------------------------------------- #
 # 底层 HTTP 发送（纯标准库 urllib，零 SDK 依赖）
 # --------------------------------------------------------------------------- #
+_ALLOWED_URL_SCHEMES = ("http", "https")
+
+
+def _validate_outbound_url(url: str) -> urllib.parse.ParseResult:
+    """出站 URL 安全校验：协议白名单 http/https + 主机名非空（SSRF 边界校验）。
+
+    目标主机来自管理员配置的供应商 base_url（企业内网网关属合法场景），
+    故不做私网段封禁，仅做协议与主机名合法性边界校验。返回解析结果供
+    http.client 显式建连（不自动跟随重定向，符合 SSRF 重定向限制建议）。
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in _ALLOWED_URL_SCHEMES:
+        raise ProviderError(f"供应商 base_url 协议必须为 http/https: {url}")
+    if not parsed.hostname:
+        raise ProviderError(f"供应商 base_url 缺少主机名: {url}")
+    return parsed
+
+
 def _http_post(
     url: str,
     *,
@@ -121,39 +139,40 @@ def _http_post(
 ) -> tuple[int, dict[str, str], str]:
     """发送一次 JSON POST 请求，返回 (status, response_headers, body)。
 
-    统一把网络错误 / HTTP 状态映射为供应商标准错误码：
+    使用 http.client 显式建连（替代 urlopen）：目标 host/port 经白名单校验，
+    不跟随重定向。统一把网络错误 / HTTP 状态映射为供应商标准错误码：
     - 401 -> AuthenticationError；429 -> RateLimitError；
-    - HTTP 超时（URLError timeout）-> ProviderTimeoutError；
-    - 其余 HTTP 状态 -> ProviderError（携带状态码）；
-    - 非 JSON 响应体 -> ProtocolError。
+    - HTTP 超时 -> ProviderTimeoutError；
+    - 其余 HTTP 状态 -> ProviderError（携带状态码）。
     """
     body = json.dumps(payload).encode("utf-8")
     merged_headers = {"Content-Type": "application/json", **headers}
     if api_key:
         merged_headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, data=body, headers=merged_headers, method="POST")
+    parsed = _validate_outbound_url(url)
+    conn_cls = (
+        http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    )
+    conn = conn_cls(parsed.hostname, parsed.port, timeout=timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            return resp.status, dict(resp.headers), raw
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        if exc.code == 401:
-            raise AuthenticationError(f"鉴权失败（HTTP 401）: {_brief(raw)}") from exc
-        if exc.code == 429:
-            raise RateLimitError(f"配额超限或请求过于频繁（HTTP 429）: {_brief(raw)}") from exc
-        raise ProviderError(
-            f"模型服务返回 HTTP {exc.code}: {_brief(raw)}", code="provider_error"
-        ) from exc
-    except urllib.error.URLError as exc:
-        reason = exc.reason
-        if isinstance(reason, (TimeoutError, OSError)) and "timed out" in str(reason).lower():
-            raise ProviderTimeoutError(f"请求超时: {reason}") from exc
-        raise ProviderError(f"网络请求失败: {reason}", code="provider_error") from exc
-    except TimeoutError as exc:  # socket.timeout 等
+        conn.request("POST", parsed.path or "/", body=body, headers=merged_headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", errors="replace")
+    except TimeoutError as exc:  # socket.timeout（含连接/读超时）
         raise ProviderTimeoutError(f"请求超时: {exc}") from exc
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ProtocolError(f"响应体非法: {exc}") from exc
+    except (http.client.HTTPException, OSError) as exc:
+        raise ProviderError(f"网络请求失败: {exc}", code="provider_error") from exc
+    finally:
+        conn.close()
+    if resp.status == 401:
+        raise AuthenticationError(f"鉴权失败（HTTP 401）: {_brief(raw)}")
+    if resp.status == 429:
+        raise RateLimitError(f"配额超限或请求过于频繁（HTTP 429）: {_brief(raw)}")
+    if resp.status >= 400:
+        raise ProviderError(
+            f"模型服务返回 HTTP {resp.status}: {_brief(raw)}", code="provider_error"
+        )
+    return resp.status, dict(resp.getheaders()), raw
 
 
 def _brief(raw: str, limit: int = 300) -> str:

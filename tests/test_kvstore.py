@@ -31,9 +31,11 @@ def test_wal_journal_mode_enabled(tmp_path):
 
 
 def test_busy_timeout_applied(tmp_path):
-    """busy_timeout 为连接级 PRAGMA，按构造参数设置。"""
-    store = SqliteKVStore(tmp_path / "state.db", table="t1", busy_timeout_ms=1234)
-    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 1234
+    """busy_timeout 走档位白名单：1234 非法档位被拒绝，1000/3000/5000 生效。"""
+    with pytest.raises(ValueError):
+        SqliteKVStore(tmp_path / "reject.db", table="t1", busy_timeout_ms=1234)
+    store = SqliteKVStore(tmp_path / "state.db", table="t1", busy_timeout_ms=1000)
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 1000
     store.close()
 
 

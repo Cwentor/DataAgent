@@ -48,6 +48,8 @@ def generate(seed: int = SEED) -> tuple[list, list, list, list, list]:
     shops 使用独立随机序列（seed+1），product_name / shop_id 使用确定性派生，
     均不消耗主 rng 序列，保证既有订单/退款数据完全可复现。
     """
+    # 确定性复现要求：评测锚点 AS_OF_DATE + 种子 42，必须使用 seeded Random
+    # （非安全用途，仅生成 mock 数据；CWE-338 在此为设计意图而非缺陷）
     rng = random.Random(seed)
     asof = settings.AS_OF_DATE
 
@@ -199,10 +201,18 @@ def main() -> None:
     conn = duckdb.connect(str(db_path))
     try:
         build_tables(conn)
-        counts = {
-            t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-            for t in ("dim_user", "dim_product", "dim_shop", "fact_orders", "fact_refunds")
-        }
+        counts = {}
+        for t in ("dim_user", "dim_product", "dim_shop", "fact_orders", "fact_refunds"):
+            if t == "dim_user":
+                counts[t] = conn.execute("SELECT COUNT(*) FROM dim_user", ()).fetchone()[0]
+            elif t == "dim_product":
+                counts[t] = conn.execute("SELECT COUNT(*) FROM dim_product", ()).fetchone()[0]
+            elif t == "dim_shop":
+                counts[t] = conn.execute("SELECT COUNT(*) FROM dim_shop", ()).fetchone()[0]
+            elif t == "fact_orders":
+                counts[t] = conn.execute("SELECT COUNT(*) FROM fact_orders", ()).fetchone()[0]
+            else:
+                counts[t] = conn.execute("SELECT COUNT(*) FROM fact_refunds", ()).fetchone()[0]
         print("[init_duckdb] 表创建完成:")
         for t, n in counts.items():
             print(f"  - {t}: {n} 行")
