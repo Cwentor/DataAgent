@@ -134,6 +134,7 @@
     renderUserCenter(user);
     AgentStreamUI.init();
     AgentCanvas.init();
+    AgentHeaderUI.init();
     initAgentStatus();
     bindEvents();
     fillModelSwitch();
@@ -788,13 +789,17 @@
     $("run").textContent = "分析中…";
     var sel = selectedProviderModel();
     // 客户端不提交 principal：主体由服务端从身份映射（P0）
-    activeStream = AgentEventSource.open(
+    var stream = AgentEventSource.open(
       AgentProtocol.buildStreamUrl(q, {
         provider_id: sel.provider_id,
         model_id: sel.model_id
       }),
       streamHandlers()
     );
+    activeStream = stream;
+    window.__activeStream = stream; // 供 Header「新线程」中断当前流
+    // 线程历史：提交即记录（含当前事件数，供历史面板展示规模）
+    AgentHeaderUI.recordThread(q, AgentStore.get().timelineEvents.length);
   }
 
   function bindEvents() {

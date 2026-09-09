@@ -25,6 +25,27 @@
         <span id="agent-status-text">空闲</span>
       </div>
 
+      <!-- 知识上下文：DuckDB Schema 选择器（语义目录字段清单） -->
+      <div id="schema-picker" class="header-dropdown">
+        <button type="button" id="schema-btn" class="header-drop-btn"
+                aria-haspopup="true" aria-expanded="false" title="知识上下文：语义目录字段清单">▣ Schema</button>
+        <div id="schema-panel" class="header-panel hidden" aria-label="DuckDB Schema">
+          <div class="hp-head">语义目录 · 可查询字段</div>
+          <div id="schema-panel-body" class="hp-body"><div class="hp-empty">加载中…</div></div>
+        </div>
+      </div>
+
+      <!-- 会话历史 / 新线程 CTA -->
+      <div id="thread-picker" class="header-dropdown">
+        <button type="button" id="new-thread-btn" class="header-drop-btn" title="开启新分析线程（重置工作区）">＋ 新线程</button>
+        <button type="button" id="thread-history-btn" class="header-drop-btn"
+                aria-haspopup="true" aria-expanded="false" title="会话历史">⏱ 历史</button>
+        <div id="thread-panel" class="header-panel hidden" aria-label="会话历史">
+          <div class="hp-head">会话历史（本机）</div>
+          <div id="thread-panel-body" class="hp-body"><div class="hp-empty">暂无历史会话</div></div>
+        </div>
+      </div>
+
       <!-- 轻量级模型状态指示（纯信息展示；供应商配置统一入口在「设置」） -->
       <div id="model-indicator" class="model-indicator"
            title="当前生效模型（可在查询栏切换；供应商在「设置」中配置）">
@@ -216,6 +237,7 @@
   <script src="/static/js/stream.js"></script>
   <script src="/static/js/stream-ui.js"></script>
   <script src="/static/js/canvas.js"></script>
+  <script src="/static/js/header-ui.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

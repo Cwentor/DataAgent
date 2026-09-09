@@ -52,6 +52,63 @@
 .agent-status.awaiting .agent-status-dot { background: #e64980; box-shadow: 0 0 6px rgba(230,73,128,.8); }
 @keyframes pulse { 50% { opacity: .4; } }
 
+/* ------------------------------------------------- Header 下拉（Schema / 历史） */
+.header-dropdown { position: relative; }
+.header-drop-btn {
+  border: 1px solid rgba(255, 255, 255, .18); background: rgba(255, 255, 255, .1);
+  color: #fff; border-radius: 999px; padding: 6px 12px; font-size: 12.5px;
+  cursor: pointer; font-family: inherit; transition: background .15s;
+}
+.header-drop-btn:hover { background: rgba(255, 255, 255, .2); }
+.header-drop-btn[aria-expanded="true"] { background: rgba(255, 255, 255, .24); }
+.header-panel {
+  position: absolute; right: 0; top: calc(100% + 8px); width: 340px; max-width: 88vw;
+  background: #fff; color: var(--text); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(26, 29, 46, .18); z-index: 60; overflow: hidden;
+}
+.hp-head {
+  padding: 10px 14px; font-size: 12px; font-weight: 700; color: var(--muted);
+  border-bottom: 1px solid var(--border); background: #fafbfe; text-transform: uppercase; letter-spacing: .04em;
+}
+.hp-body { max-height: 380px; overflow-y: auto; padding: 8px 10px 12px; }
+.hp-empty { color: var(--muted); font-size: 12.5px; padding: 14px 6px; text-align: center; }
+
+/* Schema 面板：按表分组字段清单 */
+.schema-table-group { margin: 6px 0; }
+.schema-table-name {
+  font-size: 12px; font-weight: 700; color: var(--accent-dark);
+  padding: 5px 4px; border-bottom: 1px dashed var(--border); display: flex; align-items: center; gap: 6px;
+}
+.schema-table-name .t-count { margin-left: auto; font-weight: 400; font-size: 11px; color: var(--muted); }
+.schema-field {
+  display: flex; align-items: baseline; gap: 8px; padding: 4px 6px; font-size: 12px; border-radius: 6px;
+}
+.schema-field:hover { background: #f6f8ff; }
+.schema-field .f-logical { font-weight: 600; font-family: var(--mono); font-size: 11.5px; }
+.schema-field .f-column { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.schema-field .f-dtype {
+  margin-left: auto; font-size: 10px; padding: 0 7px; border-radius: 999px;
+  background: #edf2ff; color: var(--accent-dark); font-family: var(--mono);
+}
+
+/* 历史面板：线程列表 */
+.thread-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 8px; border: none; background: none; cursor: pointer;
+  text-align: left; border-radius: 8px; font-family: inherit;
+}
+.thread-item:hover { background: #f6f8ff; }
+.thread-item .t-q {
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.thread-item .t-time { flex: 0 0 auto; font-size: 10.5px; color: var(--muted); }
+.thread-item .t-del {
+  flex: 0 0 auto; border: none; background: none; color: var(--muted);
+  cursor: pointer; font-size: 12px; padding: 2px 6px; border-radius: 6px;
+}
+.thread-item .t-del:hover { color: #c92a2a; background: #fff0f0; }
+
 /* ------------------------------------------------------------ 分栏骨架 */
 .split-workspace {
   flex: 1; display: flex; gap: 14px; min-height: 0;
