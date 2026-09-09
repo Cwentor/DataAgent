@@ -64,7 +64,7 @@ def test_http_smoke():
             assert json.loads(resp.read().decode("utf-8")) == {"status": "ok"}
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
             html = resp.read().decode("utf-8")
-        assert "FutureBI" in html
+        assert "DataAgent" in html
     finally:
         server.shutdown()
         server.server_close()

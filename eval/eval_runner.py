@@ -288,7 +288,7 @@ def _print_summary(summary: EvalSummary, print_sql: bool = False) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """命令行入口：--pipeline 选择 oracle/agent，--print-sql 输出编译 SQL。"""
-    parser = argparse.ArgumentParser(description="ChatBI Golden Dataset 评测")
+    parser = argparse.ArgumentParser(description="DataAgent Golden Dataset 评测")
     parser.add_argument("--print-sql", action="store_true", help="打印每个用例的编译 SQL")
     parser.add_argument(
         "--pipeline",

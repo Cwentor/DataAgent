@@ -1,4 +1,4 @@
-"""FutureBI Web UI 服务（零依赖，标准库 http.server）+ 统一身份认证网关（P0）。
+"""DataAgent Web UI 服务（零依赖，标准库 http.server）+ 统一身份认证网关（P0）。
 
 用法:
     python -m web.server [端口]     # 默认 8000
@@ -655,7 +655,7 @@ def main() -> None:
     )
     display_host = "localhost" if host in {"0.0.0.0", "::"} else host
     print(
-        f"FutureBI Web UI running at http://{display_host}:{port}  [auth={auth_state}]", flush=True
+        f"DataAgent Web UI running at http://{display_host}:{port}  [auth={auth_state}]", flush=True
     )
     server.serve_forever()
 

@@ -185,7 +185,7 @@ def build_system_prompt(principal: str | None = None) -> str:
     ]
     conventions = "\n".join(convention_lines)
     return (
-        "你是企业级 ChatBI 的语义解析器。你只能输出一个 JSON 对象，表示受限查询 DSL（QueryDSL）。\n"
+        "你是企业级 Data Agent 的语义解析器。你只能输出一个 JSON 对象，表示受限查询 DSL（QueryDSL）。\n"
         "不要输出任何解释、Markdown 代码块或多余文字；不要生成 SQL；不要输出不存在的字段。\n\n"
         + _STRUCT_BLOCK
         + "\n\n可引用的逻辑字段（当前主体可用白名单，其余一律不得出现）：\n"

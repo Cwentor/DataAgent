@@ -162,7 +162,7 @@ class DockerBackend(SandboxBackend):
     """
 
     name = "docker"
-    image: str = "futurebi-sandbox:latest"
+    image: str = "dataagent-sandbox:latest"
     memory_mb: int = 1024
     cpus: float = 1.0
     container_user: str = "10001:10001"

@@ -1,20 +1,20 @@
 <div align="center">
-  <img src="docs/assets/logo.svg" width="112" alt="FutureBI Logo"/>
+  <img src="docs/assets/logo.svg" width="112" alt="DataAgent Logo"/>
 
-  # FutureBI
+  # DataAgent
 
-  **企业级 ChatBI（Data Agent）：自然语言 → 受控 DSL → 确定性 SQL → DuckDB**
+  **企业级 Data Agent：自然语言 → 受控 DSL → 确定性 SQL → DuckDB**
 
   LLM 只产出受控 JSON，绝不直接生成裸 SQL —— 零幻觉、零注入、零随意 Join。
 
   <p>
     <img alt="Python" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white"/>
-    <img alt="Pydantic" src="https://img.shields.io/badge/Pydantic-V2-E92063?style=flat-square&logo=pydantic&logoColor=white"/>
+    <img alt="Pydantic" src="https://img.shields.io/badge/Pydantic-V2-E92063?style=flat-square"/>
     <img alt="DuckDB" src="https://img.shields.io/badge/DuckDB-%E6%9C%AC%E5%9C%B0%E6%95%B0%E4%BB%93-FFF000?style=flat-square&logo=duckdb&logoColor=black"/>
     <img alt="Code Style" src="https://img.shields.io/badge/Code%20Style-black-000000?style=flat-square"/>
     <img alt="Lint" src="https://img.shields.io/badge/Lint-ruff-261230?style=flat-square&logo=ruff&logoColor=white"/>
     <img alt="License" src="https://img.shields.io/badge/License-MIT-green?style=flat-square"/>
-    <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Cat-Drink/FutureBI/ci.yml?branch=master&style=flat-square&label=CI"/>
+    <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Cwentor/DataAgent/ci.yml?branch=master&style=flat-square&label=CI"/>
   </p>
 
   **一句话读懂它**：把大模型关进契约的笼子——模型只负责"理解问题"，数据永远由确定性代码产出。
@@ -65,7 +65,7 @@
 ## 🚀 快速开始
 
 ```bash
-conda activate futurebi
+conda activate dataagent
 pip install -r requirements-dev.txt
 python -m mock.init_duckdb
 python -m web.server 8000
@@ -90,11 +90,11 @@ python -m web.server 8000
 ```bash
 # 克隆仓库
 git clone <repository-url>
-cd FutureBI
+cd DataAgent
 
 # 创建并激活 conda 环境
-conda create -n futurebi python=3.12 -y
-conda activate futurebi
+conda create -n dataagent python=3.12 -y
+conda activate dataagent
 
 # 安装依赖
 pip install -r requirements-dev.txt
@@ -226,7 +226,7 @@ curl -X POST http://127.0.0.1:8000/api/query \
 ## 📦 项目结构
 
 ```text
-FutureBI/
+DataAgent/
 ├── semantic/     # 语义层：受限 DSL 契约 + 数据驱动字段目录
 ├── agent/        # NL -> DSL：LLM / 启发式双路径、意图路由、RAG、多轮记忆、重规划与反思
 ├── core/         # Data Agent 升级层：retrieval 门面（typed Tool + PII 脱敏 + 裸 SQL 网关）、
@@ -273,4 +273,4 @@ python -m pytest -q
 
 ## 📄 License
 
-[MIT](./LICENSE) © 2026 FutureBI contributors
+[MIT](./LICENSE) © 2026 DataAgent contributors

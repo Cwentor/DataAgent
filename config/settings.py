@@ -149,8 +149,8 @@ AUTH_JWT_SECRET: str = os.getenv("AUTH_JWT_SECRET", "dev-insecure-jwt-secret-cha
 WEAK_JWT_SECRETS: frozenset[str] = frozenset(
     {"", "dev-insecure-jwt-secret-change-me", "changeme", "secret", "password"}
 )
-AUTH_JWT_ISSUER: str = os.getenv("AUTH_JWT_ISSUER", "futurebi")
-AUTH_JWT_AUDIENCE: str = os.getenv("AUTH_JWT_AUDIENCE", "futurebi-web")
+AUTH_JWT_ISSUER: str = os.getenv("AUTH_JWT_ISSUER", "dataagent")
+AUTH_JWT_AUDIENCE: str = os.getenv("AUTH_JWT_AUDIENCE", "dataagent-web")
 # 令牌有效期（秒）：JWT 与 Session 各自独立
 AUTH_JWT_TTL: int = int(os.getenv("AUTH_JWT_TTL", "3600"))
 AUTH_SESSION_TTL: int = int(os.getenv("AUTH_SESSION_TTL", "86400"))

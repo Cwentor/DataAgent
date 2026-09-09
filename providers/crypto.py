@@ -29,6 +29,7 @@ import secrets
 _MAGIC = "enc1"
 _NONCE_BYTES = 16
 _KEY_LEN = 32
+# 项目更名前的历史域分隔常量：参与 HKDF 派生，一旦改动既有落盘密文将无法解密，严禁更名
 _INFO_ENC = b"futurebi.providers.apikey/enc"
 _INFO_MAC = b"futurebi.providers.apikey/mac"
 

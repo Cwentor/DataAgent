@@ -1,4 +1,4 @@
-/* FutureBI 主控制台前端逻辑。
+/* DataAgent 主控制台前端逻辑。
  *
  * 鉴权铁律（P0）：
  * - 页面启动只允许先调用轻量身份校验端点 /api/auth/me；校验通过前严禁发起
@@ -11,10 +11,10 @@
 
   var COLORS = ["#4f6ef7", "#22b8cf", "#12b886", "#f59f00", "#e64980", "#845ef7", "#74b816", "#f76707"];
   var $ = function (id) { return document.getElementById(id); };
-  var TOKEN_KEY = "futurebi_token";
-  var SESSION_KEY = "futurebi_session";
-  var SID_KEY = "futurebi_sid";
-  var CURRENT_SELECTION_KEY = "futurebi_model_selection";
+  var TOKEN_KEY = "dataagent_token";
+  var SESSION_KEY = "dataagent_session";
+  var SID_KEY = "dataagent_sid";
+  var CURRENT_SELECTION_KEY = "dataagent_model_selection";
   var LOGIN_PATH = "/login";
 
   var authExpiredHandled = false; // 防止并发 401 触发多次跳转
@@ -79,7 +79,7 @@
     var target = window.location.pathname + window.location.search;
     var url = LOGIN_PATH + "?redirect_url=" + encodeURIComponent(target);
     if (msg) {
-      try { sessionStorage.setItem("futurebi_logout_reason", msg); } catch (e) { /* 忽略 */ }
+      try { sessionStorage.setItem("dataagent_logout_reason", msg); } catch (e) { /* 忽略 */ }
     }
     window.location.replace(url);
   }

@@ -80,14 +80,14 @@ def test_jwt_roundtrip():
     token = create_token(
         "bob",
         "secret",
-        issuer="futurebi",
-        audience="futurebi-web",
+        issuer="dataagent",
+        audience="dataagent-web",
         ttl_seconds=3600,
     )
-    claims = decode_token(token, "secret", issuer="futurebi", audience="futurebi-web")
+    claims = decode_token(token, "secret", issuer="dataagent", audience="dataagent-web")
     assert claims["sub"] == "bob"
-    assert claims["iss"] == "futurebi"
-    assert claims["aud"] == "futurebi-web"
+    assert claims["iss"] == "dataagent"
+    assert claims["aud"] == "dataagent-web"
 
 
 def test_jwt_expired_rejected():
@@ -114,20 +114,20 @@ def test_jwt_wrong_secret_rejected():
 
 def test_jwt_issuer_and_audience_enforced():
     token = create_token(
-        "bob", "secret", issuer="futurebi", audience="futurebi-web", ttl_seconds=3600
+        "bob", "secret", issuer="dataagent", audience="dataagent-web", ttl_seconds=3600
     )
     with pytest.raises(TokenError, match="签发者"):
-        decode_token(token, "secret", issuer="evil", audience="futurebi-web")
+        decode_token(token, "secret", issuer="evil", audience="dataagent-web")
     with pytest.raises(TokenError, match="受众"):
-        decode_token(token, "secret", issuer="futurebi", audience="evil")
+        decode_token(token, "secret", issuer="dataagent", audience="evil")
 
 
 def test_jwt_never_carries_principal_claim():
     """令牌只携带身份标识，绝不携带 principal —— 权限由服务端每次重新映射。"""
     token = create_token(
-        "bob", "secret", issuer="futurebi", audience="futurebi-web", ttl_seconds=3600
+        "bob", "secret", issuer="dataagent", audience="dataagent-web", ttl_seconds=3600
     )
-    claims = decode_token(token, "secret", issuer="futurebi", audience="futurebi-web")
+    claims = decode_token(token, "secret", issuer="dataagent", audience="dataagent-web")
     assert "principal" not in claims
     assert "role" not in claims
 

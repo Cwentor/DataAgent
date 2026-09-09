@@ -1,4 +1,4 @@
-/* FutureBI 独立登录页逻辑：
+/* DataAgent 独立登录页逻辑：
  * - Auth Guard：进入页面先校验既有凭证（Bearer/Session），已登录直接跳主控制台；
  * - 提交登录：成功后按「记住我」选择 Token 存储位置，带回 redirect_url；
  * - 记住我：勾选时持久化用户名（记住身份），永不持久化密码。
@@ -7,9 +7,9 @@
   "use strict";
 
   var $ = function (id) { return document.getElementById(id); };
-  var TOKEN_KEY = "futurebi_token";
-  var SESSION_KEY = "futurebi_session";
-  var REMEMBER_KEY = "futurebi_remember_user";
+  var TOKEN_KEY = "dataagent_token";
+  var SESSION_KEY = "dataagent_session";
+  var REMEMBER_KEY = "dataagent_remember_user";
   var CONSOLE_PATH = "/";
 
   function storage(getter) {
@@ -116,10 +116,10 @@
 
   function showLogoutReason() {
     try {
-      var reason = sessionStorage.getItem("futurebi_logout_reason");
+      var reason = sessionStorage.getItem("dataagent_logout_reason");
       if (reason) {
         showAlert(reason);
-        sessionStorage.removeItem("futurebi_logout_reason");
+        sessionStorage.removeItem("dataagent_logout_reason");
       }
     } catch (e) { /* 忽略 */ }
   }

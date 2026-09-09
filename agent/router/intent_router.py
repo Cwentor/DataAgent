@@ -249,7 +249,7 @@ _VAGUE_SIGNAL_RE = re.compile(
 # --------------------------------------------------------------------------- #
 # LLM 语义分类器（Few-Shot 严格 JSON 输出）
 # --------------------------------------------------------------------------- #
-_ROUTER_SYSTEM_PROMPT = """你是 FutureBI 数据分析系统的意图识别器。你的任务是把用户输入分类为以下五类之一，并只输出一个 JSON 对象（禁止输出其他内容）：
+_ROUTER_SYSTEM_PROMPT = """你是 DataAgent 数据分析系统的意图识别器。你的任务是把用户输入分类为以下五类之一，并只输出一个 JSON 对象（禁止输出其他内容）：
 
 {
   "intent": "chitchat | data_query | glossary_explain | system_action | clarify",

@@ -1,4 +1,4 @@
-"""retrieval 门面：既有 ChatBI 防御链路的 typed Tool 化封装。
+"""retrieval 门面：既有问数防御链路的 typed Tool 化封装。
 
 本包把既有高完整性只读链路（semantic DSL 契约 -> compiler 确定性编译 ->
 exec 受控执行 -> security RLS 守卫）保留为内部工具，不改变其任何行为：
