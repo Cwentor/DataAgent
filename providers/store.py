@@ -23,6 +23,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from providers.crypto import decrypt_secret, encrypt_secret, is_encrypted, normalize_master
 from providers.models import (
     ApiProtocol,
@@ -251,11 +253,19 @@ class ProviderStore:
             return provider
 
     def update_provider(self, provider_id: str, data: dict[str, Any]) -> ProviderConfig | None:
-        """按 ID 更新供应商；预置 id / 不存在时返回 None。
+        """按 ID 更新供应商；不存在时返回 None。
 
         Key 语义：空串 / 缺省 / 历史脱敏串 => 保留服务端原 Key；其余值 =>
         视为用户重新输入的新明文（服务端加密落盘）。前端不再回填脱敏串，
         该保护仅为兼容旧客户端保留。
+
+        更新语义（重要修复）：**先 dump 再合并后整体重新验证**。此前用
+        ``model_copy(update=payload)`` 直接合并——pydantic v2 的 model_copy
+        不重新校验字段，前端提交的 ``models``（list[dict]）会原样塞进实例，
+        后续 ``_normalize_models`` 访问 ``m.id`` 触发 AttributeError（HTTP 500），
+        模型清单从未持久化 -> 模型切换器永远不收录该供应商（刷新后看似
+        "配置丢失"）。重建式更新保证 list[dict] / ModelItem 混合输入都被
+        严格验证为契约内的 ModelItem。
         """
         with self._lock:
             current = self._providers.get(provider_id)
@@ -267,9 +277,15 @@ class ProviderStore:
             submitted_key = payload.get("api_key")
             if submitted_key is None or submitted_key == "" or is_masked_key(str(submitted_key)):
                 payload.pop("api_key", None)  # 保留原 Key
-            merged = current.model_copy(update=payload, deep=True)
-            if "models" in payload:
-                merged.models = self._normalize_models(merged.models)
+            merged_data = current.model_dump(mode="python")
+            merged_data.update(payload)
+            # api_key 语义由上面的 payload 过滤保证：未提交/空串/脱敏串时
+            # merged_data 保留 dump 出的服务端原 Key；提交新值时被 payload 覆盖。
+            try:
+                merged = ProviderConfig.model_validate(merged_data)
+            except ValidationError as exc:
+                raise ValueError(f"供应商配置更新非法: {exc}") from exc
+            merged.models = self._normalize_models(merged.models)
             merged.updated_at = int(time.time())
             self._providers[provider_id] = merged
             self._save()

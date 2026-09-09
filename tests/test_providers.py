@@ -42,6 +42,7 @@ from providers.errors import (
 from providers.factory import ProviderFactory
 from providers.models import ProviderConfig, UnifiedChatRequest
 from providers.store import ProviderStore
+from tests.fixture_keys import fake_key
 
 
 # --------------------------------------------------------------------------- #
@@ -54,7 +55,7 @@ def _provider(**overrides) -> ProviderConfig:
         "is_preset": False,
         "enabled": True,
         "base_url": "https://gw.example.com/v1",
-        "api_key": "sk-test-123456789",
+        "api_key": fake_key("gw"),
         "protocol": "openai_chat",
         "models": [{"id": "m-1", "name": "M1"}],
     }
@@ -88,29 +89,32 @@ def test_store_preset_seed_and_keyless_view(tmp_path):
     view = store.public_view(store.get_provider("zhipu"))
     assert "api_key" not in view and view["has_api_key"] is False
     # 配置 Key 后对外视图仍不含 Key 明文 / 脱敏串
-    store.update_provider("zhipu", {"api_key": "zhpu-secret-key-abcdef123456"})
+    zhipu_key = fake_key("zhipu")
+    store.update_provider("zhipu", {"api_key": zhipu_key})
     view = store.public_view(store.get_provider("zhipu"))
     assert "api_key" not in view and view["has_api_key"] is True
-    assert "secret" not in json.dumps(view, ensure_ascii=False)
+    assert zhipu_key not in json.dumps(view, ensure_ascii=False)
 
 
 def test_store_key_encrypted_at_rest(tmp_path):
     """API Key 落盘加密：文件不含明文；reveal_key 可还原明文。"""
     path = tmp_path / "providers.json"
     store = ProviderStore(path)
+    c1_key = fake_key("c1")
     store.create_provider(
-        {"id": "c1", "name": "C1", "base_url": "https://c1/v1", "api_key": "plain-key-abcdef"}
+        {"id": "c1", "name": "C1", "base_url": "https://c1/v1", "api_key": c1_key}
     )
     raw = path.read_text(encoding="utf-8")
-    assert "plain-key-abcdef" not in raw  # 落盘不含明文
+    assert c1_key not in raw  # 落盘不含明文
     assert "enc1$" in raw  # 加密格式标记
-    assert store.reveal_key("c1") == "plain-key-abcdef"  # 受控查看可还原
+    assert store.reveal_key("c1") == c1_key  # 受控查看可还原
     assert store.reveal_key("nope") is None
 
 
 def test_store_legacy_plaintext_migrated_on_load(tmp_path):
     """历史明文文件：加载即迁移为加密格式，读取方仍拿到原 Key。"""
     path = tmp_path / "providers.json"
+    legacy_key = fake_key("legacy")
     legacy = [
         {
             "id": "old1",
@@ -118,7 +122,7 @@ def test_store_legacy_plaintext_migrated_on_load(tmp_path):
             "is_preset": False,
             "enabled": True,
             "base_url": "https://old/v1",
-            "api_key": "legacy-plain-key",
+            "api_key": legacy_key,
             "protocol": "openai_chat",
             "models": [],
             "custom_headers": {},
@@ -128,8 +132,8 @@ def test_store_legacy_plaintext_migrated_on_load(tmp_path):
     ]
     path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
     store = ProviderStore(path)
-    assert store.reveal_key("old1") == "legacy-plain-key"
-    assert "legacy-plain-key" not in path.read_text(encoding="utf-8")  # 已加密迁移
+    assert store.reveal_key("old1") == legacy_key
+    assert legacy_key not in path.read_text(encoding="utf-8")  # 已加密迁移
 
 
 def test_store_masked_key_does_not_overwrite_plaintext(tmp_path):
@@ -137,14 +141,15 @@ def test_store_masked_key_does_not_overwrite_plaintext(tmp_path):
     from providers.models import mask_api_key
 
     store = ProviderStore(tmp_path / "providers.json")
+    c1_key = fake_key("c1")
     store.create_provider(
-        {"id": "c1", "name": "C1", "base_url": "https://c1/v1", "api_key": "plain-key-abcdef"}
+        {"id": "c1", "name": "C1", "base_url": "https://c1/v1", "api_key": c1_key}
     )
-    store.update_provider("c1", {"api_key": mask_api_key("plain-key-abcdef")})
-    assert store.get_provider("c1").api_key == "plain-key-abcdef"
+    store.update_provider("c1", {"api_key": mask_api_key(c1_key)})
+    assert store.get_provider("c1").api_key == c1_key
     # 空串 / 缺省同样保留原值
     store.update_provider("c1", {"api_key": "", "name": "C1-renamed"})
-    assert store.get_provider("c1").api_key == "plain-key-abcdef"
+    assert store.get_provider("c1").api_key == c1_key
     assert store.get_provider("c1").name == "C1-renamed"
 
 
@@ -154,6 +159,55 @@ def test_store_preset_delete_rejected_and_custom_deleted(tmp_path):
     store.create_provider({"id": "c2", "name": "C2", "base_url": "https://c2/v1"})
     assert store.delete_provider("c2") is True
     assert store.get_provider("c2") is None
+
+
+def test_store_update_with_models_list_dict_persists(tmp_path):
+    """回归：PUT 更新提交 models（list[dict]）必须真正持久化。
+
+    历史 bug：model_copy(update=...) 不重新校验字段，dict 条目混入实例后
+    _normalize_models 访问 m.id 抛 AttributeError（HTTP 500），模型清单从未
+    落盘 -> 模型切换器不收录该供应商（表现为"刷新后配置丢失"）。
+    """
+    path = tmp_path / "providers.json"
+    store = ProviderStore(path)
+    ark_key = fake_key("ark")
+    store.create_provider(
+        {"id": "c1", "name": "火山", "base_url": "https://ark/v1", "api_key": ark_key}
+    )
+    updated = store.update_provider(
+        "c1",
+        {
+            "name": "火山改名",
+            "models": [{"id": "doubao-seed-1-6", "name": "doubao-seed-1-6"}],
+        },
+    )
+    assert updated is not None
+    assert [m.id for m in updated.models] == ["doubao-seed-1-6"]
+    # 重新实例化（模拟重启后从磁盘加载）：模型仍在
+    reloaded = ProviderStore(path)
+    assert [m.id for m in reloaded.get_provider("c1").models] == ["doubao-seed-1-6"]
+    assert reloaded.get_provider("c1").name == "火山改名"
+    # 保存过的密钥与模型不被后续"仅改名称"的更新破坏（空 Key 保留原值）
+    reloaded.update_provider("c1", {"name": "火山改名2"})
+    assert reloaded.get_provider("c1").api_key == ark_key
+    assert [m.id for m in reloaded.get_provider("c1").models] == ["doubao-seed-1-6"]
+    # 非法契约字段 -> ValueError（API 层转 400），而非静默吞掉
+    with pytest.raises(ValueError):
+        reloaded.update_provider("c1", {"models": [{"unknown_field": 1}]})
+
+
+def test_factory_choices_include_custom_provider_after_model_update(tmp_path):
+    """回归：自定义供应商配置模型后必须进入模型切换器候选（choices）。"""
+    store = ProviderStore(tmp_path / "providers.json")
+    factory = ProviderFactory(store)
+    store.create_provider({"id": "huoshan", "name": "火山", "base_url": "https://ark/v1"})
+    # 尚未配置模型：不进入候选（没有可选模型，语义正确）
+    assert all(c["provider_id"] != "huoshan" for c in factory.list_choices())
+    # 配置模型后：立即进入候选
+    store.update_provider("huoshan", {"models": [{"id": "doubao-seed-1-6"}]})
+    choices = {c["provider_id"]: c for c in factory.list_choices()}
+    assert "huoshan" in choices
+    assert [m["id"] for m in choices["huoshan"]["models"]] == ["doubao-seed-1-6"]
 
 
 # --------------------------------------------------------------------------- #
@@ -318,7 +372,7 @@ def test_factory_requires_key_for_default_dispatch(tmp_path):
     # 显式指定也要求启用 + 存在
     with pytest.raises(ProviderNotConfiguredError):
         factory.resolve("nope", "m")
-    store.update_provider("zhipu", {"api_key": "zhpu-key-1234567890"})
+    store.update_provider("zhipu", {"api_key": fake_key("zhipu")})
     adapter = factory.resolve("zhipu", "glm-4.5-flash")
     assert adapter.model_id == "glm-4.5-flash"
 
@@ -328,13 +382,13 @@ def test_request_scoped_model_dispatch(monkeypatch, tmp_path):
     from providers.context import dispatching_adapter, reset_dispatching_adapter
 
     store = ProviderStore(tmp_path / "providers.json")
-    store.update_provider("zhipu", {"api_key": "zhpu-key-1234567890"})
+    store.update_provider("zhipu", {"api_key": fake_key("zhipu")})
     store.create_provider(
         {
             "id": "proxy",
             "name": "中转",
             "base_url": "https://proxy/v1",
-            "api_key": "sk-proxy-000",
+            "api_key": fake_key("proxy"),
             "models": [{"id": "p-model"}],
         }
     )
@@ -415,20 +469,19 @@ def _start_server():
 
 
 def _req(port, method, path, payload=None, headers=None):
-    import urllib.error
-    import urllib.request
+    """测试 HTTP 客户端：显式回环地址 + http.client，目标仅限本地测试服务。"""
+    import http.client
 
-    url = f"http://127.0.0.1:{port}{path}"
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    for k, v in (headers or {}).items():
-        req.add_header(k, v)
+    hdrs = {"Content-Type": "application/json"}
+    hdrs.update(headers or {})
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status, json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read().decode())
+        conn.request(method, path, body=data, headers=hdrs)
+        resp = conn.getresponse()
+        return resp.status, json.loads(resp.read().decode())
+    finally:
+        conn.close()
 
 
 def test_providers_http_api_flow(tmp_path, monkeypatch):
@@ -457,6 +510,7 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
         status, body = _req(port, "GET", "/api/settings/providers", headers=H)
         assert status == 200 and any(p["id"] == "zhipu" for p in body["providers"])
         # 创建 -> Key 脱敏回显
+        http_api_key = fake_key("http-api")
         status, body = _req(
             port,
             "POST",
@@ -465,7 +519,7 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
                 "name": "API测试站",
                 "base_url": "https://api.test/v1",
                 "protocol": "openai_chat",
-                "api_key": "sk-api-test-987654321",
+                "api_key": http_api_key,
                 "models": [{"id": "t-model"}],
             },
             headers=H,
@@ -483,12 +537,12 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             headers=H,
         )
         assert status == 200 and body["provider"]["name"] == "API测试站2"
-        assert isolated.get_provider(created["id"]).api_key == "sk-api-test-987654321"
+        assert isolated.get_provider(created["id"]).api_key == http_api_key
         # 查看密钥（reveal）：认证后返回明文，未认证 401，未知 id 404
         status, body = _req(
             port, "POST", f"/api/settings/providers/{created['id']}/reveal", headers=H
         )
-        assert status == 200 and body["api_key"] == "sk-api-test-987654321"
+        assert status == 200 and body["api_key"] == http_api_key
         status, _ = _req(port, "POST", f"/api/settings/providers/{created['id']}/reveal")
         assert status == 401
         status, _ = _req(port, "POST", "/api/settings/providers/p_none/reveal", {"x": 1}, headers=H)

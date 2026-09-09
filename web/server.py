@@ -97,6 +97,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", MIME.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
+        # 前端脚本/样式更新必须即时生效：禁止浏览器缓存旧版 app.js，
+        # 否则修复后的交互逻辑（供应商/模型保存）对用户表现为"修了没生效"。
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Request-ID", get_request_id())
         self.end_headers()
         self.wfile.write(body)
