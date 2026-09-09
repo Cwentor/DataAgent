@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · FutureBI</title>
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+  <link rel="stylesheet" href="/static/login.css">
+</head>
+<body class="login-page">
+  <!-- 背景装饰光斑（玻璃拟态氛围） -->
+  <div class="glow glow-a" aria-hidden="true"></div>
+  <div class="glow glow-b" aria-hidden="true"></div>
+
+  <main class="login-stage">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="login-brand">
+        <span class="login-logo" aria-hidden="true">F</span>
+        <h1 id="login-title">FutureBI</h1>
+        <p class="login-slogan">Spec-Driven ChatBI · 自然语言 → DSL → 确定性 SQL → 结果 → 解释 + 图表</p>
+      </div>
+
+      <!-- 优雅的行内 Alert（替代生硬红底文本），aria-live 播报 -->
+      <div id="login-alert" class="login-alert hidden" role="alert" aria-live="assertive"></div>
+
+      <form id="login-form" novalidate>
+        <div class="field">
+          <label for="username">用户名</label>
+          <div class="control">
+            <span class="control-icon" aria-hidden="true">👤</span>
+            <input id="username" name="username" type="text" placeholder="请输入用户名"
+                   autocomplete="username" autofocus>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="password">密码</label>
+          <div class="control">
+            <span class="control-icon" aria-hidden="true">🔒</span>
+            <input id="password" name="password" type="password" placeholder="请输入密码"
+                   autocomplete="current-password">
+            <button type="button" id="pw-eye" class="pw-eye" title="显示 / 隐藏密码"
+                    aria-label="显示或隐藏密码" aria-pressed="false">👁</button>
+          </div>
+        </div>
+
+        <label class="remember-row" for="remember">
+          <input id="remember" name="remember" type="checkbox">
+          <span>记住我</span>
+        </label>
+
+        <button id="login-btn" type="submit" class="login-submit">
+          <span class="spinner hidden" aria-hidden="true"></span>
+          <span class="submit-text">登 录</span>
+        </button>
+      </form>
+
+      <p class="login-hint">演示账号：admin / admin123 · analyst / analyst123</p>
+    </section>
+
+    <footer class="login-footer">FutureBI · MIT · 本地 DuckDB 沙箱 · 统一身份认证 + 服务端强制 principal</footer>
+  </main>
+
+  <script src="/static/login.js"></script>
+</body>
+</html>

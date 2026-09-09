@@ -1,3 +1,11 @@
+/* FutureBI 主控制台前端逻辑。
+ *
+ * 鉴权铁律（P0）：
+ * - 页面启动只允许先调用轻量身份校验端点 /api/auth/me；校验通过前严禁发起
+ *   任何业务与配置 API（/api/query、/api/settings/providers 等）；
+ * - 未登录一律重定向 /login（保留 redirect_url），业务页面不承载未登录态；
+ * - 任意受保护 API 返回 401 => 全局登出（清凭证 + 跳转登录页）。
+ */
 (function () {
   "use strict";
 
@@ -5,6 +13,11 @@
   var $ = function (id) { return document.getElementById(id); };
   var TOKEN_KEY = "futurebi_token";
   var SESSION_KEY = "futurebi_session";
+  var SID_KEY = "futurebi_sid";
+  var CURRENT_SELECTION_KEY = "futurebi_model_selection";
+  var LOGIN_PATH = "/login";
+
+  var authExpiredHandled = false; // 防止并发 401 触发多次跳转
 
   function esc(s) {
     return String(s == null ? "" : s)
@@ -41,16 +54,38 @@
     }, type === "err" ? 6000 : 3000);
   }
 
-  // ---------------------------------------------------------------- 鉴权
-  function getToken() { try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
-  function setToken(t) { try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) {} }
-  function clearToken() { try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {} }
-  // 服务端签发的会话 ID（多轮上下文载体；跨轮查询必须复用同一会话）
-  var SID_KEY = "futurebi_sid";
-  function getSid() { try { return sessionStorage.getItem(SID_KEY) || ""; } catch (e) { return ""; } }
-  function setSid(s) { try { sessionStorage.setItem(SID_KEY, s); } catch (e) {} }
-  function clearSid() { try { sessionStorage.removeItem(SID_KEY); } catch (e) {} }
+  // ---------------------------------------------------------------- 凭证存取
+  function localGet(key) { try { return localStorage.getItem(key) || ""; } catch (e) { return ""; } }
+  function sessionGet(key) { try { return sessionStorage.getItem(key) || ""; } catch (e) { return ""; } }
+  function sessionSet(key, v) { try { sessionStorage.setItem(key, v); } catch (e) { /* 忽略 */ } }
 
+  // Token：优先「记住我」的 localStorage，其次本标签页 sessionStorage
+  function getToken() { return sessionGet(TOKEN_KEY) || localGet(TOKEN_KEY); }
+  function getSid() { return sessionGet(SID_KEY) || localGet(SESSION_KEY) || ""; }
+  function clearCredentials() {
+    try {
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(SID_KEY);
+      sessionStorage.removeItem(CURRENT_SELECTION_KEY);
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(SESSION_KEY);
+    } catch (e) { /* 忽略 */ }
+  }
+
+  function redirectToLogin(msg) {
+    if (authExpiredHandled) { return; }
+    authExpiredHandled = true;
+    clearCredentials();
+    var target = window.location.pathname + window.location.search;
+    var url = LOGIN_PATH + "?redirect_url=" + encodeURIComponent(target);
+    if (msg) {
+      try { sessionStorage.setItem("futurebi_logout_reason", msg); } catch (e) { /* 忽略 */ }
+    }
+    window.location.replace(url);
+  }
+
+  // ---------------------------------------------------------------- 统一 API 封装
+  // 所有受保护 API 都经过这里：自动携带 Bearer / X-Session-ID，并全局拦截 401。
   function api(path, opts) {
     opts = opts || {};
     opts.headers = opts.headers || {};
@@ -61,73 +96,113 @@
     return fetch(path, opts).then(function (r) {
       return r.json().then(function (data) {
         if (r.status === 401) {
-          // 会话失效 -> 回到登录态
-          clearToken();
-          clearSid();
-          showLogin();
+          // 会话过期 / 凭证失效：全局登出并回到登录页
+          redirectToLogin("会话已过期，请重新登录");
+        } else if (r.status === 403 && !(data && data.error)) {
+          data = { error: "没有权限执行该操作" };
         }
         return data;
       });
     });
   }
 
-  function showLogin() {
-    $("login-form").classList.remove("hidden");
-    $("userinfo").classList.add("hidden");
-  }
-
-  function showUser(user) {
-    $("login-form").classList.add("hidden");
-    $("userinfo").classList.remove("hidden");
-    $("display-name").textContent = user.display_name + "（" + user.username + "）";
-    var badge = $("principal-badge");
-    badge.textContent = "主体：" + user.principal;
-    badge.title = "数据权限主体由服务端从身份映射，客户端不可指定";
-  }
-
-  function login() {
-    var username = $("username").value.trim();
-    var password = $("password").value;
-    if (!username || !password) { showError("请输入用户名与口令"); return; }
-    var btn = $("login-btn");
-    btn.disabled = true; btn.textContent = "登录中…";
-    hideError();
-    fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: username, password: password })
-    })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.token) {
-          setToken(data.token);
-          if (data.session_id) { setSid(data.session_id); }
-          $("password").value = "";
-          showUser(data.user);
-          fillModelSwitch();  // 登录后拉取供应商模型候选（模型切换器数据源）
-        } else {
-          showError(data.error || "登录失败");
+  // ---------------------------------------------------------------- 启动引导（Auth Guard）
+  // 页面加载只先做身份校验；校验通过后才允许初始化业务数据。
+  function boot() {
+    var token = getToken();
+    var headers = {};
+    if (token) { headers.Authorization = "Bearer " + token; }
+    if (getSid()) { headers["X-Session-ID"] = getSid(); }
+    fetch("/api/auth/me", { headers: headers })
+      .then(function (r) {
+        if (r.status === 401 && token) {
+          // 本地凭证已失效：清除后留在登录页
+          redirectToLogin(null);
+          return null;
         }
+        return r.json();
       })
-      .catch(function (err) { showError("登录请求失败：" + err); })
-      .finally(function () { btn.disabled = false; btn.textContent = "登录"; });
+      .then(function (data) {
+        if (data && data.username) { initConsole(data); }
+        else { redirectToLogin(null); }
+      })
+      .catch(function () { redirectToLogin(null); });
   }
 
-  function logout() {
-    fetch("/api/auth/logout", { method: "POST" }).then(function () {
-      clearToken();
-      showLogin();
-    }).catch(function () {
-      clearToken();
-      showLogin();
+  function initConsole(user) {
+    renderUserCenter(user);
+    bindEvents();
+    resetWorkspace();
+    // 启动不自动拉取供应商配置：配置属用户主动行为（不强制配置），
+    // 统一入口为 Header「⚙ 设置」/ 用户菜单；打开设置时才请求列表，
+    // 关闭设置后经 fillModelSwitch 刷新模型指示器与引导横幅。
+  }
+
+  function resetWorkspace() {
+    $("steps").innerHTML = "<div class='step-empty'>输入问题并点击「查询」，这里将展示 Agent 的工具调度轨迹。</div>";
+    $("dsl").textContent = "— 尚未生成 —";
+    $("sql").textContent = "— 尚未生成 —";
+    $("explain").textContent = "— 尚未生成 —";
+    $("chart").innerHTML = "<div class='placeholder'>— 尚未生成 —</div>";
+    $("table").innerHTML = "<div class='placeholder'>— 尚未生成 —</div>";
+  }
+
+  // ---------------------------------------------------------------- 用户中心
+  var ROLE_LABELS = { admin: "Admin", analyst: "Analyst", ops: "Ops" };
+  function roleLabel(r) { return ROLE_LABELS[r] || r.charAt(0).toUpperCase() + r.slice(1); }
+
+  function renderUserCenter(user) {
+    var initial = (user.display_name || user.username || "?").trim().charAt(0).toUpperCase();
+    $("user-avatar").textContent = initial;
+    $("display-name").textContent = user.display_name || user.username;
+    var roles = (user.roles || []).map(roleLabel).join(" / ") || "Member";
+    $("user-roles").textContent = roles;
+    $("menu-display-name").textContent = (user.display_name || user.username) + "（" + user.username + "）";
+    $("menu-principal").textContent = "主体：" + user.principal + " · 权限由服务端映射";
+
+    var btn = $("user-menu-btn");
+    var menu = $("user-menu");
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var open = menu.classList.toggle("hidden");
+      btn.setAttribute("aria-expanded", open ? "false" : "true");
+    });
+    document.addEventListener("click", function (e) {
+      if (!$("user-center").contains(e.target)) { closeUserMenu(); }
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { closeUserMenu(); }
+    });
+
+    $("menu-profile").addEventListener("click", function () {
+      closeUserMenu();
+      toast("当前主体：" + user.principal + "，角色：" + roles + "（权限由服务端强制映射）", "info");
+    });
+    $("menu-model-settings").addEventListener("click", function () {
+      closeUserMenu();
+      openSettings();
+    });
+    $("menu-logout").addEventListener("click", function () {
+      closeUserMenu();
+      logout();
     });
   }
 
-  function restoreSession() {
-    api("/api/auth/me").then(function (data) {
-      if (data && data.username) { showUser(data); fillModelSwitch(); }
-      else { showLogin(); }
-    }).catch(function () { showLogin(); });
+  function closeUserMenu() {
+    $("user-menu").classList.add("hidden");
+    $("user-menu-btn").setAttribute("aria-expanded", "false");
+  }
+
+  function logout() {
+    var headers = { "Content-Type": "application/json" };
+    var token = getToken();
+    if (token) { headers.Authorization = "Bearer " + token; }
+    var sid = getSid();
+    if (sid) { headers["X-Session-ID"] = sid; }
+    // 无论服务端吊销是否成功，本地一律清除凭证并回登录页
+    fetch("/api/auth/logout", { method: "POST", headers: headers })
+      .catch(function () { /* 忽略网络错误 */ })
+      .finally(function () { redirectToLogin("已安全退出登录"); });
   }
 
   // ---------------------------------------------------------------- 表格
@@ -244,7 +319,7 @@
     else { box.textContent = "该结果以表格形式展示"; }
   }
 
-  // 透视表（pivot）真实渲染：完整分组表格 + 维度/指标说明提示（报告整改指令3-1）
+  // 透视表（pivot）真实渲染：完整分组表格 + 维度/指标说明提示
   function renderPivot(viz, columns, rows) {
     var box = $("chart");
     box.innerHTML = "";
@@ -343,7 +418,6 @@
   }
 
   function renderInsight(data) {
-    // 综合洞察：多轮上下文说明 + 工具答案 + 导出下载链接
     var html = "";
     if (data.context_summary) {
       html += "<div class='ctx-summary'>🔁 " + esc(data.context_summary) + "</div>";
@@ -363,13 +437,12 @@
   var CAPABILITY_LABELS = { vision: "视觉", function_calling: "函数调用", json_schema: "JSON Schema" };
   var providers = [];          // 全量供应商（脱敏视图）
   var currentProviderId = "";  // 设置面板当前编辑的供应商
-  var CURRENT_SELECTION_KEY = "futurebi_model_selection";
 
   function getCurrentSelection() {
     try { return sessionStorage.getItem(CURRENT_SELECTION_KEY) || ""; } catch (e) { return ""; }
   }
   function setCurrentSelection(v) {
-    try { sessionStorage.setItem(CURRENT_SELECTION_KEY, v); } catch (e) {}
+    try { sessionStorage.setItem(CURRENT_SELECTION_KEY, v); } catch (e) { /* 忽略 */ }
   }
 
   function selectedProviderModel() {
@@ -378,6 +451,24 @@
     if (!v) return {};
     var idx = v.indexOf("|");
     return { provider_id: v.slice(0, idx), model_id: v.slice(idx + 1) };
+  }
+
+  // Header 模型状态指示 + 引导横幅：供应商候选变化 / 用户切换后统一刷新
+  function updateModelIndicator() {
+    var sel = $("model-switch");
+    var text = $("model-indicator-text");
+    var dot = $("model-dot");
+    var options = Array.prototype.slice.call(sel.options || []);
+    var hasChoice = options.length > 1; // 除「默认模型」外还有候选
+    if (sel.value) {
+      var opt = sel.options[sel.selectedIndex];
+      text.textContent = opt ? opt.textContent.replace(/\s+·.*$/, "") : "默认模型";
+    } else {
+      text.textContent = hasChoice ? "默认模型（自动选择）" : "未配置模型";
+    }
+    dot.classList.toggle("off", !hasChoice);
+    // 引导横幅：无任何可用模型时展示（不打断用户）
+    $("model-banner").classList.toggle("hidden", hasChoice);
   }
 
   function fillModelSwitch() {
@@ -398,11 +489,13 @@
       if (saved && sel.querySelector("option[value='" + saved.replace(/"/g, '\\"') + "']")) {
         sel.value = saved;
       }
+      updateModelIndicator();
     });
   }
 
   function fetchModelChoices(cb) {
     api("/api/settings/providers").then(function (data) {
+      if (!data || data.error) { cb([]); return; }
       providers = data.providers || [];
       renderProviderList();
       cb(data.choices || []);
@@ -535,11 +628,11 @@
   }
 
   function handleSaved(data) {
+    if (!data) { return; }
     if (data.error) { toast(data.error, "err"); return; }
     toast("供应商配置已保存", "ok");
     currentProviderId = data.provider ? data.provider.id : currentProviderId;
     fetchModelChoices(function () { openProvider(currentProviderId); });
-    refreshModelSwitch();
   }
 
   function deleteProvider() {
@@ -547,14 +640,25 @@
     if (!window.confirm("确认删除该供应商？删除后不可恢复。")) { return; }
     api("/api/settings/providers/" + encodeURIComponent(currentProviderId), { method: "DELETE" })
       .then(function (data) {
+        if (!data) { return; }
         if (data.error) { toast(data.error, "err"); return; }
         toast("供应商已删除", "ok");
         currentProviderId = "";
         $("provider-form").classList.add("hidden");
         $("provider-empty").classList.remove("hidden");
         fetchModelChoices(function () {});
-        refreshModelSwitch();
       });
+  }
+
+  // 供应商侧错误 -> 可理解提示（避免模糊的 "unauthorized" 直出）
+  function friendlyProviderError(msg) {
+    var s = String(msg || "");
+    if (/鉴权|401|unauthorized|invalid.{0,12}key|api.?key|密钥/i.test(s)) {
+      return "API Key 无效或提供商连通失败，请检查密钥与 Base URL";
+    }
+    if (/429|配额|rate.?limit|限流/i.test(s)) { return "模型服务配额超限或被限流，请稍后再试"; }
+    if (/timed? ?out|超时/i.test(s)) { return "连接模型服务超时，请检查网络或 Base URL"; }
+    return s;
   }
 
   function testConnection(extra) {
@@ -577,10 +681,12 @@
     if (!payload.model_id) { toast("请先添加或填写要测试的模型 ID", "err"); return; }
     var btn = $("pf-test");
     btn.disabled = true; btn.textContent = "测试中…";
+    // api() 自动携带 Authorization: Bearer <token>（模块四：请求鉴权绑定）
     api("/api/settings/providers/test", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     }).then(function (data) {
+      if (!data) { return; }
       var box = $("pf-test-result");
       box.classList.remove("hidden");
       if (data.success) {
@@ -588,9 +694,10 @@
         box.textContent = "✓ 连接成功 · 延时 " + fmt(data.latency_ms) + " ms";
         toast("连接成功（" + fmt(data.latency_ms) + " ms）", "ok");
       } else {
+        var msg = friendlyProviderError(data.error || "连接失败");
         box.className = "test-result fail";
-        box.textContent = "✗ " + (data.error || "连接失败");
-        toast(data.error || "连接失败", "err");
+        box.textContent = "✗ " + msg;
+        toast(msg, "err");
       }
     }).catch(function (err) {
       toast("测试请求失败：" + err, "err");
@@ -599,25 +706,27 @@
     });
   }
 
-  function refreshModelSwitch() {
-    fillModelSwitch();
-  }
-
   function openSettings() {
     $("settings-modal").classList.remove("hidden");
     fetchModelChoices(function () {});
   }
   function closeSettings() {
     $("settings-modal").classList.add("hidden");
-    refreshModelSwitch();
+    fillModelSwitch();
   }
 
   function initSettingsUi() {
-    $("settings-btn").addEventListener("click", openSettings);
     $("settings-close").addEventListener("click", closeSettings);
     $("settings-modal").addEventListener("click", function (e) {
       if (e.target === $("settings-modal")) { closeSettings(); }
     });
+    // Esc 也可关闭设置弹窗（避免任何情况下被困在配置界面）
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && !$("settings-modal").classList.contains("hidden")) {
+        closeSettings();
+      }
+    });
+    $("goto-model-settings").addEventListener("click", openSettings);
     $("provider-add").addEventListener("click", openNewProvider);
     $("pf-model-add").addEventListener("click", function () {
       var input = $("pf-model-input");
@@ -639,8 +748,11 @@
     $("pf-save").addEventListener("click", saveProvider);
     $("pf-delete").addEventListener("click", deleteProvider);
     $("pf-test").addEventListener("click", function () { testConnection(null); });
+    // 常驻设置入口：Header「⚙ 设置」与用户菜单项共用同一弹窗
+    $("settings-btn").addEventListener("click", openSettings);
     $("model-switch").addEventListener("change", function () {
       setCurrentSelection($("model-switch").value);
+      updateModelIndicator();
       var sel = selectedProviderModel();
       if (sel.provider_id) {
         toast("本次查询将使用：" + sel.provider_id + " / " + sel.model_id, "info");
@@ -650,6 +762,7 @@
 
   // ---------------------------------------------------------------- 主流程
   function render(data) {
+    if (!data) { return; }
     clearPipeline();
     clearAnswer();
     renderSteps(data.steps);
@@ -669,7 +782,7 @@
     }
     if (data.error) {
       showError(data.error);
-      // 供应商错误（鉴权失败 / 配额超限 / 超时等）额外 Toast 可理解提示（DoD 4）
+      // 供应商错误（鉴权失败 / 配额超限 / 超时等）额外 Toast 可理解提示
       if (/模型服务|鉴权|配额|供应商/.test(data.error)) { toast(data.error, "err"); }
       return;
     }
@@ -685,12 +798,13 @@
   function run() {
     var q = $("query").value.trim();
     if (!q) { showError("请输入问题"); return; }
-    if (!getToken()) { showError("请先登录后再查询"); return; }
+    // Auth Guard 保证本页面只会在已登录时渲染；这里不再出现
+    // 「请先登录后再查询」红色警告条（模块三：空状态占位优化）。
     hideError();
     var btn = $("run");
     btn.disabled = true;
     btn.textContent = "查询中…";
-    // 客户端不再提交 principal：主体由服务端从身份映射（P0）。
+    // 客户端不提交 principal：主体由服务端从身份映射（P0）。
     // 模型切换器取值随请求透传 provider_id / model_id（请求级模型切换）
     var payload = { query: q };
     var sel = selectedProviderModel();
@@ -708,12 +822,12 @@
       });
   }
 
-  $("login-btn").addEventListener("click", function (e) { e.preventDefault(); login(); });
-  $("login-form").addEventListener("submit", function (e) { e.preventDefault(); login(); });
-  $("logout-btn").addEventListener("click", logout);
-  $("run").addEventListener("click", run);
-  $("query").addEventListener("keydown", function (e) { if (e.key === "Enter") run(); });
-  initSettingsUi();
-  restoreSession();
-  run();
+  function bindEvents() {
+    initSettingsUi();
+    $("run").addEventListener("click", run);
+    $("query").addEventListener("keydown", function (e) { if (e.key === "Enter") run(); });
+  }
+
+  // Auth Guard 入口：校验通过前不发起任何业务/配置 API
+  boot();
 })();

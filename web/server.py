@@ -4,7 +4,8 @@
     python -m web.server [端口]     # 默认 8000
 
 公开路由:
-    GET  /              -> 前端页面
+    GET  /              -> 前端主控制台（业务页面）
+    GET  /login         -> 独立登录页（未登录强制落地页）
     GET  /static/*      -> 静态资源
     GET  /api/health    -> 健康检查
     POST /api/auth/login   -> 登录：校验用户名/口令，签发 JWT + 会话
@@ -148,6 +149,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._protected(providers_api.list_providers)
         if parsed.path in ("/", "/index.html"):
             return self._send_file("index.html")
+        if parsed.path == "/login":
+            return self._send_file("login.html")
         rel = parsed.path[len("/static/") :] if parsed.path.startswith("/static/") else ""
         return self._send_file(rel)
 
