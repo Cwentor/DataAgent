@@ -1,15 +1,18 @@
-/* DataAgent 主控制台前端逻辑。
+/* DataAgent 主控制台前端逻辑（双栏 Data Agent 工作台）。
  *
  * 鉴权铁律（P0）：
  * - 页面启动只允许先调用轻量身份校验端点 /api/auth/me；校验通过前严禁发起
  *   任何业务与配置 API（/api/query、/api/settings/providers 等）；
  * - 未登录一律重定向 /login（保留 redirect_url），业务页面不承载未登录态；
  * - 任意受保护 API 返回 401 => 全局登出（清凭证 + 跳转登录页）。
+ *
+ * 主流程（SSE 事件驱动）：
+ *   提问 -> GET /api/v1/agent/chat/stream（fetch 流式）-> AgentStreamEvent
+ *   -> AgentStore（plan/timeline/artifacts/hitl）-> 左栏执行流 + 右栏产物画布。
  */
 (function () {
   "use strict";
 
-  var COLORS = ["#4f6ef7", "#22b8cf", "#12b886", "#f59f00", "#e64980", "#845ef7", "#74b816", "#f76707"];
   var $ = function (id) { return document.getElementById(id); };
   var TOKEN_KEY = "dataagent_token";
   var SESSION_KEY = "dataagent_session";
@@ -18,18 +21,15 @@
   var LOGIN_PATH = "/login";
 
   var authExpiredHandled = false; // 防止并发 401 触发多次跳转
+  var activeStream = null;        // 当前 SSE StreamHandle
 
   function esc(s) {
     return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
   function fmt(v) {
-    if (typeof v === "number") {
-      return v.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
-    }
+    if (typeof v === "number") { return v.toLocaleString("zh-CN", { maximumFractionDigits: 2 }); }
     return String(v == null ? "" : v);
   }
 
@@ -59,7 +59,6 @@
   function sessionGet(key) { try { return sessionStorage.getItem(key) || ""; } catch (e) { return ""; } }
   function sessionSet(key, v) { try { sessionStorage.setItem(key, v); } catch (e) { /* 忽略 */ } }
 
-  // Token：优先「记住我」的 localStorage，其次本标签页 sessionStorage
   function getToken() { return sessionGet(TOKEN_KEY) || localGet(TOKEN_KEY); }
   function getSid() { return sessionGet(SID_KEY) || localGet(SESSION_KEY) || ""; }
   function clearCredentials() {
@@ -84,8 +83,10 @@
     window.location.replace(url);
   }
 
+  // 全局 401 钩子（stream.js 等低层模块经由 window.App.onAuthExpired 上抛）
+  window.App = { onAuthExpired: function (msg) { redirectToLogin(msg); } };
+
   // ---------------------------------------------------------------- 统一 API 封装
-  // 所有受保护 API 都经过这里：自动携带 Bearer / X-Session-ID，并全局拦截 401。
   function api(path, opts) {
     opts = opts || {};
     opts.headers = opts.headers || {};
@@ -96,7 +97,6 @@
     return fetch(path, opts).then(function (r) {
       return r.json().then(function (data) {
         if (r.status === 401) {
-          // 会话过期 / 凭证失效：全局登出并回到登录页
           redirectToLogin("会话已过期，请重新登录");
         } else if (r.status === 403 && !(data && data.error)) {
           data = { error: "没有权限执行该操作" };
@@ -107,7 +107,6 @@
   }
 
   // ---------------------------------------------------------------- 启动引导（Auth Guard）
-  // 页面加载只先做身份校验；校验通过后才允许初始化业务数据。
   function boot() {
     var token = getToken();
     var headers = {};
@@ -116,7 +115,6 @@
     fetch("/api/auth/me", { headers: headers })
       .then(function (r) {
         if (r.status === 401 && token) {
-          // 本地凭证已失效：清除后留在登录页
           redirectToLogin(null);
           return null;
         }
@@ -131,20 +129,21 @@
 
   function initConsole(user) {
     renderUserCenter(user);
+    AgentStreamUI.init();
+    AgentCanvas.init();
+    initAgentStatus();
     bindEvents();
-    resetWorkspace();
-    // 恢复模型切换器候选（只读既有配置：不弹窗、不强制配置）；
-    // 供应商列表本身仍按需在「设置」打开时才请求，供面板编辑使用。
     fillModelSwitch();
   }
 
-  function resetWorkspace() {
-    $("steps").innerHTML = "<div class='step-empty'>输入问题并点击「查询」，这里将展示 Agent 的工具调度轨迹。</div>";
-    $("dsl").textContent = "— 尚未生成 —";
-    $("sql").textContent = "— 尚未生成 —";
-    $("explain").textContent = "— 尚未生成 —";
-    $("chart").innerHTML = "<div class='placeholder'>— 尚未生成 —</div>";
-    $("table").innerHTML = "<div class='placeholder'>— 尚未生成 —</div>";
+  // ---------------------------------------------------------------- Agent 状态灯
+  var STATUS_TEXT = { idle: "空闲", planning: "规划中", executing: "执行中", awaiting: "等待用户输入" };
+  function initAgentStatus() {
+    AgentStore.subscribe("agentStatus", function (state) {
+      var el = $("agent-status");
+      el.className = "agent-status " + state.agentStatus;
+      $("agent-status-text").textContent = STATUS_TEXT[state.agentStatus] || state.agentStatus;
+    });
   }
 
   // ---------------------------------------------------------------- 用户中心
@@ -199,232 +198,10 @@
     if (token) { headers.Authorization = "Bearer " + token; }
     var sid = getSid();
     if (sid) { headers["X-Session-ID"] = sid; }
-    // 无论服务端吊销是否成功，本地一律清除凭证并回登录页
+    if (activeStream) { activeStream.abort(); }
     fetch("/api/auth/logout", { method: "POST", headers: headers })
       .catch(function () { /* 忽略网络错误 */ })
       .finally(function () { redirectToLogin("已安全退出登录"); });
-  }
-
-  // ---------------------------------------------------------------- 表格
-  function renderTable(columns, rows) {
-    var box = $("table");
-    box.innerHTML = "";
-    if (!columns || !columns.length) { box.textContent = "（无结果）"; return; }
-    var html = "<table><thead><tr>";
-    for (var i = 0; i < columns.length; i++) html += "<th>" + esc(columns[i]) + "</th>";
-    html += "</tr></thead><tbody>";
-    for (var r = 0; r < rows.length; r++) {
-      html += "<tr>";
-      for (var c = 0; c < rows[r].length; c++) {
-        var v = rows[r][c];
-        var cls = typeof v === "number" ? ' class="num"' : "";
-        html += "<td" + cls + ">" + esc(fmt(v)) + "</td>";
-      }
-      html += "</tr>";
-    }
-    html += "</tbody></table>";
-    box.innerHTML = html;
-  }
-
-  // ---------------------------------------------------------------- 图表
-  function numberCard(viz, columns, rows) {
-    var v = rows.length ? rows[0][0] : 0;
-    var label = viz.y || (columns.length ? columns[0] : "");
-    return "<div><div class='kpi'>" + esc(fmt(v)) + "</div><div class='kpi-label'>" + esc(label) + "</div></div>";
-  }
-
-  function bars(viz, columns, rows) {
-    var W = 560, H = 300, padL = 40, padB = 60, padT = 20, padR = 20;
-    var innerW = W - padL - padR, innerH = H - padT - padB;
-    var vals = rows.map(function (r) { return Number(r[1]); });
-    var max = Math.max.apply(null, vals.concat([1]));
-    var n = rows.length;
-    var band = innerW / Math.max(n, 1);
-    var barW = Math.min(band * 0.6, 48);
-    var s = "<svg viewBox='0 0 " + W + " " + H + "' xmlns='http://www.w3.org/2000/svg'>";
-    for (var i = 0; i < n; i++) {
-      var h = (vals[i] / max) * innerH;
-      var x = padL + i * band + (band - barW) / 2;
-      var y = padT + innerH - h;
-      s += "<rect x='" + x.toFixed(1) + "' y='" + y.toFixed(1) + "' width='" + barW.toFixed(1) + "' height='" + h.toFixed(1) + "' rx='3' fill='" + COLORS[i % COLORS.length] + "'></rect>";
-      s += "<text x='" + (x + barW / 2).toFixed(1) + "' y='" + (padT + innerH + 16) + "' text-anchor='middle' font-size='11' fill='#6b7280'>" + esc(String(rows[i][0])) + "</text>";
-    }
-    s += "</svg>";
-    return s;
-  }
-
-  function pie(viz, columns, rows) {
-    var W = 560, H = 300, cx = 150, cy = 150, r = 110;
-    var vals = rows.map(function (r) { return Number(r[1]); });
-    var total = vals.reduce(function (a, b) { return a + b; }, 0) || 1;
-    var angle = -Math.PI / 2;
-    var s = "<svg viewBox='0 0 " + W + " " + H + "' xmlns='http://www.w3.org/2000/svg'>";
-    for (var i = 0; i < vals.length; i++) {
-      var frac = vals[i] / total;
-      var end = angle + frac * 2 * Math.PI;
-      var x1 = cx + r * Math.cos(angle), y1 = cy + r * Math.sin(angle);
-      var x2 = cx + r * Math.cos(end), y2 = cy + r * Math.sin(end);
-      var large = frac > 0.5 ? 1 : 0;
-      s += "<path d='M " + cx + " " + cy + " L " + x1.toFixed(2) + " " + y1.toFixed(2) + " A " + r + " " + r + " 0 " + large + " 1 " + x2.toFixed(2) + " " + y2.toFixed(2) + " Z' fill='" + COLORS[i % COLORS.length] + "'></path>";
-      angle = end;
-    }
-    var lx = 300, ly = 40;
-    for (var j = 0; j < rows.length && j < 10; j++) {
-      var pct = (vals[j] / total * 100).toFixed(1);
-      s += "<rect x='" + lx + "' y='" + (ly + j * 24) + "' width='12' height='12' rx='2' fill='" + COLORS[j % COLORS.length] + "'></rect>";
-      s += "<text x='" + (lx + 18) + "' y='" + (ly + j * 24 + 11) + "' font-size='12' fill='#1a1d2e'>" + esc(String(rows[j][0]) + " (" + pct + "%)") + "</text>";
-    }
-    s += "</svg>";
-    return s;
-  }
-
-  function line(viz, columns, rows) {
-    var W = 560, H = 300, padL = 50, padB = 60, padT = 20, padR = 20;
-    var innerW = W - padL - padR, innerH = H - padT - padB;
-    var vals = rows.map(function (r) { return Number(r[1]); });
-    var max = Math.max.apply(null, vals.concat([1]));
-    var n = rows.length;
-    var pts = "";
-    for (var i = 0; i < n; i++) {
-      var x = padL + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
-      var y = padT + innerH - (vals[i] / max) * innerH;
-      pts += (i ? " " : "") + x.toFixed(1) + "," + y.toFixed(1);
-    }
-    var s = "<svg viewBox='0 0 " + W + " " + H + "' xmlns='http://www.w3.org/2000/svg'>";
-    s += "<polyline points='" + pts + "' fill='none' stroke='#4f6ef7' stroke-width='2.5'></polyline>";
-    var step = Math.max(1, Math.floor((n - 1) / 8));
-    for (var k = 0; k < n; k++) {
-      var lx = padL + (n === 1 ? innerW / 2 : (k / (n - 1)) * innerW);
-      var ly = padT + innerH - (vals[k] / max) * innerH;
-      s += "<circle cx='" + lx.toFixed(1) + "' cy='" + ly.toFixed(1) + "' r='3' fill='#4f6ef7'></circle>";
-      if (k % step === 0 || k === n - 1) {
-        var label = String(rows[k][0]).slice(0, 10);
-        s += "<text x='" + lx.toFixed(1) + "' y='" + (padT + innerH + 16) + "' text-anchor='middle' font-size='11' fill='#6b7280'>" + esc(label) + "</text>";
-      }
-    }
-    s += "</svg>";
-    return s;
-  }
-
-  function renderChart(viz, columns, rows) {
-    var box = $("chart");
-    box.innerHTML = "";
-    if (!viz || !rows || !rows.length) { box.textContent = "（无数据）"; return; }
-    var chart = viz.chart;
-    if (chart === "number") { box.innerHTML = numberCard(viz, columns, rows); }
-    else if (chart === "bar") { box.innerHTML = bars(viz, columns, rows); }
-    else if (chart === "pie") { box.innerHTML = pie(viz, columns, rows); }
-    else if (chart === "line") { box.innerHTML = line(viz, columns, rows); }
-    else if (chart === "pivot") { renderPivot(viz, columns, rows); }
-    else { box.textContent = "该结果以表格形式展示"; }
-  }
-
-  // 透视表（pivot）真实渲染：完整分组表格 + 维度/指标说明提示
-  function renderPivot(viz, columns, rows) {
-    var box = $("chart");
-    box.innerHTML = "";
-    var html = "<div class='pivot-note'>多维结果以分组表格展示（维度："
-      + esc((viz.x || "—")) + "；指标：" + esc((viz.y || "—")) + "）</div>";
-    html += "<div class='table-wrap'><table><thead><tr>";
-    for (var i = 0; i < columns.length; i++) html += "<th>" + esc(columns[i]) + "</th>";
-    html += "</tr></thead><tbody>";
-    for (var r = 0; r < rows.length; r++) {
-      html += "<tr>";
-      for (var c = 0; c < rows[r].length; c++) {
-        var v = rows[r][c];
-        var cls = typeof v === "number" ? ' class="num"' : "";
-        html += "<td" + cls + ">" + esc(fmt(v)) + "</td>";
-      }
-      html += "</tr>";
-    }
-    html += "</tbody></table></div>";
-    box.innerHTML = html;
-  }
-
-  // ---------------------------------------------------------------- 意图路由结果
-  function clearAnswer() {
-    $("answer").classList.add("hidden");
-    $("answer-title").textContent = "";
-    $("answer-body").innerHTML = "";
-  }
-
-  function showAnswer(title, html) {
-    $("answer-title").textContent = title;
-    $("answer-body").innerHTML = html;
-    $("answer").classList.remove("hidden");
-  }
-
-  function clearPipeline() {
-    $("steps").innerHTML = "";
-    $("dsl").textContent = "";
-    $("sql").textContent = "";
-    $("explain").textContent = "";
-    $("chart").innerHTML = "";
-    $("table").innerHTML = "";
-  }
-
-  function renderClarifications(clarifications) {
-    var items = (clarifications || []).map(function (c) {
-      var tag = c.kind === "missing_time_window" ? "缺少时间窗口" : "未定义指标";
-      return "<div class='clarify-item'><span class='clarify-tag'>" + esc(tag) + "</span>"
-        + "<span>" + esc(c.question) + "</span></div>";
-    }).join("");
-    showAnswer("需要补充信息", items || "请补充更多信息后再查询。");
-  }
-
-  function renderDocuments(documents) {
-    var items = (documents || []).map(function (d) {
-      return "<div class='doc-item'><div class='doc-title'>" + esc(d.title) + "</div>"
-        + "<div class='doc-def'>" + esc(d.definition) + "</div>"
-        + "<code class='doc-formula'>" + esc(d.formula) + "</code></div>";
-    }).join("");
-    showAnswer("口径文档（RAG 检索结果）", items || "未检索到相关口径文档。");
-  }
-
-  // ---------------------------------------------------------------- 调度轨迹 + 导出下载
-  function renderSteps(steps) {
-    var box = $("steps");
-    box.innerHTML = "";
-    if (!steps || !steps.length) {
-      box.innerHTML = "<div class='step-empty'>本次未调用工具（直接回答 / 澄清 / 闲聊）</div>";
-      return;
-    }
-    var html = "<ol class='step-list'>";
-    for (var i = 0; i < steps.length; i++) {
-      var s = steps[i];
-      var badge = s.success
-        ? "<span class='step-badge ok'>成功</span>"
-        : "<span class='step-badge fail'>失败</span>";
-      var args = s.args ? esc(JSON.stringify(s.args, null, 1)) : "";
-      var err = s.error_msg ? "<div class='step-err'>" + esc(s.error_msg) + "</div>" : "";
-      html += "<li class='step-item'>"
-        + "<div class='step-head'><span class='step-tool'>" + esc(s.tool) + "</span>"
-        + badge
-        + "<span class='step-dur'>" + fmt(s.duration_ms) + " ms</span></div>"
-        + "<pre class='step-args'>" + args + "</pre>"
-        + err
-        + "</li>";
-    }
-    html += "</ol>";
-    box.innerHTML = html;
-  }
-
-  function renderDownloads(urls) {
-    if (!urls || !urls.length) { return ""; }
-    var links = urls.map(function (u) {
-      return "<a class='dl-link' href='" + esc(u) + "' download>⬇ 下载导出文件</a>";
-    }).join(" ");
-    return "<div class='downloads'>" + links + "</div>";
-  }
-
-  function renderInsight(data) {
-    var html = "";
-    if (data.context_summary) {
-      html += "<div class='ctx-summary'>🔁 " + esc(data.context_summary) + "</div>";
-    }
-    html += "<div class='insight'>" + esc(data.answer || data.explanation || "") + "</div>";
-    html += renderDownloads(data.download_urls);
-    showAnswer("分析结果", html || "（无）");
   }
 
   // ---------------------------------------------------------------- 模型供应商设置
@@ -435,8 +212,8 @@
     gemini: "Gemini"
   };
   var CAPABILITY_LABELS = { vision: "视觉", function_calling: "函数调用", json_schema: "JSON Schema" };
-  var providers = [];          // 全量供应商（脱敏视图）
-  var currentProviderId = "";  // 设置面板当前编辑的供应商
+  var providers = [];
+  var currentProviderId = "";
 
   function getCurrentSelection() {
     try { return sessionStorage.getItem(CURRENT_SELECTION_KEY) || ""; } catch (e) { return ""; }
@@ -446,19 +223,18 @@
   }
 
   function selectedProviderModel() {
-    // 把 "provider|model" 选择值拆为请求体字段；空值 = 默认分派
     var v = $("model-switch").value;
-    if (!v) return {};
+    if (!v) { return {}; }
     var idx = v.indexOf("|");
     return { provider_id: v.slice(0, idx), model_id: v.slice(idx + 1) };
   }
 
-  // Header 模型状态指示 + 引导横幅：供应商候选变化 / 用户切换后统一刷新
-  function updateModelIndicator() {    var sel = $("model-switch");
+  function updateModelIndicator() {
+    var sel = $("model-switch");
     var text = $("model-indicator-text");
     var dot = $("model-dot");
     var options = Array.prototype.slice.call(sel.options || []);
-    var hasChoice = options.length > 1; // 除「默认模型」外还有候选
+    var hasChoice = options.length > 1;
     if (sel.value) {
       var opt = sel.options[sel.selectedIndex];
       text.textContent = opt ? opt.textContent.replace(/\s+·.*$/, "") : "默认模型";
@@ -466,11 +242,9 @@
       text.textContent = hasChoice ? "默认模型（自动选择）" : "未配置模型";
     }
     dot.classList.toggle("off", !hasChoice);
-    // 引导横幅：无任何可用模型时展示（不打断用户）
     $("model-banner").classList.toggle("hidden", hasChoice);
   }
 
-  // 纯数据填充：把候选渲染进模型切换器并刷新指示器（不发请求）
   function applyChoices(choices) {
     var sel = $("model-switch");
     var saved = getCurrentSelection();
@@ -491,12 +265,6 @@
     updateModelIndicator();
   }
 
-  // 请求供应商列表 -> 同步设置面板 + 模型切换器
-  // （登录初始化 / 打开设置 / 保存删除供应商后调用；鉴权通过才可发起）
-  function fillModelSwitch() {
-    fetchModelChoices(applyChoices);
-  }
-
   function fetchModelChoices(cb) {
     api("/api/settings/providers").then(function (data) {
       if (!data || data.error) { cb([]); return; }
@@ -506,7 +274,10 @@
     }).catch(function () { cb([]); });
   }
 
-  // ---------------------------------------------------------------- 设置弹窗渲染
+  function fillModelSwitch() {
+    fetchModelChoices(applyChoices);
+  }
+
   function renderProviderList() {
     var box = $("provider-list");
     var html = "";
@@ -537,14 +308,11 @@
     $("pf-enabled").checked = p ? !!p.enabled : true;
     $("pf-protocol").value = p ? p.protocol : "openai_chat";
     $("pf-base-url").value = p ? p.base_url : "";
-    // 列表响应不含 api_key：输入框一律留空（占位提示"未修改则保持原 Key"），
-    // 杜绝把脱敏串当真 Key 用；需要查看走「👁 查看」从服务端取回明文。
     $("pf-api-key").value = "";
     $("pf-api-key").placeholder = p && p.has_api_key
       ? "已配置密钥（留空 = 不修改；输入新值 = 替换）"
       : "粘贴 API Key";
     $("pf-api-key").type = "password";
-    // 可见指示：密钥已持久化在服务端（落盘加密），刷新/重开不丢失
     var badge = $("pf-key-badge");
     if (p && p.has_api_key) {
       badge.textContent = "✓ 已保存";
@@ -574,12 +342,8 @@
     $("pf-name").focus();
   }
 
-  function currentFormModels() {
-    return window.__pfModels || [];
-  }
-  function setCurrentFormModels(models) {
-    window.__pfModels = models || [];
-  }
+  function currentFormModels() { return window.__pfModels || []; }
+  function setCurrentFormModels(models) { window.__pfModels = models || []; }
 
   function renderModelChips(models) {
     setCurrentFormModels(models);
@@ -619,9 +383,6 @@
     });
   }
 
-  // 把「模型列表」输入框里未点「＋添加模型」确认的内容收进当前模型列表。
-  // 修复：用户输入模型 ID 后直接点保存，输入被静默丢弃 -> 供应商没有模型
-  // -> 模型切换器不收录该供应商（看起来像"配置没保存"）。
   function absorbPendingModelInput() {
     var input = $("pf-model-input");
     var id = input.value.trim();
@@ -636,13 +397,13 @@
   }
 
   function collectForm() {
-    var models = absorbPendingModelInput(); // 保存/测试前先收纳未确认的模型输入
+    var models = absorbPendingModelInput();
     return {
       name: $("pf-name").value.trim(),
       enabled: $("pf-enabled").checked,
       protocol: $("pf-protocol").value,
       base_url: $("pf-base-url").value.trim(),
-      api_key: $("pf-api-key").value,          // 空串 = 保留服务端原 Key；新值 = 替换
+      api_key: $("pf-api-key").value,
       models: models
     };
   }
@@ -652,20 +413,16 @@
     if (!form.name) { toast("请填写供应商名称", "err"); return; }
     if (!form.base_url) { toast("请填写 Base URL", "err"); return; }
     if (!form.models || !form.models.length) {
-      // 空模型供应商无法出现在模型切换器中，直接拦截避免"配了却选不到"
       toast("请至少添加一个模型（输入模型 ID 后点「＋添加模型」）", "err");
       return;
     }
     var body = JSON.stringify(form);
-    if (currentProviderId) {
-      api("/api/settings/providers/" + encodeURIComponent(currentProviderId), {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: body
-      }).then(handleSaved);
-    } else {
-      api("/api/settings/providers", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: body
-      }).then(handleSaved);
-    }
+    var path = currentProviderId
+      ? "/api/settings/providers/" + encodeURIComponent(currentProviderId)
+      : "/api/settings/providers";
+    var method = currentProviderId ? "PUT" : "POST";
+    api(path, { method: method, headers: { "Content-Type": "application/json" }, body: body })
+      .then(handleSaved);
   }
 
   function handleSaved(data) {
@@ -673,7 +430,6 @@
     if (data.error) { toast(data.error, "err"); return; }
     toast("供应商配置已保存", "ok");
     currentProviderId = data.provider ? data.provider.id : currentProviderId;
-    // 保存后立即刷新：设置面板回到当前供应商 + 模型切换器同步新候选
     fetchModelChoices(function (choices) {
       applyChoices(choices);
       openProvider(currentProviderId);
@@ -695,7 +451,6 @@
       });
   }
 
-  // 供应商侧错误 -> 可理解提示（避免模糊的 "unauthorized" 直出）
   function friendlyProviderError(msg) {
     var s = String(msg || "");
     if (/鉴权|401|unauthorized|invalid.{0,12}key|api.?key|密钥/i.test(s)) {
@@ -710,11 +465,9 @@
     var payload = extra || {};
     var form = collectForm();
     if (currentProviderId && $("pf-api-key").value === "") {
-      // 未填写 Key 时按已保存配置测（服务端保留原 Key）
       payload.provider_id = currentProviderId;
       if (!payload.model_id) { payload.model_id = (form.models[0] || {}).id || ""; }
     } else {
-      // 按当前表单临时配置测（未保存也能先验证连通性）
       payload.base_url = form.base_url;
       payload.api_key = form.api_key;
       payload.protocol = form.protocol;
@@ -726,7 +479,6 @@
     if (!payload.model_id) { toast("请先添加或填写要测试的模型 ID", "err"); return; }
     var btn = $("pf-test");
     btn.disabled = true; btn.textContent = "测试中…";
-    // api() 自动携带 Authorization: Bearer <token>（模块四：请求鉴权绑定）
     api("/api/settings/providers/test", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -765,7 +517,6 @@
     $("settings-modal").addEventListener("click", function (e) {
       if (e.target === $("settings-modal")) { closeSettings(); }
     });
-    // Esc 也可关闭设置弹窗（避免任何情况下被困在配置界面）
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape" && !$("settings-modal").classList.contains("hidden")) {
         closeSettings();
@@ -786,8 +537,6 @@
     $("pf-model-input").addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); $("pf-model-add").click(); }
     });
-    // 「👁 查看」：从服务端取回已保存的真实 Key（显式受控动作，服务端记审计）。
-    // 不再回填脱敏串——脱敏串无法用于请求，只会造成"Key 无法使用"。
     $("pf-eye").addEventListener("click", function () {
       var input = $("pf-api-key");
       if (input.type === "text") {
@@ -796,14 +545,7 @@
         this.title = "查看已保存的密钥";
         return;
       }
-      if (!currentProviderId) {
-        // 新建未保存：无服务端密钥可看，仅切换本地输入框明/密文
-        input.type = input.type === "password" ? "text" : "password";
-        this.textContent = input.type === "text" ? "🙈" : "👁";
-        return;
-      }
-      if (input.value) {
-        // 输入框已有手动输入的新值：只切换显示，无需请求
+      if (!currentProviderId || input.value) {
         input.type = input.type === "password" ? "text" : "password";
         this.textContent = input.type === "text" ? "🙈" : "👁";
         return;
@@ -830,7 +572,6 @@
     $("pf-save").addEventListener("click", saveProvider);
     $("pf-delete").addEventListener("click", deleteProvider);
     $("pf-test").addEventListener("click", function () { testConnection(null); });
-    // 常驻设置入口：Header「⚙ 设置」与用户菜单项共用同一弹窗
     $("settings-btn").addEventListener("click", openSettings);
     $("model-switch").addEventListener("change", function () {
       setCurrentSelection($("model-switch").value);
@@ -842,66 +583,213 @@
     });
   }
 
-  // ---------------------------------------------------------------- 主流程
-  function render(data) {
-    if (!data) { return; }
-    clearPipeline();
-    clearAnswer();
-    renderSteps(data.steps);
-    if (data.action === "chitchat") {
-      showError(data.message || data.error || "抱歉，只能回答数据分析相关问题。");
+  // ---------------------------------------------------------------- HITL 交互
+  function renderHitl(state) {
+    // HITL 卡片渲染在左栏时间线里（store.pushTimeline('hitl') 驱动），
+    // 这里只负责 pill 按钮与自由输入的提交行为。
+    var hitl = state.hitlState;
+    if (!hitl) { return; }
+    document.querySelectorAll(".hitl-pill").forEach(function (pill) {
+      pill.addEventListener("click", function () {
+        submitHitlReply(pill.dataset.value || pill.textContent, pill);
+      });
+    });
+    var form = document.querySelector(".hitl-input-row");
+    if (form) {
+      form.querySelector(".hitl-send").addEventListener("click", function () {
+        var input = form.querySelector(".hitl-input");
+        var v = input.value.trim();
+        if (v) { submitHitlReply(v, null); }
+      });
+      form.querySelector(".hitl-input").addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          var v = this.value.trim();
+          if (v) { submitHitlReply(v, null); }
+        }
+      });
+    }
+  }
+
+  function submitHitlReply(reply, pillEl) {
+    document.querySelectorAll(".hitl-pill").forEach(function (p) { p.disabled = true; });
+    var inputRow = document.querySelector(".hitl-input-row");
+    if (inputRow) { inputRow.remove(); }
+    var answered = document.createElement("div");
+    answered.className = "hitl-answered";
+    answered.textContent = "已答复：" + reply;
+    var card = document.querySelector(".hitl-card");
+    if (card) { card.appendChild(answered); }
+    AgentStore.setHitl(null);
+    // 以恢复语义重新发起流（resume_token + human_reply）
+    var sel = selectedProviderModel();
+    AgentStore.setRunning(true);
+    activeStream = AgentEventSource.open(
+      AgentProtocol.buildStreamUrl(currentQuery, {
+        human_reply: reply,
+        resume_token: hitlResumeToken,
+        provider_id: sel.provider_id,
+        model_id: sel.model_id
+      }),
+      streamHandlers()
+    );
+  }
+
+  // ---------------------------------------------------------------- 主流程（SSE 事件驱动）
+  var currentQuery = "";
+  var hitlResumeToken = "";
+
+  function handleAgentEvent(ev) {
+    if (ev.event === "__stream_end__") {
+      // 传输层结束：done/error 事件已驱动状态；此处兜底复位
+      if (AgentStore.get().running) { AgentStore.setRunning(false); }
+      if (!$("run").disabled) { return; }
+      $("run").disabled = false;
+      $("run").textContent = "开始分析";
       return;
     }
-    if (data.action === "clarify") {
-      hideError();
-      renderClarifications(data.clarifications);
-      return;
+    if (ev.turn_id) { AgentStore.setTurnId(ev.turn_id); }
+    var p = ev.payload || {};
+
+    switch (ev.event) {
+      case "plan_created":
+        AgentStore.setPlan(AgentProtocol.normalizePlan(p.plan));
+        AgentStore.pushTimeline({ kind: "plan", plan: AgentProtocol.normalizePlan(p.plan) });
+        break;
+
+      case "step_start":
+        AgentStore.setAgentStatus("executing");
+        break;
+
+      case "tool_start": {
+        var tool = p.tool || {};
+        var item = {
+          kind: "tool",
+          toolId: (p.step_id || "s") + ":" + (tool.name || "t"),
+          name: tool.name || "",
+          input: tool.input || {},
+          metric: tool.input && tool.input.dsl && Array.isArray(tool.input.dsl.metrics) && tool.input.dsl.metrics[0]
+            ? String(tool.input.dsl.metrics[0].alias || tool.input.dsl.metrics[0].field || tool.name)
+            : "",
+          output: null, error: null, duration_ms: null
+        };
+        AgentStore.upsertToolEvent(item);
+        // 沙箱代码同步进右栏「代码沙箱」Tab
+        if (tool.name === "python_sandbox" && tool.input && tool.input.code) {
+          AgentStore.pushArtifact({ type: "code_snippet", title: "沙箱分析脚本", content: tool.input.code });
+        }
+        break;
+      }
+
+      case "tool_end": {
+        var tool2 = p.tool || {};
+        // end 事件只带结果字段；toolId 与 start 同构（同步骤同名工具），由
+        // store.upsertToolEvent 向上匹配最近一个未结束的同名块完成增量合并
+        AgentStore.upsertToolEvent({
+          kind: "tool",
+          toolId: (p.step_id || "s") + ":" + (tool2.name || "t"),
+          ended: true,
+          name: tool2.name || "",
+          output: tool2.output || null,
+          error: tool2.error || null,
+          duration_ms: tool2.duration_ms || null
+        });
+        // DSL 取数结果 -> 数据审计 Tab
+        if (tool2.name === "futurebi_dsl_query" && tool2.output && tool2.output.columns && tool2.status === "ok") {
+          AgentStore.pushArtifact({
+            type: "table",
+            title: (p.step_id || "dataset") + " · " + (tool2.output.dataset || ""),
+            columns: tool2.output.columns,
+            rows: tool2.output.rows || []
+          });
+        }
+        AgentStore.setStepStatus(p.step_id || "", tool2.status === "ok" ? "done" : "failed");
+        break;
+      }
+
+      case "reflection":
+        AgentStore.pushTimeline({ kind: "reflection", reflection: p.reflection || {} });
+        AgentStore.setAgentStatus("planning");
+        break;
+
+      case "hitl_request":
+        hitlResumeToken = (p.hitl && p.hitl.resume_token) || "";
+        AgentStore.setHitl({
+          question: (p.hitl && p.hitl.question) || "请补充分析需求",
+          options: (p.hitl && p.hitl.options) || []
+        });
+        AgentStore.pushTimeline({
+          kind: "hitl",
+          question: (p.hitl && p.hitl.question) || "",
+          options: (p.hitl && p.hitl.options) || []
+        });
+        AgentStore.setRunning(false);
+        $("run").disabled = false;
+        $("run").textContent = "开始分析";
+        renderHitl(AgentStore.get());
+        break;
+
+      case "artifact_emit":
+        if (p.artifact) {
+          AgentStore.pushArtifact(p.artifact);
+          if (p.artifact.type === "echarts") { AgentCanvas.showTab("charts"); }
+          if (p.artifact.type === "markdown_report") { AgentCanvas.showTab("report"); }
+        }
+        break;
+
+      case "done":
+        AgentStore.pushTimeline({ kind: "done" });
+        AgentStore.setRunning(false);
+        $("run").disabled = false;
+        $("run").textContent = "开始分析";
+        break;
+
+      case "error":
+        AgentStore.pushTimeline({ kind: "error", error: p.error || "未知错误" });
+        AgentStore.setRunning(false);
+        $("run").disabled = false;
+        $("run").textContent = "开始分析";
+        toast(p.error || "执行出错", "err");
+        break;
     }
-    if (data.action === "rag") {
-      hideError();
-      renderDocuments(data.documents);
-      return;
-    }
-    if (data.error) {
-      showError(data.error);
-      // 供应商错误（鉴权失败 / 配额超限 / 超时等）额外 Toast 可理解提示
-      if (/模型服务|鉴权|配额|供应商/.test(data.error)) { toast(data.error, "err"); }
-      return;
-    }
-    hideError();
-    renderInsight(data);
-    $("dsl").textContent = JSON.stringify(data.dsl, null, 2);
-    $("sql").textContent = data.sql;
-    $("explain").textContent = data.explanation || "";
-    renderChart(data.viz, data.columns, data.rows);
-    renderTable(data.columns, data.rows);
+  }
+
+  function streamHandlers() {
+    return {
+      onEvent: handleAgentEvent,
+      onError: function (err) {
+        AgentStore.pushTimeline({ kind: "error", error: "连接中断：" + (err && err.message ? err.message : err) });
+        AgentStore.setRunning(false);
+        $("run").disabled = false;
+        $("run").textContent = "开始分析";
+        showError("Agent 流连接失败，请重试");
+      }
+    };
   }
 
   function run() {
     var q = $("query").value.trim();
     if (!q) { showError("请输入问题"); return; }
-    // Auth Guard 保证本页面只会在已登录时渲染；这里不再出现
-    // 「请先登录后再查询」红色警告条（模块三：空状态占位优化）。
     hideError();
-    var btn = $("run");
-    btn.disabled = true;
-    btn.textContent = "查询中…";
-    // 客户端不提交 principal：主体由服务端从身份映射（P0）。
-    // 模型切换器取值随请求透传 provider_id / model_id（请求级模型切换）
-    var payload = { query: q };
+    currentQuery = q;
+    hitlResumeToken = "";
+    if (activeStream) { activeStream.abort(); }
+    AgentStore.reset();
+    AgentStreamUI.resetScroll();
+    AgentCanvas.reset();
+    AgentStore.pushUserMessage(q);
+    AgentStore.setRunning(true);
+    $("run").disabled = true;
+    $("run").textContent = "分析中…";
     var sel = selectedProviderModel();
-    if (sel.provider_id) { payload.provider_id = sel.provider_id; payload.model_id = sel.model_id; }
-    api("/api/query", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    })
-      .then(function (data) { render(data); })
-      .catch(function (err) { showError("请求失败：" + err); })
-      .finally(function () {
-        btn.disabled = false;
-        btn.textContent = "查询";
-      });
+    // 客户端不提交 principal：主体由服务端从身份映射（P0）
+    activeStream = AgentEventSource.open(
+      AgentProtocol.buildStreamUrl(q, {
+        provider_id: sel.provider_id,
+        model_id: sel.model_id
+      }),
+      streamHandlers()
+    );
   }
 
   function bindEvents() {
