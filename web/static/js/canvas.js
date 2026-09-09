@@ -138,8 +138,9 @@
       block.className = "data-block";
       var rows = t.rows || [];
       var cols = t.columns || (rows[0] ? rows[0].map(function (_, i) { return "col" + (i + 1); }) : []);
+      var totalLabel = t.totalRows != null ? fmt(t.totalRows) + " 行（预览 " + rows.length + "）" : fmt(rows.length) + " 行";
       var head = '<div class="data-block-head">' + esc(t.title || ("数据集 " + (idx + 1)))
-        + '<span class="rows-tag">' + fmt(rows.length) + " 行 × " + cols.length + " 列</span></div>";
+        + '<span class="rows-tag">' + totalLabel + " × " + cols.length + " 列</span></div>";
       var html = head + '<div class="table-scroll"><table><thead><tr>';
       cols.forEach(function (c) { html += "<th>" + esc(c) + "</th>"; });
       html += "</tr></thead><tbody>";
@@ -210,7 +211,9 @@
       bindTabs();
       $("export-md").addEventListener("click", exportMarkdown);
       $("export-html").addEventListener("click", exportHtml);
-      AgentStore.subscribe("currentArtifacts", render);
+      AgentStore.subscribe("currentArtifacts", function (state) {
+        render(state.currentArtifacts);
+      });
     },
     /** 新一轮开始：清空产物 + 回到报告 Tab。 */
     reset: function () {

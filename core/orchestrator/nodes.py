@@ -235,6 +235,31 @@ def _diagnostic_dsl_pair(query: str) -> tuple[dict[str, Any], dict[str, Any]]:
     )
 
 
+def _preview_rows(path: str, limit: int = 30) -> list[list[Any]]:
+    """读取 Parquet 数据集前 N 行生成审计预览（转 JSON 原生类型）。
+
+    预览失败不阻断取数（返回空列表），审计能力可降级。
+    """
+    try:
+        import pandas as pd
+
+        df = pd.read_parquet(path)
+        out: list[list[Any]] = []
+        for row in df.head(limit).itertuples(index=False):
+            cells: list[Any] = []
+            for v in row:
+                if v is None or (isinstance(v, float) and v != v):  # NaN
+                    cells.append(None)
+                elif hasattr(v, "item"):
+                    cells.append(v.item())
+                else:
+                    cells.append(v)
+            out.append(cells)
+        return out
+    except Exception:
+        return []
+
+
 def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, ToolRecord]:
     """执行单个 query 步骤：DSL -> 门面 -> ParquetRef。"""
     from config import settings
@@ -265,12 +290,19 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
         )
         state.datasets[name] = ref.model_dump(by_alias=True)
         notes.append(f"{name}: {ref.rows} 行 × {len(ref.columns)} 列")
+        # 审计预览：读取物化 Parquet 前 30 行随 tool_end 下发（数据审计 Tab）
+        preview_rows = _preview_rows(str(workspace / ref.path))
         events.emit_tool_end(
             "futurebi_dsl_query",
             step.id,
             ok=True,
             duration_ms=(time.perf_counter() - started) * 1000,
-            output={"dataset": name, "rows": ref.rows, "columns": list(ref.columns)},
+            output={
+                "dataset": name,
+                "rows": ref.rows,
+                "columns": list(ref.columns),
+                "preview_rows": preview_rows,
+            },
         )
 
     # 数据集经 state.datasets 传递（ParquetRef 契约），parquet 产物在 synthesize 汇总

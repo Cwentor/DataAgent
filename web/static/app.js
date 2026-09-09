@@ -124,7 +124,10 @@
         if (data && data.username) { initConsole(data); }
         else { redirectToLogin(null); }
       })
-      .catch(function () { redirectToLogin(null); });
+      .catch(function (err) {
+        console.error("[boot] 初始化失败:", err && err.stack ? err.stack : err);
+        redirectToLogin(null);
+      });
   }
 
   function initConsole(user) {
@@ -587,9 +590,10 @@
   function renderHitl(state) {
     // HITL 卡片渲染在左栏时间线里（store.pushTimeline('hitl') 驱动），
     // 这里只负责 pill 按钮与自由输入的提交行为。
+    // 注意：.hitl-send 复用 pill 样式但不是选项，必须排除（否则一次点击双提交）。
     var hitl = state.hitlState;
     if (!hitl) { return; }
-    document.querySelectorAll(".hitl-pill").forEach(function (pill) {
+    document.querySelectorAll(".hitl-pill:not(.hitl-send)").forEach(function (pill) {
       pill.addEventListener("click", function () {
         submitHitlReply(pill.dataset.value || pill.textContent, pill);
       });
@@ -694,13 +698,14 @@
           error: tool2.error || null,
           duration_ms: tool2.duration_ms || null
         });
-        // DSL 取数结果 -> 数据审计 Tab
-        if (tool2.name === "futurebi_dsl_query" && tool2.output && tool2.output.columns && tool2.status === "ok") {
+        // DSL 取数结果 -> 数据审计 Tab（rows 为总行数，preview_rows 为前 30 行切片）
+        if (tool2.name === "futurebi_dsl_query" && tool2.output && tool2.output.preview_rows && tool2.status === "ok") {
           AgentStore.pushArtifact({
             type: "table",
             title: (p.step_id || "dataset") + " · " + (tool2.output.dataset || ""),
-            columns: tool2.output.columns,
-            rows: tool2.output.rows || []
+            columns: tool2.output.columns || [],
+            rows: tool2.output.preview_rows,
+            totalRows: tool2.output.rows
           });
         }
         AgentStore.setStepStatus(p.step_id || "", tool2.status === "ok" ? "done" : "failed");

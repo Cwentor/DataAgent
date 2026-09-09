@@ -97,14 +97,11 @@
     var head = document.createElement("button");
     head.type = "button";
     head.className = "tool-head";
-    var stateHtml = "";
-    if (item.ended) {
-      stateHtml = item.error ? '<span class="tool-state fail">✕ 失败</span>'
-        : '<span class="tool-state ok">✓ 完成</span>';
-    }
-    var durHtml = item.duration_ms != null ? '<span class="tool-dur">' + fmtDur(item.duration_ms) + "</span>" : "";
+    // 状态/耗时锚点常驻（data-role 供 tool_end 就地更新；未结束时留空）
     head.innerHTML = '<span class="tool-badge ' + (item.name === "python_sandbox" ? "sandbox" : item.name === "metric_meta_lookup" ? "meta" : "dsl") + '">'
-      + esc(badgeText) + "</span>" + stateHtml + durHtml
+      + esc(badgeText) + "</span>"
+      + '<span data-role="state" class="tool-state">' + (item.ended ? (item.error ? "✕ 失败" : "✓ 完成") : "") + "</span>"
+      + '<span data-role="dur" class="tool-dur">' + (item.duration_ms != null ? fmtDur(item.duration_ms) : "") + "</span>"
       + '<span class="tool-chevron">▾</span>';
     var body = document.createElement("div");
     body.className = "tool-body";
@@ -243,8 +240,10 @@
     autoScroll();
   }
 
-  /** 就地更新工具块：状态/耗时/结果体（tool_end 增量合并后触发）。 */
+  /** 就地更新工具块：状态/耗时/结果体（tool_end 增量合并后触发）。
+   * 注：subscribe 回放只传 state（无 item），此处须防御空 item。 */
   function updateToolBlock(_state, item) {
+    if (!item || !item.toolId) { return; }
     var target = listBox.querySelector('[data-tool-id="' + cssEscape(item.toolId) + '"]:not([data-ended])');
     if (!target) { return; }
     target.dataset.ended = "1";
