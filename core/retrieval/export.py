@@ -46,10 +46,9 @@ def export_to_parquet(
     if len(columns) != len({str(c) for c in columns}):
         raise ValueError(f"结果集存在重复列名: {columns!r}")
 
-    capped = False
+    # 行数上限截断（编排层可据 ref.rows 与 max_rows 对比判断是否截断）
     if len(rows) > max_rows:
         rows = rows[:max_rows]
-        capped = True
 
     columns, rows, report = mask_result_set(columns, rows)
 
