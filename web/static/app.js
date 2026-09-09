@@ -133,9 +133,9 @@
     renderUserCenter(user);
     bindEvents();
     resetWorkspace();
-    // 启动不自动拉取供应商配置：配置属用户主动行为（不强制配置），
-    // 统一入口为 Header「⚙ 设置」/ 用户菜单；打开设置时才请求列表，
-    // 关闭设置后经 fillModelSwitch 刷新模型指示器与引导横幅。
+    // 恢复模型切换器候选（只读既有配置：不弹窗、不强制配置）；
+    // 供应商列表本身仍按需在「设置」打开时才请求，供面板编辑使用。
+    fillModelSwitch();
   }
 
   function resetWorkspace() {
@@ -454,8 +454,7 @@
   }
 
   // Header 模型状态指示 + 引导横幅：供应商候选变化 / 用户切换后统一刷新
-  function updateModelIndicator() {
-    var sel = $("model-switch");
+  function updateModelIndicator() {    var sel = $("model-switch");
     var text = $("model-indicator-text");
     var dot = $("model-dot");
     var options = Array.prototype.slice.call(sel.options || []);
@@ -471,26 +470,31 @@
     $("model-banner").classList.toggle("hidden", hasChoice);
   }
 
-  function fillModelSwitch() {
+  // 纯数据填充：把候选渲染进模型切换器并刷新指示器（不发请求）
+  function applyChoices(choices) {
     var sel = $("model-switch");
     var saved = getCurrentSelection();
-    fetchModelChoices(function (choices) {
-      var html = "<option value=''>默认模型（自动选择）</option>";
-      (choices || []).forEach(function (p) {
-        html += "<optgroup label='" + esc(p.provider_name) + "'>";
-        (p.models || []).forEach(function (m) {
-          var value = p.provider_id + "|" + m.id;
-          html += "<option value='" + esc(value) + "'>"
-            + esc(m.name || m.id) + " · " + (PROTOCOL_LABELS[p.protocol] || p.protocol) + "</option>";
-        });
-        html += "</optgroup>";
+    var html = "<option value=''>默认模型（自动选择）</option>";
+    (choices || []).forEach(function (p) {
+      html += "<optgroup label='" + esc(p.provider_name) + "'>";
+      (p.models || []).forEach(function (m) {
+        var value = p.provider_id + "|" + m.id;
+        html += "<option value='" + esc(value) + "'>"
+          + esc(m.name || m.id) + " · " + (PROTOCOL_LABELS[p.protocol] || p.protocol) + "</option>";
       });
-      sel.innerHTML = html;
-      if (saved && sel.querySelector("option[value='" + saved.replace(/"/g, '\\"') + "']")) {
-        sel.value = saved;
-      }
-      updateModelIndicator();
+      html += "</optgroup>";
     });
+    sel.innerHTML = html;
+    if (saved && sel.querySelector("option[value='" + saved.replace(/"/g, '\\"') + "']")) {
+      sel.value = saved;
+    }
+    updateModelIndicator();
+  }
+
+  // 请求供应商列表 -> 同步设置面板 + 模型切换器
+  // （登录初始化 / 打开设置 / 保存删除供应商后调用；鉴权通过才可发起）
+  function fillModelSwitch() {
+    fetchModelChoices(applyChoices);
   }
 
   function fetchModelChoices(cb) {
@@ -632,7 +636,11 @@
     if (data.error) { toast(data.error, "err"); return; }
     toast("供应商配置已保存", "ok");
     currentProviderId = data.provider ? data.provider.id : currentProviderId;
-    fetchModelChoices(function () { openProvider(currentProviderId); });
+    // 保存后立即刷新：设置面板回到当前供应商 + 模型切换器同步新候选
+    fetchModelChoices(function (choices) {
+      applyChoices(choices);
+      openProvider(currentProviderId);
+    });
   }
 
   function deleteProvider() {
@@ -646,7 +654,7 @@
         currentProviderId = "";
         $("provider-form").classList.add("hidden");
         $("provider-empty").classList.remove("hidden");
-        fetchModelChoices(function () {});
+        fetchModelChoices(applyChoices);
       });
   }
 
