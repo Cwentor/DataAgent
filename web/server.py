@@ -162,7 +162,12 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/v1/agent/chat/stream":
             return self._get_agent_chat_stream()
         if parsed.path == "/api/schema/summary":
-            return self._protected(self._schema_summary)
+            ctx = self._authenticate()
+            if ctx is None:
+                return self._send_json({"error": "unauthorized"}, 401)
+            set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+            code, body = self._schema_summary(ctx)
+            return self._send_json(body, code)
         if parsed.path == "/api/settings/providers":
             return self._protected(providers_api.list_providers)
         if parsed.path in ("/", "/index.html"):
