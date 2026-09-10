@@ -20,6 +20,10 @@ python -m web.server 8000
 | `/api/query` | POST | 执行受保护的数据查询 |
 | `/api/agent/run` | POST | Data Agent 同步编排（多步分析 + 沙箱 + HITL 恢复） |
 | `/api/v1/agent/chat/stream` | GET | Data Agent SSE 流式编排（AgentStreamEvent 事件流） |
+| `/api/settings/providers` | GET / POST | 模型供应商列表（不含 api_key）与创建自定义供应商 |
+| `/api/settings/providers/<id>` | PUT / DELETE | 更新（空 Key 保留原值）与删除（预置供应商拒绝） |
+| `/api/settings/providers/test` | POST | 连通性探测（极小 ping 请求，返回 HTTP 200 + 延时） |
+| `/api/settings/providers/<id>/reveal` | POST | 查看已保存的真实 API Key（显式动作，记审计日志） |
 | `/api/schema/summary` | GET | 语义目录摘要：按物理表分组的可查询字段清单（知识上下文） |
 | `/static/` | GET | 双栏工作台前端 |
 
@@ -62,3 +66,18 @@ curl -X POST http://127.0.0.1:8000/api/query \
 查询参数：`query`（必填）、`human_reply` + `resume_token`（HITL 恢复）、
 `provider_id` + `model_id`（请求级模型切换）。鉴权与 `/api/query` 一致
 （Bearer JWT / 会话 Cookie）；编排异常收敛为 `error` 事件，不中断 HTTP 流。
+
+## 模型供应商管理
+
+`/api/settings/providers` 系列端点用于管理工作台的多模型供应商（预置智谱 / OpenAI /
+Anthropic / Gemini，支持 OpenAI Chat、OpenAI Responses、Anthropic、Gemini 四种协议适配）。
+设计约束：
+
+- API Key 落盘加密存储（`providers/crypto.py`，Encrypt-then-MAC），列表/详情响应**完全不含
+  `api_key` 字段**；编辑时留空即保留服务端原 Key；
+- 连通性探测的业务失败（401/429/超时等）以 HTTP 200 + `success=false` 返回，与传输层错误
+  （404 供应商不存在 / 400 参数非法）严格区分；
+- SSE 编排请求可通过 `provider_id` + `model_id` 查询参数进行请求级模型切换，不指定时使用
+  工作台当前选中的启用供应商。
+
+供应商配置持久化于服务端 `config/providers.json`，详见[环境配置](configuration.md)。

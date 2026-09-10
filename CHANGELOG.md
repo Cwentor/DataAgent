@@ -1,5 +1,10 @@
 # PR Review Fixes - Change Log
 
+> **历史定位说明**：本文件是项目尚处于 ChatBI 问数引擎阶段（2026-09 早期多工具 Agent
+> 升级）的 PR 评审修复历史记录，按当时代码快照撰写并原样保留。项目现已演进为
+> **DataAgent（企业级 Data Agent）**，当前能力总览见 [README](README.md)，
+> 升级变更说明见 [docs/reviews/20260909-changelog-enterprise-data-agent.md](docs/reviews/20260909-changelog-enterprise-data-agent.md)。
+
 ## Summary
 Based on the PR review report for multi-tool agent upgrade (docs/reviews/20260905-pr-review-multi-tool-agent.md), this document details all fixes applied to address the identified issues.
 

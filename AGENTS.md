@@ -88,6 +88,7 @@ mock/       确定性 mock 数仓（DuckDB）
 present/    展示层（解释 + 可视化推荐）
 security/   权限控制（表级/列级/行级 RLS）
 core/       Data Agent 核心（企业级升级层，见下方四包说明）
+providers/  多模型供应商网关（四协议适配 / API Key 加密存储 / 连通性探测）
 config/     全局配置
 tests/      单元测试
 tools/      生产工具包（工具注册中心、内置工具等）
