@@ -133,3 +133,18 @@ DIMENSION_MEMBERS: dict[str, tuple[str, ...]] = {
         "林氏木业",
     ),
 }
+
+# 大区 -> 省份成员映射（审计修复 M1 区域词展开）。
+# 行政区划归属是业务知识（保留常量），但展开值域必须与数仓实际存在的省份取交集：
+# mock 数仓 dim_user.province 仅含 广东/浙江/江苏/北京/上海/四川/湖北/山东，
+# 生产环境由 catalog_loader 从数仓 distinct 值重建 DIMENSION_MEMBERS，
+# 消费方（agent 启发式/LLM 路径、编排器规范化）一律经 region_provinces()
+# 与成员词汇表求交——库中裁撤的省份不会产出 province IN ('无效省') 空过滤。
+# 严禁把映射值直接当字面值写 SQL（province = '华东' 属错误口径，M1 缺陷根源）。
+REGION_PROVINCE_MAPPING: dict[str, tuple[str, ...]] = {
+    "华北": ("北京",),
+    "华东": ("上海", "江苏", "浙江", "山东"),
+    "华南": ("广东",),
+    "华中": ("湖北",),
+    "西南": ("四川",),
+}

@@ -23,7 +23,13 @@ from agent.memory import (
     resolve_context,
 )
 from agent.pipeline import rewrite_dsl
-from agent.router import ROUTING_LATENCY_MS, IntentType, route_decision
+from agent.router import (
+    BLOCKED_DESTRUCTIVE_REPLY,
+    BLOCKED_SENSITIVE_REPLY,
+    ROUTING_LATENCY_MS,
+    IntentType,
+    route_decision,
+)
 from agent.router.legacy import _CHITCHAT_REPLY
 from agent.slotfill import ClarifyContext, attempt_fill, default_slot_store, pending_kinds
 from agent.tool_agent import AgentResult, default_tool_agent
@@ -51,13 +57,15 @@ from semantic.dsl_schema import QueryDSL, RatioMetric, WindowMetric
 logger = get_logger("web.service")
 
 
-# 新五分类意图 -> 旧 action 字符串（前端与既有测试向后兼容）
+# 新意图分类 -> 旧 action 字符串（前端与既有测试向后兼容；unsafe_action 映射
+# 为 blocked，明确向审计与前端表达"安全拦截"语义）
 _ACTION_BY_INTENT: dict[IntentType, str] = {
     IntentType.CHITCHAT: "chitchat",
     IntentType.SYSTEM_ACTION: "system_action",
     IntentType.CLARIFY: "clarify",
     IntentType.GLOSSARY_EXPLAIN: "rag",
     IntentType.DATA_QUERY: "text2sql",
+    IntentType.UNSAFE_ACTION: "blocked",
 }
 
 
@@ -90,6 +98,10 @@ def _handle_system_action(
     - 身份鉴权由调用方网关强制绑定（principal 取自服务端映射），此处仅按
       (session_id, owner) 归属操作会话状态，跨用户 clear 返回 False 不误删；
     - 本分支不触达 semantic/、compiler/ 与底层数据库引擎。
+
+    审计修复（D2 虚假确认）：白名单未命中时必须如实拒绝——"该系统操作不被
+    支持或已被安全策略拦截。"，严禁回复"系统操作已完成"（未执行却谎报成功，
+    污染审计语义）。
     """
     if action == "reset_session":
         if slot_store is not None:
@@ -117,7 +129,8 @@ def _handle_system_action(
         )
     if action == "exit":
         return "好的，再见！如需继续分析，随时回来。"
-    return "系统操作已完成。"
+    # 白名单未命中：如实拒绝（绝不允许"系统操作已完成"式虚假确认）
+    return "该系统操作不被支持或已被安全策略拦截。"
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -380,6 +393,16 @@ def run_query(
                 owner=owner,
                 slot_store=slot_store,
                 principal=principal,
+            )
+            result["steps"] = []
+        elif detected == IntentType.UNSAFE_ACTION:
+            # 安全拦截意图（破坏性指令 / 越界敏感实体）：如实告知拒绝，不触达
+            # 数仓引擎，不产生"操作已完成"式虚假确认（审计修复 D2/D6）
+            blocked_reason = decision.extracted_entities.get("blocked_reason")
+            result["answer"] = (
+                BLOCKED_SENSITIVE_REPLY
+                if blocked_reason == "sensitive_entity"
+                else BLOCKED_DESTRUCTIVE_REPLY
             )
             result["steps"] = []
         elif detected == IntentType.GLOSSARY_EXPLAIN:

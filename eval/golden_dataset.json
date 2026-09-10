@@ -315,7 +315,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT (SUM(f.order_amount)) / NULLIF(COUNT(DISTINCT f.user_id), 0) AS \"arpu\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
+    "sql": "SELECT COALESCE(SUM(f.order_amount), 0) / NULLIF(COUNT(DISTINCT f.user_id), 0) AS \"arpu\"\nFROM fact_orders f\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
   },
   {
     "id": "Q10",
@@ -515,7 +515,7 @@
       "order_by": [],
       "limit": 100
     },
-    "sql": "SELECT (SUM(r.refund_amount)) / NULLIF(SUM(f.order_amount), 0) AS \"refund_rate\"\nFROM fact_orders f\nLEFT JOIN fact_refunds r ON r.order_id = f.order_id\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
+    "sql": "SELECT COALESCE(SUM(r.refund_amount), 0) / NULLIF(SUM(f.order_amount), 0) AS \"refund_rate\"\nFROM fact_orders f\nLEFT JOIN fact_refunds r ON r.order_id = f.order_id\nWHERE f.pay_status = 'SUCCESS' AND f.order_time >= TIMESTAMP '2024-06-01 00:00:00' AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
   },
   {
     "id": "Q15",

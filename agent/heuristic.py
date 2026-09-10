@@ -30,16 +30,10 @@ from security.scope import scoped_fields
 from semantic import catalog
 from semantic.dsl_schema import Comparison, Granularity, QueryDSL, RatioMetric, WindowMetric
 
-# 大区 -> 省份列表（行政区划映射，仅收录 mock 数仓实际存在的省份，供"地区"类
-# 提问与会话上下文继承共用）。行政区划归属是业务知识（保留常量），但展开值域
-# 经 region_provinces() 与语义目录的省份成员词汇表取交集——库中裁撤的省份
-# 不会产出无效过滤（成员词汇表由 catalog_loader 从数仓 distinct 值重建）。
+# 大区 -> 省份映射单一事实来源已迁至 semantic.catalog.REGION_PROVINCE_MAPPING
+# （审计修复 M1：区域词展开的口径归口语义目录）。此别名保持既有导入路径兼容。
 REGIONS: dict[str, list[str]] = {
-    "华北": ["北京"],
-    "华东": ["上海", "江苏", "浙江", "山东"],
-    "华南": ["广东"],
-    "华中": ["湖北"],
-    "西南": ["四川"],
+    region: list(provinces) for region, provinces in catalog.REGION_PROVINCE_MAPPING.items()
 }
 
 

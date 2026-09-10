@@ -97,6 +97,15 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("category", "brand", "province", "order_time"),
     ),
     (
+        "区域过滤口径（大区展开，严禁字面值）：province 的合法值只有数仓实际存在的省份"
+        "（广东/浙江/江苏/北京/上海/四川/湖北/山东）；"
+        '用户提到大区（"华东/华南/华北/华中/西南"）时必须展开为省份 IN 列表：'
+        "华东 -> in [上海,江苏,浙江,山东]；华南 -> in [广东]；华北 -> in [北京]；"
+        "华中 -> in [湖北]；西南 -> in [四川]；"
+        '严禁生成 {"field": "province", "operator": "eq", "value": "华东"}（华东不是省份成员，必然空集）',
+        ("province",),
+    ),
+    (
         '排序：出现"最高/前N个" -> order_by=[{field:<主指标别名>, direction:desc}] 且 limit=N',
         (),
     ),

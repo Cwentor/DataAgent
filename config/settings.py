@@ -52,8 +52,9 @@ QUERY_TIMEOUT_MS: int = int(os.getenv("QUERY_TIMEOUT_MS", "30000"))
 MAX_SCAN_ROWS: int = int(os.getenv("MAX_SCAN_ROWS", "10000000"))
 # 返回行数硬上限：结果超过即熔断（LIMIT 硬上限，独立于 DSL 约束的防御性校验）
 MAX_RESULT_ROWS: int = int(os.getenv("MAX_RESULT_ROWS", "20000"))
-# SQL 执行自愈最大重试次数（把精确引擎报错喂回 LLM 重写 DSL，至少 1 次）
-SQL_SELF_HEAL_MAX_RETRIES: int = int(os.getenv("SQL_SELF_HEAL_MAX_RETRIES", "1"))
+# SQL 执行自愈最大重试次数（把精确编译/引擎报错喂回 LLM 重写 DSL，至少 1 次；
+# 审计修复 T01：1 次自愈对 order_by 别名类修正成功率不足，放宽为 3 次与编排器对齐）
+SQL_SELF_HEAL_MAX_RETRIES: int = int(os.getenv("SQL_SELF_HEAL_MAX_RETRIES", "3"))
 # EXPLAIN ANALYZE 扫描行预检缓存容量上限（整改指令3-3 降本项；原硬编码 512 改配置化）；
 # 超出按"清空防膨胀"策略处理（扫描行数随数据变化，无 LRU 精度必要，只防无限增长）
 MAX_SCAN_CACHE_SIZE: int = int(os.getenv("MAX_SCAN_CACHE_SIZE", "512"))

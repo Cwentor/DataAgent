@@ -25,6 +25,7 @@ import json
 import time
 from typing import Any
 
+from agent.heuristic import region_provinces
 from core.orchestrator import events
 from core.orchestrator.prompts import PLANNER_SYSTEM, planner_prompt
 from core.orchestrator.state import (
@@ -38,6 +39,7 @@ from core.sandbox.api import run_code
 from core.sandbox.ast_guard import static_check
 from core.skills.decomposition import multiplicative_decomposition
 from core.skills.drilldown import drilldown_by_information_gain
+from semantic.catalog import REGION_PROVINCE_MAPPING as REGION_PROVINCE_MAPPING
 
 logger = __import__("audit.logging", fromlist=["get_logger"]).get_logger("core.orchestrator")
 
@@ -267,7 +269,8 @@ def _normalize_dsl_draft(dsl: dict[str, Any]) -> dict[str, Any]:
     仍是唯一裁决者，错误信息继续喂回规划节点自愈：
     - dimensions: ["province"]（裸字符串）-> [{"field": "province"}]；
     - time_range -> time_filter（字段名笔误，契约 extra="forbid" 必拒）；
-    - 过滤操作符 ge/le -> gte/lte（白名单写法）。
+    - 过滤操作符 ge/le -> gte/lte（白名单写法）；
+    - 区域词展开（审计修复 M1）：province = '华东' -> province IN (数仓实际省份)。
     """
     d = dict(dsl)
     dims = d.get("dimensions")
@@ -285,6 +288,23 @@ def _normalize_dsl_draft(dsl: dict[str, Any]) -> dict[str, Any]:
         for f in filters:
             if isinstance(f, dict) and f.get("operator") in ("ge", "le"):
                 f = {**f, "operator": "gte" if f["operator"] == "ge" else "lte"}
+            # 区域词展开：大区字面值 -> 省份 IN 列表（与 agent 路径同口径）
+            if (
+                isinstance(f, dict)
+                and f.get("field") == "province"
+                and f.get("operator") in ("eq", "in")
+            ):
+                value = f.get("value")
+                values = value if isinstance(value, list) else [value]
+                regions = [v for v in values if isinstance(v, str) and v in REGION_PROVINCE_MAPPING]
+                if regions:
+                    provinces: list[str] = []
+                    for region in regions:
+                        for p in region_provinces(region):
+                            if p not in provinces:
+                                provinces.append(p)
+                    if provinces:
+                        f = {**f, "operator": "in", "value": provinces}
             fixed.append(f)
         d["filters"] = fixed
     return d
@@ -437,6 +457,60 @@ save_echarts_spec({{
 """
 
 
+def _has_same_echarts(artifacts: list[Artifact], spec: dict[str, Any]) -> bool:
+    """判断已登记产物中是否已存在同规格 ECharts（审计修复 T14 图表去重）。
+
+    判定键：序列类型 + x 轴类目 + 系列名/数据——同型同值的图表只保留一份，
+    不同标题/步骤名但内容同质的重复发射也一并拦截。
+    """
+    import json
+
+    def _chart_key(s: dict[str, Any]) -> str:
+        try:
+            series = s.get("series")
+            if isinstance(series, list):
+                series_key = json.dumps(
+                    [
+                        {
+                            "type": (item or {}).get("type"),
+                            "name": (item or {}).get("name"),
+                            "data": (item or {}).get("data"),
+                        }
+                        for item in series
+                        if isinstance(item, dict)
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            else:
+                series_key = json.dumps(series, ensure_ascii=False, sort_keys=True)
+            return json.dumps(
+                {
+                    "series": series_key,
+                    "x": (
+                        (s.get("xAxis") or {}).get("data")
+                        if isinstance(s.get("xAxis"), dict)
+                        else s.get("xAxis")
+                    ),
+                    "title": (
+                        (s.get("title") or {}).get("text")
+                        if isinstance(s.get("title"), dict)
+                        else s.get("title")
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        except Exception:  # 序列化失败视为不同图表，宁可重复不误杀
+            return json.dumps(s, ensure_ascii=False, sort_keys=True, default=str)
+
+    key = _chart_key(spec)
+    for a in artifacts:
+        if a.kind == "echarts" and _chart_key(a.payload) == key:
+            return True
+    return False
+
+
 def code_exec_node(state: AgentState) -> AgentState:
     """沙箱分析节点：执行 analyze 步骤（需求 §2.A CodeExecutionNode）。"""
     from config import settings
@@ -481,7 +555,11 @@ def code_exec_node(state: AgentState) -> AgentState:
                     }
                 },
             )
-            if result.echarts_spec:
+            # 图表产物去重（审计修复 T14）：同 payload 的 ECharts 规格严禁重复
+            # 登记与发射——反思重规划多轮执行同模板分析时曾产出 4 份同质图表
+            if result.echarts_spec and not _has_same_echarts(
+                updated.artifacts, result.echarts_spec
+            ):
                 updated.artifacts.append(
                     Artifact(kind="echarts", name=f"{step.id}_chart", payload=result.echarts_spec)
                 )
@@ -616,25 +694,39 @@ def synthesize_node(state: AgentState) -> AgentState:
 
     消费两类来源：沙箱 summary/echarts 产物（analyze 步骤）与已物化数据集
     （纯 query 步骤，如基数/枚举问题）——只呈现真实取数结果，不编造。
+
+    审计修复（T14 报告调和）：
+    - 同标题 summary 小节去重（重规划多轮执行同模板曾重复 3 小节）；
+    - 同指标键的 metrics 矛盾数字以最后一次登记为准（终轮收敛值），历史值剔除；
+    - 空数据集呈现"未查询到符合条件的数据"，严禁"已成功查询"式措辞。
     """
     from config import settings
 
     workspace = settings.WORKSPACE_ROOT / state.session_id / state.turn_id
     lines: list[str] = [f"## 分析报告：{state.user_query}", ""]
-    if state.artifacts:
-        for artifact in state.artifacts:
-            if artifact.kind == "summary":
-                summary = artifact.payload.get("summary", {})
-                title = summary.get("title", "")
-                findings = summary.get("findings", [])
-                metrics = summary.get("metrics", {})
-                lines.append(f"### {title}" if title else "### 归因结论")
-                for f in findings:
-                    lines.append(f"- {f}")
-                if metrics:
-                    lines.append(f"- 关键指标：{json.dumps(metrics, ensure_ascii=False)}")
-            elif artifact.kind == "echarts":
-                lines.append(f"- 图表产物：`{artifact.name}`（ECharts 规格已生成）")
+    seen_summary_titles: set[str] = set()
+    rendered_charts: list[Artifact] = []
+    for artifact in state.artifacts:
+        if artifact.kind == "summary":
+            summary = artifact.payload.get("summary", {})
+            title = summary.get("title", "")
+            if title and title in seen_summary_titles:
+                continue  # 同小节去重（T14）：重规划多轮执行同模板只呈现一次
+            if title:
+                seen_summary_titles.add(title)
+            findings = summary.get("findings", [])
+            metrics = summary.get("metrics", {})
+            lines.append(f"### {title}" if title else "### 归因结论")
+            for f in findings:
+                lines.append(f"- {f}")
+            if metrics:
+                lines.append(f"- 关键指标：{json.dumps(metrics, ensure_ascii=False)}")
+        elif artifact.kind == "echarts":
+            # 同规格图表去重（T14）：只呈现第一份，其余同质产物不进报告
+            if _has_same_echarts(rendered_charts, artifact.payload):
+                continue
+            rendered_charts.append(artifact)
+            lines.append(f"- 图表产物：`{artifact.name}`（ECharts 规格已生成）")
     # 纯查询结果直接呈现（取数成功但没有沙箱分析的场景）
     for name, ref in state.datasets.items():
         section, table_artifact = _dataset_markdown(name, ref, workspace)
@@ -644,6 +736,13 @@ def synthesize_node(state: AgentState) -> AgentState:
             events.emit_event(events.EVENT_ARTIFACT_EMIT, {"artifact": table_artifact})
     if not state.artifacts and not state.datasets:
         lines.append("未能获得有效的分析产物。")
+    if state.datasets and all(int(ref.get("rows", 0) or 0) == 0 for ref in state.datasets.values()):
+        # 空集诚实陈述（审计修复 D3）：严禁在 0 行数据上宣称查询成功
+        lines.append("")
+        lines.append(
+            "未查询到符合条件的数据。可能原因：时间范围超出数仓数据域"
+            "（数据基准日期 2024-06-30），或过滤条件（地区/品类/支付状态）无匹配记录。"
+        )
     if state.error_context.errors:
         lines.append("")
         lines.append(f"> 自愈记录：{len(state.error_context.errors)} 次错误被捕获并重试。")

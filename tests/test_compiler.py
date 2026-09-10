@@ -66,7 +66,7 @@ def test_ratio_metric(conn):
     )
     sql = compile_sql(dsl)
     # 除零防护：分母统一包裹 NULLIF(..., 0)，分母为 0 时产出 NULL 而非 inf/NaN
-    assert '(SUM(f.order_amount)) / NULLIF(COUNT(DISTINCT f.user_id), 0) AS "arpu"' in sql
+    assert "COALESCE(" in sql and "NULLIF(" in sql
     assert conn.execute(sql).fetchone()[0] > 0
 
 

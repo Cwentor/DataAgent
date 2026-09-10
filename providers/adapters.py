@@ -213,11 +213,18 @@ class BaseAdapter(ABC):
 
         供 agent 层既有调用点（LLMNL2DSL / LLMPlanner 等）透明切换，
         无需改动其内部消息构造逻辑。
+
+        温度显式接线 settings.LLM_TEMPERATURE（缺省 0.0）：agent 层全部 LLM
+        调用（规划/总结/反思/自愈）的温度由此统一控制，评测确定性锁定
+        （eval_runner._lock_determinism）才能真正落到请求层。
         """
+        from config import settings
+
         resp = self.chat(
             UnifiedChatRequest(
                 messages=[{"role": m["role"], "content": m["content"]} for m in messages],
                 model=model or self.model_id,
+                temperature=settings.LLM_TEMPERATURE,
                 response_format={"type": "json_object"} if json_mode else None,
             )
         )

@@ -267,6 +267,15 @@ def _time_window_sql(tf: TimeFilter) -> str:
     return f"{col} >= TIMESTAMP '{s}' AND {col} < TIMESTAMP '{e}'"
 
 
+def resolve_time_window(tf: TimeFilter) -> tuple[datetime, datetime]:
+    """解析 TimeFilter 为半开时间区间 [start, end)（公开入口）。
+
+    供空结果归因（审计修复 D3：判断时间范围是否超出数仓数据域）等上层
+    场景复用，避免各处重复实现相对时间语义。
+    """
+    return _resolve_window(tf)
+
+
 # --------------------------------------------------------------------------- #
 # 指标 / 维度表达式
 # --------------------------------------------------------------------------- #
@@ -302,8 +311,10 @@ def _metric_expr(m: Metric) -> tuple[str, str]:
     if isinstance(m, RatioMetric):
         num = _aggregate_expr(m.numerator)
         den = _aggregate_expr(m.denominator)
-        # 除零防护：分母为 0 时产出 NULL 而非 inf/NaN，与 comparison 列的 NULLIF 口径对齐
-        return f"({num}) / NULLIF({den}, 0)", m.alias
+        # 除零防护：分母为 0 时产出 NULL 而非 inf/NaN，与 comparison 列的 NULLIF 口径对齐；
+        # 分子 NULL 语义（审计修复 R4a）：无退款记录的品类 SUM(refund_amount) 为 NULL，
+        # 比率应呈现 0（退款率 0.00%）而非 NULL——分子 COALESCE(·, 0)。
+        return f"COALESCE({num}, 0) / NULLIF({den}, 0)", m.alias
     return _aggregate_expr(m), m.alias
 
 
@@ -736,12 +747,14 @@ def compile_sql(dsl: QueryDSL) -> str:
     selects: list[str] = []
     dim_exprs: list[str] = []
     dim_aliases: set[str] = set()
+    dim_alias_by_field: dict[str, str] = {}
     time_dim_expr: str | None = None
     for d in dsl.dimensions:
         expr, alias = _dimension_expr(d, granularity)
         selects.append(f"{expr} AS {_quote_ident(alias)}")
         dim_exprs.append(expr)
         dim_aliases.add(alias)
+        dim_alias_by_field[d.field] = alias
         if d.field in TIME_FIELDS:
             time_dim_expr = expr
 
@@ -775,6 +788,17 @@ def compile_sql(dsl: QueryDSL) -> str:
         for o in dsl.order_by:
             if o.field in metric_aliases or o.field in dim_aliases:
                 ref = o.field
+            elif o.field in catalog.COLUMNS:
+                # 别名回溯（审计修复 T01）：order_by 引用原始逻辑列名（如 order_time
+                # 未显式注册维度别名）时自动映射到该维度的输出列别名；仅当该列
+                # 确实出现在分组维度中才可回溯，否则仍是非法排序引用。
+                mapped = dim_alias_by_field.get(o.field)
+                if mapped is None:
+                    raise CompileError(
+                        f"order_by 字段 {o.field!r} 不是指标别名或维度别名，"
+                        f"且未出现在分组维度中"
+                    )
+                ref = mapped
             else:
                 raise CompileError(f"order_by 字段 {o.field!r} 不是指标别名或维度别名")
             direction = "ASC" if o.direction == SortDirection.ASC else "DESC"

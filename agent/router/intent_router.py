@@ -7,7 +7,9 @@
 - ``DATA_QUERY``      数据指标 / 趋势查询 -> 走多工具编排 + 受控 DSL 编译链路；
 - ``GLOSSARY_EXPLAIN``业务术语 / 指标口径解释 -> 走口径文档 RAG 检索，不执行查询；
 - ``SYSTEM_ACTION``   系统控制与状态操作（清空会话 / 权限查看 / 数据源探测）；
-- ``CLARIFY``         输入缺失核心维度或存在歧义 -> 主动反问，绝不盲目生成 SQL。
+- ``CLARIFY``         输入缺失核心维度或存在歧义 -> 主动反问，绝不盲目生成 SQL；
+- ``UNSAFE_ACTION``   破坏性指令（DROP/DELETE/删除订单等）与越界敏感实体（薪资等）
+  -> 安全拦截，如实告知拒绝，绝不进入 DSL 生成与执行链路（守卫前移）。
 
 分级决策（Fast-Path -> LLM 语义分类 -> 规则兜底）：
 
@@ -61,6 +63,7 @@ class IntentType(StrEnum):
     GLOSSARY_EXPLAIN = "glossary_explain"
     SYSTEM_ACTION = "system_action"
     CLARIFY = "clarify"
+    UNSAFE_ACTION = "unsafe_action"
 
 
 INTENT_TYPE_VALUES: frozenset[str] = frozenset(it.value for it in IntentType)
@@ -71,6 +74,18 @@ DATA_QUERY = IntentType.DATA_QUERY
 GLOSSARY_EXPLAIN = IntentType.GLOSSARY_EXPLAIN
 SYSTEM_ACTION = IntentType.SYSTEM_ACTION
 CLARIFY = IntentType.CLARIFY
+UNSAFE_ACTION = IntentType.UNSAFE_ACTION
+
+# 拦截原因（extracted_entities.blocked_reason）：区分破坏性指令与越界敏感实体
+BLOCKED_DESTRUCTIVE = "destructive_instruction"
+BLOCKED_SENSITIVE = "sensitive_entity"
+
+# 拦截后的面向用户拒绝文案（如实告知被拒，绝不虚假确认"操作已完成"）
+BLOCKED_DESTRUCTIVE_REPLY = "该系统操作不被支持或已被安全策略拦截。"
+BLOCKED_SENSITIVE_REPLY = (
+    "您请求的数据不在当前数仓语义目录范围内（如员工薪资等敏感信息不存在或不可查询），"
+    "无法为您检索。"
+)
 
 
 @dataclass
@@ -222,6 +237,30 @@ _EXACT_CHITCHAT: frozenset[str] = frozenset(
         "下午好",
         "晚上好",
     }
+)
+
+# 破坏性指令拦截（守卫前移）：英文 SQL DDL/DML/DCL 指令形态（DROP TABLE / DELETE FROM
+# / TRUNCATE / UPDATE ... SET / INSERT INTO / ALTER TABLE / GRANT / REVOKE）。
+# 执行层 exec.guards 四层防线之外的意图层前置防线：此类请求严禁被路由为
+# system_action（虚假确认）或 data_query（浪费自愈预算），一律 unsafe_action。
+_UNSAFE_SQL_COMMAND_RE = re.compile(
+    r"\b(drop\s+(table|schema|database|view)|truncate\s+table|alter\s+table|"
+    r"delete\s+from|insert\s+into|update\s+\w+\s+set|grant\s+\w+|revoke\s+\w+)\b",
+    re.IGNORECASE,
+)
+
+# 破坏性指令拦截：中文破坏性动词 + 数据对象（"删除所有订单记录"）。
+# 动词表刻意排除"修改/更新"等低特异性词，避免"更新后的订单"类正常查询误伤；
+# 会话管理指令（清空上下文/清空会话）由系统动作白名单先行匹配，不会落入此拦截。
+_UNSAFE_CN_COMMAND_RE = re.compile(
+    r"(删除|删掉|清除|清空|销毁|抹除|篡改|写入|插入|执行)\s*[一所有全整的这]{0,3}"
+    r"[的张个些条]?(订单|数据|表|记录|行|库|数仓|数表|用户|产品|店铺|指标)"
+)
+
+# 越界敏感实体拦截：语义目录中不存在且属敏感个人信息的数据（薪资/身份证/手机号等）。
+# 命中即拒绝并如实告知"该数据不存在/不可查询"，严禁改述为无关业务数据导出。
+_SENSITIVE_ENTITY_RE = re.compile(
+    r"薪资|工资|薪酬|社保|公积金|银行卡|身份证|手机号|护照|驾照|住址|家人|健康档案|病历"
 )
 
 # 完整新问题标记：命中即视为显式新查询（不得按上下文追问继承）
@@ -444,7 +483,32 @@ class IntentRouter:
                     reason=f"system_action:{action}",
                     extracted_entities={"action": action},
                 )
-        # 3) 极短打招呼词（整句精确匹配）
+        # 3) 破坏性指令拦截（守卫前移，先于一切放行判决）：
+        #    DROP/DELETE/删除订单等请求严禁判为 system_action（虚假确认）或
+        #    data_query，一律 unsafe_action 如实拒绝。
+        if _UNSAFE_SQL_COMMAND_RE.search(ql):
+            return RouteDecision(
+                intent=UNSAFE_ACTION,
+                confidence=1.0,
+                reason="fast_path:unsafe_sql_command",
+                extracted_entities={"blocked_reason": BLOCKED_DESTRUCTIVE},
+            )
+        if _UNSAFE_CN_COMMAND_RE.search(q):
+            return RouteDecision(
+                intent=UNSAFE_ACTION,
+                confidence=1.0,
+                reason="fast_path:unsafe_cn_command",
+                extracted_entities={"blocked_reason": BLOCKED_DESTRUCTIVE},
+            )
+        # 4) 越界敏感实体拦截（薪资/身份证等不在语义目录的敏感数据）：拒绝而非改述
+        if _SENSITIVE_ENTITY_RE.search(q):
+            return RouteDecision(
+                intent=UNSAFE_ACTION,
+                confidence=1.0,
+                reason="fast_path:sensitive_entity",
+                extracted_entities={"blocked_reason": BLOCKED_SENSITIVE},
+            )
+        # 5) 极短打招呼词（整句精确匹配）
         if ql in _EXACT_CHITCHAT:
             return RouteDecision(
                 intent=CHITCHAT,
@@ -627,6 +691,10 @@ def route_decision(
 
 
 __all__ = [
+    "BLOCKED_DESTRUCTIVE",
+    "BLOCKED_DESTRUCTIVE_REPLY",
+    "BLOCKED_SENSITIVE",
+    "BLOCKED_SENSITIVE_REPLY",
     "CHITCHAT",
     "CLARIFY",
     "DATA_QUERY",
@@ -634,6 +702,7 @@ __all__ = [
     "INTENT_TYPE_VALUES",
     "ROUTING_LATENCY_MS",
     "SYSTEM_ACTION",
+    "UNSAFE_ACTION",
     "IntentRouter",
     "IntentType",
     "RouteDecision",

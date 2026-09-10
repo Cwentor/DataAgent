@@ -32,6 +32,9 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
 - dimensions: [{"field": "<语义维度字段>", "alias": "<可选英文标识符>"}]
   —— 注意是对象数组，每个维度形如 {"field": "province"}，严禁写成裸字符串 "province"
 - filters: [{"field": ..., "operator": "eq|ne|in|gt|gte|lt|lte|between", "value": ...}]（没有 like/ge/le）
+- 区域过滤口径：province 的合法值只有数仓实际存在的省份（广东/浙江/江苏/北京/上海/四川/湖北/山东）；
+  "华东/华南" 等大区词必须展开为省份 IN 列表（华东 -> 上海/江苏/浙江/山东），
+  严禁生成 {"field": "province", "operator": "eq", "value": "华东"}（必然空集的错误口径）
 - 时间过滤字段名是 time_filter（不是 time_range）：
   {"range_type": "absolute", "absolute": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}
   或 {"range_type": "relative", "relative": {"unit": "day|week|month|quarter", "value": N, "offset": 0}}
@@ -49,6 +52,9 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
 - 每个 analyze 步骤的 code 只能使用沙箱 API：read_input(name)/list_inputs()/
   save_summary(...)/save_echarts_spec(...)，可 import pandas/numpy/math/json/
   statistics/datetime/collections/itertools；禁止 os/sys/subprocess/socket/open 等；
+- order_by 只能引用已注册的指标别名或维度字段名（别名或逻辑字段名均可）；
+- 窗口指标（cumsum/moving_avg）必须同时提供时间维度（dimensions 含时间字段）
+  与 time_filter 时间窗口，moving_avg 必须带 window_size；
 - 步骤数 ≤6；依赖关系必须无环。
 """
 
