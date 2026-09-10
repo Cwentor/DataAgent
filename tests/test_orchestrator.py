@@ -166,8 +166,10 @@ def test_synthesize_consumes_datasets_for_pure_query(tmp_path, monkeypatch):
     assert trace.phase == "done"
     assert "查询结果" in trace.report
     assert "未能获得有效的分析产物" not in trace.report
-    # 标量聚合直接给答案行（gmv 总额为非零真实数值）
-    assert "gmv =" in trace.report
+    # 标量聚合直接给答案行，且数值必须人读化（万元，R1 严禁 raw 字节面值直出）
+    assert "查询答案：" in trace.report
+    assert "万元" in trace.report
+    assert "gmv =" not in trace.report
 
 
 def test_tool_end_preview_rows_points_at_inputs_dir(tmp_path, monkeypatch):
