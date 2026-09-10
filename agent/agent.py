@@ -19,8 +19,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from agent.errors import PipelineError
-from agent.llm import OpenAICompatClient
 from agent.prompts import build_fix_messages, build_messages, build_rewrite_messages
+from agent.semantic_check import expand_region_filters, normalize_time_anchor, validate_semantics
+from providers import chat_text
 from semantic.dsl_schema import QueryDSL
 
 BT = chr(96)  # backtick
@@ -53,9 +54,13 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 class LLMNL2DSL:
-    """基于 LLM 的 NL -> DSL Agent。"""
+    """基于 LLM 的 NL -> DSL Agent。
 
-    def __init__(self, client: OpenAICompatClient, max_retries: int = 2) -> None:
+    client 兼容两种形态：Model Provider 适配器（``BaseAdapter``，走统一
+    chat_text / JSON Mode 抹平）或旧形态 OpenAI 兼容客户端（``chat(messages)``）。
+    """
+
+    def __init__(self, client: Any, max_retries: int = 2) -> None:
         """绑定 LLM 客户端与重试上限（Bind the client and retry budget）。"""
         self.client = client
         self.max_retries = max_retries
@@ -69,12 +74,19 @@ class LLMNL2DSL:
         last_error: Exception | None = None
         messages = build_messages(query, principal)
         for _ in range(self.max_retries + 1):
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "error" in obj and obj.get("error"):
                     raise PipelineError("LLM 拒绝解析: " + str(obj["error"]))
-                return QueryDSL.model_validate(obj)
+                candidate = QueryDSL.model_validate(obj)
+                # 确定性规范化（审计修复 M1/M2）：区域词展开 + 相对时间锚点补齐，
+                # 消除 LLM 生成 DSL 与 golden 契约的结构性漂移
+                candidate = normalize_time_anchor(expand_region_filters(candidate))
+                semantic_errors = validate_semantics(query, candidate, principal)
+                if semantic_errors:
+                    raise PipelineError("语义校验失败：" + "；".join(semantic_errors))
+                return candidate
             except (ValueError, TypeError, KeyError, ValidationError, PipelineError) as exc:
                 last_error = exc
                 messages = build_fix_messages(query, raw, str(exc)[:400], principal)
@@ -99,12 +111,13 @@ class LLMNL2DSL:
         last_error: Exception | None = None
         messages = build_rewrite_messages(query, dsl.model_dump(mode="json"), error, principal)
         for _ in range(max(attempts, 1)):
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "error" in obj and obj.get("error"):
                     raise PipelineError("LLM 拒绝解析: " + str(obj["error"]))
-                return QueryDSL.model_validate(obj)
+                # 自愈重写同样做规范化（与首跑口径一致：区域词展开 + 时间锚补齐）
+                return normalize_time_anchor(expand_region_filters(QueryDSL.model_validate(obj)))
             except (ValueError, TypeError, KeyError, ValidationError, PipelineError) as exc:
                 last_error = exc
                 messages = build_fix_messages(query, raw, str(exc)[:400], principal)

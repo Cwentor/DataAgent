@@ -2,11 +2,11 @@
 
 ## 准备环境
 
-项目使用 conda 环境 `futurebi`，Python 3.12：
+项目使用 conda 环境 `dataagent`，Python 3.12：
 
 ```bash
-conda create -n futurebi python=3.12 -y
-conda activate futurebi
+conda create -n dataagent python=3.12 -y
+conda activate dataagent
 pip install -r requirements-dev.txt
 ```
 

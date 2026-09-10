@@ -28,16 +28,22 @@ import re
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from agent.agent import extract_json
 from agent.clarify import Clarification, detect_clarifications
 from agent.errors import PipelineError
 from agent.heuristic import REGIONS, dimension_members
-from agent.llm import OpenAICompatClient
-from agent.router import IntentType
+from agent.llm import resolve_default_client
+from agent.router import (
+    BLOCKED_DESTRUCTIVE_REPLY,
+    BLOCKED_SENSITIVE_REPLY,
+    IntentType,
+)
 from audit.logging import get_logger
 from config import settings
+from providers import chat_text
 from semantic.dsl_schema import QueryDSL
 from tools.base import ToolContext, ToolResult
 from tools.registry import ToolRegistry, default_registry
@@ -45,6 +51,12 @@ from tools.registry import ToolRegistry, default_registry
 logger = get_logger("agent.tool_agent")
 
 CHITCHAT_REPLY = "抱歉，我是数据分析助手，只能回答与业务数据相关的问题。"
+
+# 空结果统一话术（审计修复 D3：0 行/全 NULL 结果严禁"已成功查询"式肯定答复）
+NO_DATA_REPLY = "未查询到符合条件的数据。可能原因：{reason}"
+
+# 数仓数据域上界（与评测锚点一致的元数据；空结果时间归因用它判断超界）
+_DATA_DOMAIN_TIP = "所选时间范围可能超出当前数仓数据域（数据基准日期 2024-06-30）"
 
 # 确定性规划关键词
 _EXPORT_KEYWORDS = (
@@ -371,6 +383,17 @@ class DeterministicPlanner(Planner):
 
         if intent == IntentType.CHITCHAT:
             return PlanResult(answer=CHITCHAT_REPLY)
+        if intent == IntentType.UNSAFE_ACTION:
+            # 安全拦截意图（破坏性指令 / 越界敏感实体）：如实拒绝，绝不查询、
+            # 绝不产出"操作已完成"式答复（审计修复 D2）
+            blocked_reason = decision.extracted_entities.get("blocked_reason")
+            return PlanResult(
+                answer=(
+                    BLOCKED_SENSITIVE_REPLY
+                    if blocked_reason == "sensitive_entity"
+                    else BLOCKED_DESTRUCTIVE_REPLY
+                )
+            )
         if intent == IntentType.SYSTEM_ACTION:
             # 系统控制动作由 web.service 白名单执行；Agent 层不触达数仓引擎
             return PlanResult(answer="系统操作已由上层安全处理，无需查询数据。")
@@ -430,7 +453,7 @@ class LLMPlanner(Planner):
 
     def __init__(
         self,
-        client: OpenAICompatClient,
+        client: Any,
         registry: ToolRegistry | None = None,
         max_retries: int = 2,
     ):
@@ -448,8 +471,29 @@ class LLMPlanner(Planner):
         history: Any = None,
         last_dsl: Any = None,
     ) -> PlanResult:
-        """首轮规划：把工具清单（JSON Schema）注入上下文，由 LLM 决策调用 / 作答 / 反问。"""
+        """首轮规划：把工具清单（JSON Schema）注入上下文，由 LLM 决策调用 / 作答 / 反问。
+
+        会话上下文（审计修复 M2）：last_dsl 非 None 时注入上轮查询结构（指标/
+        维度/时间窗口摘要），使"按品类展开""那华南呢"等省略指代下钻指令能被
+        规划器正确理解为继承上轮口径的查询，而非反问澄清。
+        """
         tools_json = json.dumps(registry.tool_definitions(), ensure_ascii=False)
+        context_block = ""
+        if last_dsl is not None:
+            try:
+                dsl_summary = (
+                    last_dsl.model_dump(mode="json")
+                    if hasattr(last_dsl, "model_dump")
+                    else last_dsl
+                )
+                context_block = (
+                    "\n上一轮查询口径（本轮为省略指代/下钻指令时，继承其中未提及的"
+                    "指标与时间窗口，仅做用户要求的增量调整，直接调用 query_metric）：\n"
+                    + json.dumps(dsl_summary, ensure_ascii=False)
+                    + "\n"
+                )
+            except Exception:  # 摘要失败不阻塞规划
+                context_block = ""
         messages = [
             {
                 "role": "system",
@@ -457,7 +501,8 @@ class LLMPlanner(Planner):
                     "你是数据分析 Agent 的规划器。根据用户问题决定是否调用工具。\n"
                     "可用的工具清单（OpenAI Function Calling 规范）：\n"
                     + tools_json
-                    + "\n\n输出要求：只输出一个 JSON 对象，三选一：\n"
+                    + context_block
+                    + "\n输出要求：只输出一个 JSON 对象，三选一：\n"
                     '{ "tool": "<工具名>", "args": {...} }\n'
                     '{ "answer": "无需查询的直接回答文本" }\n'
                     '{ "clarify": "需要向用户追问他的一句问题" }\n'
@@ -521,7 +566,7 @@ class LLMPlanner(Planner):
         """共享决策核：调 LLM -> 解析校验 -> 非法输出反馈重试（plan/plan_next 共用）。"""
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "answer" in obj:
@@ -561,7 +606,12 @@ class LLMPlanner(Planner):
     def _trajectory_view(
         steps: list[ToolInvocationRecord], outputs: list[ToolResult]
     ) -> list[dict[str, Any]]:
-        """把调度轨迹压缩为 LLM 可消费的观察视图（截断防 Token 膨胀）。"""
+        """把调度轨迹压缩为 LLM 可消费的观察视图（截断防 Token 膨胀）。
+
+        审计修复（D6 答案层数值透传）：成功的数据步骤附带列名与前 10 行样本值，
+        使重规划作答（plan_next 的 answer）与反思判定都能引用真实数值，
+        而非只知道 row_count 答不出数。
+        """
         view: list[dict[str, Any]] = []
         for s, o in zip(steps, outputs, strict=False):
             item: dict[str, Any] = {
@@ -578,6 +628,12 @@ class LLMPlanner(Planner):
                     item["explanation"] = str(data["explanation"])[:200]
                 if isinstance(data.get("rows"), list):
                     item["row_count"] = len(data["rows"])
+                    columns = data.get("columns")
+                    if isinstance(columns, list) and columns:
+                        item["columns"] = [str(c) for c in columns]
+                        item["rows_sample"] = [
+                            [_coerce_scalar(v) for v in row] for row in data["rows"][:10]
+                        ]
             else:
                 item["error"] = (s.error_msg or "")[:200]
             view.append(item)
@@ -622,7 +678,7 @@ class LLMPlanner(Planner):
             },
         ]
         try:
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             obj = extract_json(raw)
             name = str(obj.get("tool", ""))
             args = obj.get("args") or {}
@@ -640,6 +696,117 @@ class LLMPlanner(Planner):
                 },
             )
             return None
+
+
+# --------------------------------------------------------------------------- #
+# 数据上下文注入（审计修复 D6 答案层与数据层断裂）：把真实行值/标量注入总结提示词
+# --------------------------------------------------------------------------- #
+def _coerce_scalar(value: Any) -> Any:
+    """把 DuckDB 返回的 datetime 等类型转为 JSON 可序列化标量。"""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, float) and value != value:  # NaN
+        return None
+    return value
+
+
+def build_data_context(columns: list[str] | None, rows: list[list[Any]] | None) -> str:
+    """把查询结果集构造为总结 LLM 可直接引用的数据上下文。
+
+    规则（审计修复 D6 / T02）：
+    - 标量或行数 <= 10：完整结果集以 Markdown 表格注入（"报数"类问题据此引用数值）；
+    - 行数 > 10：注入前 5 行样本 + 全局聚合统计（数值列 sum/avg/min/max + 行数）；
+    - 空结果返回空字符串（由空结果话术接管，不喂给 LLM 编造）。
+    """
+    cols = [str(c) for c in (columns or [])]
+    data_rows = [[_coerce_scalar(v) for v in row] for row in (rows or [])]
+    if not cols or not data_rows:
+        return ""
+
+    def _md_table(rs: list[list[Any]]) -> str:
+        head = "| " + " | ".join(cols) + " |"
+        sep = "|" + "|".join([" --- "] * len(cols)) + "|"
+        body = "\n".join(
+            "| " + " | ".join("" if v is None else str(v) for v in r) + "|" for r in rs
+        )
+        return "\n".join([head, sep, body])
+
+    if len(data_rows) <= 10:
+        return f"查询结果（{len(data_rows)} 行，可直接引用数值）：\n{_md_table(data_rows)}"
+
+    # >10 行：前 5 行样本 + 全局数值聚合统计
+    stats: dict[str, dict[str, float]] = {}
+    for i, col in enumerate(cols):
+        nums = [
+            float(r[i])
+            for r in data_rows
+            if i < len(r) and isinstance(r[i], (int, float)) and not isinstance(r[i], bool)
+        ]
+        if nums:
+            stats[col] = {
+                "sum": round(sum(nums), 4),
+                "avg": round(sum(nums) / len(nums), 4),
+                "min": round(min(nums), 4),
+                "max": round(max(nums), 4),
+            }
+    stat_lines = [
+        f"- {col}: sum={s['sum']}, avg={s['avg']}, min={s['min']}, max={s['max']}"
+        for col, s in stats.items()
+    ]
+    parts = [
+        f"查询结果共 {len(data_rows)} 行（以下为前 5 行样本，完整数据未全部列出）：",
+        _md_table(data_rows[:5]),
+    ]
+    if stat_lines:
+        parts.append("数值列全局统计（求和/平均/最小/最大，可用于汇总性回答）：")
+        parts.extend(stat_lines)
+    return "\n".join(parts)
+
+
+def empty_result_reason(dsl: Any) -> str | None:
+    """空结果的确定性归因（审计修复 D3：空集必须解释可能原因，绝不谎报成功）。
+
+    - 时间窗口超出数仓数据域（相对时间锚定 AS_OF_DATE=2024-06-30 后仍超界，
+      或绝对窗口整体晚于数据域上界）-> 时间超界假设；
+    - 其余空集 -> 过滤条件无匹配假设。
+    """
+    if dsl is None:
+        return "过滤条件可能无匹配数据"
+    tf = getattr(dsl, "time_filter", None)
+    if tf is not None:
+        try:
+            from compiler.sql_compiler import resolve_time_window
+
+            start, _end = resolve_time_window(tf)
+            # 数据域上界：数仓最后一条订单日期为 2024-06-30（评测锚点），半开区间比较
+            domain_end = datetime(2024, 7, 1, 0, 0, 0)
+            if start >= domain_end:
+                return _DATA_DOMAIN_TIP
+        except Exception:  # 归因失败不阻塞话术兜底
+            pass
+    return "过滤条件（时间/地区/品类等）可能与数据不匹配，或该维度下确无记录"
+
+
+def _is_empty_result(
+    columns: list[str] | None,
+    rows: list[list[Any]] | None,
+    *,
+    has_ratio_metric: bool = False,
+) -> bool:
+    """空结果判定（审计修复 D3 / T08）。
+
+    - 0 行 / 无列：空；
+    - 聚合空集产出的单行全 NULL（SUM 空集 = [[None]]）：空；
+    - 单行全 0（COUNT 空集 = [[0]]，如 2025-01 超界窗口）：视为无匹配数据，
+      统一走"未查询到符合条件的数据"诚实话术；
+    - 含比率指标的结果例外：比率为 0 是有效业务语义（R4a：无退款记录的品类
+      退款率 = 0.00%），仅按全 NULL 判空。
+    """
+    if not rows or not columns:
+        return True
+    if has_ratio_metric:
+        return all(all(v is None for v in row) for row in rows)
+    return all(all(v is None or v == 0 for v in row) for row in rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -714,6 +881,14 @@ class DeterministicSynthesizer(Synthesizer):
         rows = result.rows or []
         viz = result.viz or {}
         explanation = (result.explanation or "").rstrip("。")
+        # 空结果强制诚实话术（审计修复 D3）：0 行 / 单行全 NULL / 单行全 0 时统一
+        # "未查询到符合条件的数据 + 可能原因"，严禁在空集上输出"已成功查询"式答复；
+        # 比率指标例外（R4a：0 是有效语义）
+        has_ratio = bool(result.dsl and any(m.kind == "ratio" for m in result.dsl.metrics))
+        if _is_empty_result(result.columns, rows, has_ratio_metric=has_ratio):
+            reason = empty_result_reason(result.dsl)
+            result.answer = NO_DATA_REPLY.format(reason=reason)
+            return
         if viz.get("chart") == "number" and rows:
             label = viz.get("y") or (result.columns[0] if result.columns else "数值")
             value = rows[0][0]
@@ -777,12 +952,17 @@ class DeterministicSynthesizer(Synthesizer):
 class LLMSynthesizer(Synthesizer):
     """LLM 总结：把工具输出喂回 LLM 合成最终洞察（含图表指令）。"""
 
-    def __init__(self, client: OpenAICompatClient):
-        """绑定 LLM 客户端（Bind the OpenAI-compatible client）。"""
+    def __init__(self, client: Any):
+        """绑定 LLM 客户端（适配器或 OpenAI 兼容客户端，经 providers.chat_text 流转）。"""
         self.client = client
 
     def synthesize(self, result: AgentResult, outputs: list[ToolResult], query: str) -> None:
-        """把工具输出喂回 LLM 合成洞察；失败时优雅回退确定性合成（Graceful deterministic fallback）。"""
+        """把工具输出喂回 LLM 合成洞察；失败时优雅回退确定性合成（Graceful deterministic fallback）。
+
+        数据字段（dsl/sql/rows/viz/chart_spec）一律先经确定性回填——LLM 只负责
+        润色 answer 文本。修复（M1/M2 关联）：此前正常 LLM 路径不回填数据字段，
+        会话继承轮（无重规划 preset）的响应缺失 dsl/rows，答案层与数据层断裂。
+        """
         if result.answer:
             # R1 重规划作答：规划器已基于完整轨迹给出最终洞察，
             # 这里仅回填数据字段（dsl/sql/rows/viz/chart_spec），不再重复调 LLM
@@ -790,11 +970,38 @@ class LLMSynthesizer(Synthesizer):
             DeterministicSynthesizer().synthesize(result, outputs, query)
             result.answer = preset
             return
+        # 先确定性回填数据字段 + 兜底 answer（空结果话术/标量/对比综合均在此接管）
+        DeterministicSynthesizer().synthesize(result, outputs, query)
         if not outputs:
-            return DeterministicSynthesizer().synthesize(result, outputs, query)
+            return
         last = outputs[-1]
         if not last.success:
-            return DeterministicSynthesizer().synthesize(result, outputs, query)
+            return
+        # 空结果强制诚实话术（审计修复 D3）：LLM 路径同样禁止在空集上输出
+        # "已成功查询"式答复——先于 LLM 调用直接接管作答（比率 0 除外，R4a）
+        data = last.data or {}
+        last_columns = data.get("columns")
+        last_rows = data.get("rows") if isinstance(data.get("rows"), list) else None
+        dsl_dict = data.get("dsl") if isinstance(data.get("dsl"), dict) else None
+        if "rows" in data:
+            has_ratio = bool(
+                dsl_dict
+                and any(
+                    m.get("kind") == "ratio"
+                    for m in dsl_dict.get("metrics", [])
+                    if isinstance(m, dict)
+                )
+            )
+            if _is_empty_result(last_columns, last_rows, has_ratio_metric=has_ratio):
+                result.dsl = QueryDSL.model_validate(dsl_dict) if dsl_dict is not None else None
+                result.columns = last_columns
+                result.rows = last_rows
+                reason = empty_result_reason(result.dsl)
+                result.answer = NO_DATA_REPLY.format(reason=reason)
+                return
+        # 数据上下文注入（审计修复 D6 / T02）：把真实行值/标量喂给总结 LLM，
+        # "报数"类问题据此引用具体数值，禁止再答"未能获取具体数量"
+        data_context = build_data_context(last_columns, last_rows)
         tools_summary = json.dumps(
             [s.to_dict() for s in result.steps if s.success and s.output],
             ensure_ascii=False,
@@ -804,16 +1011,28 @@ class LLMSynthesizer(Synthesizer):
                 "role": "system",
                 "content": (
                     "你是数据分析助手。基于工具返回结果，给用户一段简洁的中文洞察。"
-                    '输出 JSON：{"answer": "洞察文本"}。'
+                    '输出 JSON：{"answer": "洞察文本"}。\n'
+                    "硬性约束：\n"
+                    "1. 下方提供的查询结果数值是唯一事实来源：回答报数/统计类问题时"
+                    '必须直接引用其中的具体数值，严禁回答"未能获取具体数量/数值"；\n'
+                    "2. 严禁虚构任何未出现在查询结果中的数字；\n"
+                    '3. 严禁使用"已成功查询"等空洞措辞替代实际数值。'
                 ),
             },
             {
                 "role": "user",
-                "content": f"问题：{query}\n工具结果：{tools_summary}",
+                "content": (
+                    f"问题：{query}\n工具结果：{tools_summary}"
+                    + (
+                        f"\n\n查询结果数据（唯一事实来源）：\n{data_context}"
+                        if data_context
+                        else ""
+                    )
+                ),
             },
         ]
         try:
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             obj = extract_json(raw)
             result.answer = str(obj.get("answer", ""))
             if obj.get("chart") and result.chart_spec is None:
@@ -909,7 +1128,7 @@ class LLMReflector(Reflector):
 
     def __init__(
         self,
-        client: OpenAICompatClient,
+        client: Any,
         registry: ToolRegistry | None = None,
         max_retries: int = 1,
     ):
@@ -954,7 +1173,7 @@ class LLMReflector(Reflector):
         ]
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
-            raw = self.client.chat(messages)
+            raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 sufficient = bool(obj.get("sufficient"))
@@ -1035,19 +1254,49 @@ class ToolAgent:
         self._history = history
         self._last_dsl = last_dsl
 
-        try:
-            plan = self.planner.plan(
-                query,
-                principal,
-                self.registry,
-                history=self._history,
-                last_dsl=self._last_dsl,
-            )
-        except Exception as exc:
-            result.error = f"{type(exc).__name__}: {exc}"
-            result.error_type = type(exc).__name__
-            result.answer = result.error
-            return result
+        if base_dsl is not None:
+            # 会话继承轮（web 层 resolve_context 已确定性判定 inherit/drilldown）：
+            # 复用确定性规划器的关键词分派（趋势 -> trend_analysis，导出 ->
+            # export_report，其余 -> query_metric），跳过 LLM 规划的再判定——
+            # 既省一次 LLM 调用，也消除下钻轮跨会话漂移（审计修复 M1/M2：LLM
+            # 对"那华南呢/按品类展开"偶发误判 clarify，破坏多轮确定性）。
+            # 合并 DSL 经 ToolContext.base_dsl 注入，仍走全部安全守卫与护栏。
+            ql = query.lower()
+            if any(k in ql for k in _TREND_KEYWORDS):
+                plan = PlanResult(
+                    calls=[ToolCall("trend_analysis", {"query": query}, reason="继承轮趋势分析")]
+                )
+            elif any(k in ql for k in _EXPORT_KEYWORDS):
+                plan = PlanResult(
+                    calls=[
+                        ToolCall("query_metric", {"query": query}, reason="导出前先查询数据"),
+                        ToolCall("export_report", {"query": query}, reason="导出为可下载文件"),
+                    ]
+                )
+            else:
+                plan = PlanResult(
+                    calls=[
+                        ToolCall(
+                            "query_metric",
+                            {"query": query},
+                            reason="会话上下文继承（确定性执行）",
+                        )
+                    ]
+                )
+        else:
+            try:
+                plan = self.planner.plan(
+                    query,
+                    principal,
+                    self.registry,
+                    history=self._history,
+                    last_dsl=self._last_dsl,
+                )
+            except Exception as exc:
+                result.error = f"{type(exc).__name__}: {exc}"
+                result.error_type = type(exc).__name__
+                result.answer = result.error
+                return result
 
         if plan.answer is not None:
             result.answer = plan.answer
@@ -1080,7 +1329,9 @@ class ToolAgent:
         # R1 观察驱动重规划：每批执行完毕后把完整轨迹喂回规划器，由其基于
         # 中间结果决定"继续查 / 作答 / 反问 / 终止"。仅 iterative 规划器参与，
         # 全程受 max_steps 硬预算约束，杜绝无限循环。
-        if not stopped and self.planner.iterative:
+        # 会话继承轮（base_dsl 非 None）跳过：合并口径已确定性判定，规划器
+        # 再判只会引入跨轮漂移（M1/M2）。
+        if not stopped and base_dsl is None and self.planner.iterative:
             while (
                 len(result.steps) < self.max_steps
                 and replan_answer is None
@@ -1132,10 +1383,12 @@ class ToolAgent:
                     break
 
         # R3 反思层：调度终止后自检结果充分性。仅在预算有余时触发（预算耗尽
-        # 说明已全力调度）；重规划已作答时跳过（规划器已做过充分性判断）。
+        # 说明已全力调度）；重规划已作答时跳过（规划器已做过充分性判断）；
+        # 会话继承轮跳过（口径已确定性合并，无信息缺口可补——M1/M2）。
         # 追加查询受同一硬预算约束：全程工具执行总数仍 <= max_steps。
         if (
             self.reflector is not None
+            and base_dsl is None
             and result.steps
             and replan_answer is None
             and len(result.steps) < self.max_steps
@@ -1389,11 +1642,14 @@ _agent_lock = threading.Lock()
 
 
 def default_tool_agent() -> ToolAgent:
-    """进程内复用的默认 ToolAgent（LLM 已配置 -> LLM 规划 + 总结；否则确定性）。
+    """进程内复用的默认 ToolAgent（LLM 可用 -> LLM 规划 + 总结；否则确定性）。
 
-    反思层（R3）：AGENT_REFLECTION_ENABLED 开启时装配——LLM 模式用 LLMReflector
-    （判不充分可追加一次受控查询），确定性模式用 DeterministicReflector（只判定
-    留痕）。双检锁保护并发首调（就绪度评审 P3 卫生项处置：原工厂无锁且 _agent_lock
+    LLM 客户端从 Model Provider 网关解析（`resolve_default_client` 返回请求感知
+    的分发代理：按请求上下文 provider_id + model_id 动态转发真实协议适配器，
+    未绑定请求上下文时回落默认适配器）；反思层（R3）按
+    AGENT_REFLECTION_ENABLED 装配——LLM 模式用 LLMReflector（判不充分可追加
+    一次受控查询），确定性模式用 DeterministicReflector（只判定留痕）。
+    双检锁保护并发首调（就绪度评审 P3 卫生项处置：原工厂无锁且 _agent_lock
     为死变量，并发首调可能重复构造）。
     """
     global _default_agent
@@ -1401,15 +1657,9 @@ def default_tool_agent() -> ToolAgent:
         with _agent_lock:
             if _default_agent is None:
                 registry = default_registry()
+                client = resolve_default_client()
                 reflector: Reflector | None = None
-                if settings.LLM_API_KEY:
-                    client = OpenAICompatClient(
-                        base_url=settings.LLM_BASE_URL,
-                        api_key=settings.LLM_API_KEY,
-                        model=settings.LLM_MODEL,
-                        temperature=settings.LLM_TEMPERATURE,
-                        timeout=settings.LLM_TIMEOUT,
-                    )
+                if client is not None:
                     planner = LLMPlanner(
                         client, registry=registry, max_retries=settings.LLM_MAX_RETRIES
                     )

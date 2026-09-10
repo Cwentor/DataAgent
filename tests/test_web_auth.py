@@ -11,11 +11,10 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import time
-import urllib.error
-import urllib.request
 
 import pytest
 
@@ -39,17 +38,18 @@ def _start_server():
 
 
 def _request(port, method, path, payload=None, headers=None, timeout=10):
-    url = f"http://127.0.0.1:{port}{path}"
+    """测试 HTTP 客户端：显式回环地址 + http.client，目标仅限本地测试服务。"""
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
-    for k, v in (headers or {}).items():
-        req.add_header(k, v)
+    hdrs = {"Content-Type": "application/json"}
+    hdrs.update(headers or {})
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read().decode("utf-8")), resp
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read().decode("utf-8")), exc
+        conn.request(method, path, body=data, headers=hdrs)
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        return resp.status, json.loads(body), resp
+    finally:
+        conn.close()
 
 
 def _login(port, username, password):
@@ -475,15 +475,13 @@ def _create_export(port, headers):
 
 def _download(port, path, headers, timeout=10):
     """下载端点返回文件字节（非 JSON），单独封装取状态码与原始响应。"""
-    url = f"http://127.0.0.1:{port}{path}"
-    req = urllib.request.Request(url, method="GET")
-    for k, v in (headers or {}).items():
-        req.add_header(k, v)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read(), resp
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(), exc
+        conn.request("GET", path, headers=headers or {})
+        resp = conn.getresponse()
+        return resp.status, resp.read(), resp
+    finally:
+        conn.close()
 
 
 def test_export_owner_can_download(warehouse):
@@ -555,3 +553,43 @@ def test_query_shares_tool_layer_connection_pool(warehouse, monkeypatch):
     assert "error" not in result, result.get("error_detail")
     assert result["columns"] == ["gmv"]
     assert acquired["n"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 知识上下文：语义目录 Schema 摘要（/api/schema/summary）
+# --------------------------------------------------------------------------- #
+def test_schema_summary_requires_auth():
+    """未认证 -> 401。"""
+    server, port = _start_server()
+    try:
+        status, body, _ = _request(port, "GET", "/api/schema/summary")
+        assert status == 401 and body["error"] == "unauthorized"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_schema_summary_groups_by_table():
+    """认证后返回按物理表分组的字段清单（逻辑字段/物理列/类型）。"""
+    server, port = _start_server()
+    try:
+        _, login, _ = _login(port, "admin", "admin123")
+        status, body, _ = _request(
+            port,
+            "GET",
+            "/api/schema/summary",
+            headers={"Authorization": f"Bearer {login['token']}"},
+        )
+        assert status == 200
+        tables = body["tables"]
+        assert isinstance(tables, list) and tables
+        names = [t["table"] for t in tables]
+        assert "fact_orders" in names
+        orders = next(t for t in tables if t["table"] == "fact_orders")
+        fields = {f["field"] for f in orders["fields"]}
+        assert "order_amount" in fields
+        gmv_meta = next(f for f in orders["fields"] if f["field"] == "order_amount")
+        assert gmv_meta == {"field": "order_amount", "column": "order_amount", "dtype": "float"}
+    finally:
+        server.shutdown()
+        server.server_close()

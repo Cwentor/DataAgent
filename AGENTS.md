@@ -19,7 +19,7 @@
 
 ## 项目简介与核心架构
 
-**FutureBI** 是一款规格驱动（Spec-Driven）的企业级 ChatBI / Data Agent：
+**DataAgent** 是一款规格驱动（Spec-Driven）的企业级 Data Agent：
 自然语言 -> 结构化 DSL(JSON) -> 确定性 SQL 编译器 -> DuckDB 执行。
 
 - **架构核心铁律**：LLM 仅允许产出强契约受控 JSON（DSL），严禁直接生成裸 SQL，从根源上杜绝幻觉、越权与 SQL 注入。
@@ -29,8 +29,8 @@
 
 ## 运行环境（Conda 虚拟环境）
 
-- **环境管理器**：Miniconda / Anaconda（conda 26.x+）
-- **虚拟环境名**：`futurebi`
+- **环境管理器**：Miniconda / Anaconda（`conda 26.x+`）
+- **虚拟环境名**：`dataagent`
 - **Python 版本**：`3.12.x`（`requires-python = ">=3.11"`，锁定 3.12）
 - **依赖管理**：conda 管理 Python 运行时 + pip 安装开发依赖（`requirements-dev.txt`）
 
@@ -38,14 +38,14 @@
 
 ```bash
 # 创建并初始化环境
-conda create -n futurebi python=3.12 -y
-conda activate futurebi
+conda create -n dataagent python=3.12 -y
+conda activate dataagent
 pip install -r requirements-dev.txt
 ```
 
-> 注：本机环境已建好，位置 `C:\Users\<user>\.conda\envs\futurebi`；
-> 用 `conda activate futurebi` 即可进入。
-> 执行任何命令前必须确认处于 (futurebi) 环境。
+> 注：本机历史环境名仍为 `futurebi`（更名前创建，位于 `C:\Users\<user>\.conda\envs\futurebi`），
+> 在其重建/重命名为 `dataagent` 之前，用 `conda activate futurebi` 亦可进入，二者等效。
+> 执行任何命令前必须确认已激活上述环境之一。
 
 ## 常用命令
 
@@ -87,11 +87,28 @@ eval/       Golden 评测骨架与用例
 mock/       确定性 mock 数仓（DuckDB）
 present/    展示层（解释 + 可视化推荐）
 security/   权限控制（表级/列级/行级 RLS）
+core/       Data Agent 核心（企业级升级层，见下方四包说明）
 config/     全局配置
 tests/      单元测试
 tools/      生产工具包（工具注册中心、内置工具等）
 web/        Web 可视化 UI（service + server + static 前端）
 ```
+
+### core/ 四包（Data Agent 升级层）
+
+```
+core/retrieval/     检索门面：DSL 管道 typed Tool 化（execute_dsl_query -> ParquetRef）、
+                    PII 脱敏导出、裸 SQL 网关守卫（GuardrailViolation）
+core/orchestrator/  图式编排：StateGraph（六节点 + 条件边 + HITL 中断恢复 +
+                    反思重规划 ≤3 次自愈）；Planner/Coder/Reflector 提示词与 Few-Shot
+core/sandbox/       沙箱代码解释器：AST 静态守卫 + 限权 runner（模块白名单 import +
+                    workspace 受限 open）+ 可插拔后端（Docker 强隔离 / 子进程兜底）
+core/skills/        归因技能包：熵下钻 / 指标分解树（乘法对数链式 + 加法）/
+                    DTW / Holt-Winters 异常检测 / Shapley 值归因
+```
+
+依赖方向铁律：orchestrator -> retrieval / sandbox / skills / agent；retrieval 不依赖
+orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy + 标准库。
 
 ## 语言与交互铁律 (Strict Language & Output Rules)
 
@@ -120,3 +137,6 @@ web/        Web 可视化 UI（service + server + static 前端）
 - 文件首行标题必须遵循统一格式 `# 评审报告｜<评审类型>：<评审主题>（YYYY-MM）`，内容结构不强制统一；
 - 归档规范与清单详见 [`docs/reviews/README.md`](docs/reviews/README.md)。
 
+## Language Rule
+- 无论代码、终端日志或测试用例中包含多少英文，你在调用工具之间输出的任何进度说明、思考陈述、计划与总结，**必须始终使用简体中文**。
+- 禁止在中途输出如 "Now let me...", "Next, I will..." 等英文过渡句。

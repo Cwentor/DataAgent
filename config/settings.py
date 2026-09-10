@@ -25,6 +25,9 @@ load_dotenv(PROJECT_ROOT / ".env")
 # 本地开发零成本数仓文件（模块 C 生成）
 DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 
+# 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
+WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
+
 # 数据与评测统一锚点日期
 AS_OF_DATE: date = date(2024, 6, 30)
 
@@ -49,8 +52,9 @@ QUERY_TIMEOUT_MS: int = int(os.getenv("QUERY_TIMEOUT_MS", "30000"))
 MAX_SCAN_ROWS: int = int(os.getenv("MAX_SCAN_ROWS", "10000000"))
 # 返回行数硬上限：结果超过即熔断（LIMIT 硬上限，独立于 DSL 约束的防御性校验）
 MAX_RESULT_ROWS: int = int(os.getenv("MAX_RESULT_ROWS", "20000"))
-# SQL 执行自愈最大重试次数（把精确引擎报错喂回 LLM 重写 DSL，至少 1 次）
-SQL_SELF_HEAL_MAX_RETRIES: int = int(os.getenv("SQL_SELF_HEAL_MAX_RETRIES", "1"))
+# SQL 执行自愈最大重试次数（把精确编译/引擎报错喂回 LLM 重写 DSL，至少 1 次；
+# 审计修复 T01：1 次自愈对 order_by 别名类修正成功率不足，放宽为 3 次与编排器对齐）
+SQL_SELF_HEAL_MAX_RETRIES: int = int(os.getenv("SQL_SELF_HEAL_MAX_RETRIES", "3"))
 # EXPLAIN ANALYZE 扫描行预检缓存容量上限（整改指令3-3 降本项；原硬编码 512 改配置化）；
 # 超出按"清空防膨胀"策略处理（扫描行数随数据变化，无 LRU 精度必要，只防无限增长）
 MAX_SCAN_CACHE_SIZE: int = int(os.getenv("MAX_SCAN_CACHE_SIZE", "512"))
@@ -100,6 +104,16 @@ ROUTER_LLM_TIMEOUT: int = int(os.getenv("ROUTER_LLM_TIMEOUT", "15"))
 ROUTER_LLM_MODEL: str = os.getenv("ROUTER_LLM_MODEL", "")
 
 # --------------------------------------------------------------------------- #
+# Model Provider 网关层（多供应商接入）—— 见 providers/ 包
+# --------------------------------------------------------------------------- #
+# 供应商配置持久化文件（JSON；API Key 落盘加密存储，网络/展示不回传明文）
+PROVIDERS_FILE: Path = PROJECT_ROOT / "config" / "providers.json"
+# API Key 落盘加密主密钥（留空回退 AUTH_JWT_SECRET）；更换会使已存密钥无法解密
+PROVIDERS_ENC_SECRET: str = os.getenv("PROVIDERS_ENC_SECRET", "")
+# 供应商连通性探测与对话请求的默认超时（秒）
+PROVIDER_TIMEOUT: int = int(os.getenv("PROVIDER_TIMEOUT", "60"))
+
+# --------------------------------------------------------------------------- #
 # 审计与结构化日志（P0）—— 见 audit/ 包
 # --------------------------------------------------------------------------- #
 # 是否开启审计写入（对象存储 JSONL + DuckDB 审计表）
@@ -136,8 +150,8 @@ AUTH_JWT_SECRET: str = os.getenv("AUTH_JWT_SECRET", "dev-insecure-jwt-secret-cha
 WEAK_JWT_SECRETS: frozenset[str] = frozenset(
     {"", "dev-insecure-jwt-secret-change-me", "changeme", "secret", "password"}
 )
-AUTH_JWT_ISSUER: str = os.getenv("AUTH_JWT_ISSUER", "futurebi")
-AUTH_JWT_AUDIENCE: str = os.getenv("AUTH_JWT_AUDIENCE", "futurebi-web")
+AUTH_JWT_ISSUER: str = os.getenv("AUTH_JWT_ISSUER", "dataagent")
+AUTH_JWT_AUDIENCE: str = os.getenv("AUTH_JWT_AUDIENCE", "dataagent-web")
 # 令牌有效期（秒）：JWT 与 Session 各自独立
 AUTH_JWT_TTL: int = int(os.getenv("AUTH_JWT_TTL", "3600"))
 AUTH_SESSION_TTL: int = int(os.getenv("AUTH_SESSION_TTL", "86400"))

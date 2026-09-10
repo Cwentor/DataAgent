@@ -286,9 +286,27 @@ def _print_summary(summary: EvalSummary, print_sql: bool = False) -> None:
     print("=" * 90)
 
 
+def _lock_determinism() -> None:
+    """锁定 agent 评测确定性（审计修复 D8：消除 Q22 类跨轮翻转）。
+
+    - 强制 LLM 温度 0.0（adapters 缺省即 0，此处显式覆盖环境变量干扰）；
+    - 固定全局随机种子 42（与评测锚点 AS_OF_DATE 同源的确定性约定）。
+    """
+    import random
+
+    random.seed(42)
+    try:  # numpy 可选依赖：技能包使用，可用时一并锁定
+        import numpy as np
+
+        np.random.seed(42)
+    except ImportError:  # pragma: no cover - 无 numpy 环境跳过
+        pass
+    settings.LLM_TEMPERATURE = 0.0
+
+
 def main(argv: list[str] | None = None) -> int:
     """命令行入口：--pipeline 选择 oracle/agent，--print-sql 输出编译 SQL。"""
-    parser = argparse.ArgumentParser(description="ChatBI Golden Dataset 评测")
+    parser = argparse.ArgumentParser(description="DataAgent Golden Dataset 评测")
     parser.add_argument("--print-sql", action="store_true", help="打印每个用例的编译 SQL")
     parser.add_argument(
         "--pipeline",
@@ -300,6 +318,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if not settings.DB_PATH.exists():
         raise SystemExit(f"未找到数仓文件 {settings.DB_PATH}，请先执行: python -m mock.init_duckdb")
+
+    if args.pipeline == "agent":
+        _lock_determinism()
 
     conn = duckdb.connect(str(settings.DB_PATH), read_only=True)
     try:

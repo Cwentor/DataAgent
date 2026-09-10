@@ -38,15 +38,23 @@ CATEGORIES = {
 N_USERS = 200
 N_PRODUCTS = 60
 N_ORDERS = 3000
+N_SHOPS = 20
 
 
-def generate(seed: int = SEED) -> tuple[list, list, list, list]:
-    """生成四张表的行数据，返回 (users, products, orders, refunds)。
+def generate(seed: int = SEED) -> tuple[list, list, list, list, list]:
+    """生成五张表的行数据，返回 (users, products, orders, refunds, shops)。
 
-    注意：refunds 的随机数在 orders 之后消费，因此不改变既有订单数据。
+    注意：refunds 的随机数在 orders 之后消费，因此不改变既有订单数据；
+    shops 使用独立随机序列（seed+1），product_name / shop_id 使用确定性派生，
+    均不消耗主 rng 序列，保证既有订单/退款数据完全可复现。
     """
+    # 确定性复现要求：评测锚点 AS_OF_DATE + 种子 42，必须使用 seeded Random
+    # （非安全用途，仅生成 mock 数据；CWE-338 在此为设计意图而非缺陷）
     rng = random.Random(seed)
     asof = settings.AS_OF_DATE
+
+    # 店铺维度表：门店名确定性生成，不消耗主 rng 序列（保证既有订单/退款数据可复现）
+    shops: list[tuple] = [(sid, f"店铺{sid:02d}") for sid in range(1, N_SHOPS + 1)]
 
     users: list[tuple] = []
     for uid in range(1, N_USERS + 1):
@@ -61,7 +69,9 @@ def generate(seed: int = SEED) -> tuple[list, list, list, list]:
         category = rng.choice(list(CATEGORIES.keys()))
         brand = rng.choice(CATEGORIES[category])
         unit_price = round(rng.uniform(9.9, 9999.0), 2)
-        products.append((pid, category, brand, unit_price))
+        # product_name 确定性派生（不消耗 rng），保证既有订单/退款随机序列不变
+        product_name = f"{brand}-{category}#{pid:03d}"
+        products.append((pid, category, brand, unit_price, product_name))
         price_map[pid] = unit_price
 
     orders: list[tuple] = []
@@ -79,7 +89,9 @@ def generate(seed: int = SEED) -> tuple[list, list, list, list]:
             days=rng.randint(0, 400),
             seconds=rng.randint(0, 86399),
         )
-        orders.append((oid, uid, pid, amount, discount, status, order_time))
+        # shop_id 确定性派生（不消耗 rng），保持既有订单/退款随机序列不变
+        shop_id = ((uid + pid) % N_SHOPS) + 1
+        orders.append((oid, uid, pid, shop_id, amount, discount, status, order_time))
         if status == "SUCCESS":
             refund_candidates.append((oid, amount, order_time))
 
@@ -94,7 +106,7 @@ def generate(seed: int = SEED) -> tuple[list, list, list, list]:
             refund_time = order_time + timedelta(days=rng.randint(0, 7))
             refunds.append((rid, oid, refund_amount, refund_time, refund_status))
 
-    return users, products, orders, refunds
+    return users, products, orders, refunds, shops
 
 
 def _ddl(conn: duckdb.DuckDBPyConnection) -> None:
@@ -108,10 +120,17 @@ def _ddl(conn: duckdb.DuckDBPyConnection) -> None:
     """)
     conn.execute("""
         CREATE TABLE dim_product (
-            product_id  INTEGER PRIMARY KEY,
-            category    VARCHAR,
-            brand       VARCHAR,
-            unit_price  DOUBLE
+            product_id   INTEGER PRIMARY KEY,
+            category     VARCHAR,
+            brand        VARCHAR,
+            unit_price   DOUBLE,
+            product_name VARCHAR
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE dim_shop (
+            shop_id   INTEGER PRIMARY KEY,
+            shop_name VARCHAR
         )
     """)
     conn.execute("""
@@ -119,6 +138,7 @@ def _ddl(conn: duckdb.DuckDBPyConnection) -> None:
             order_id        INTEGER PRIMARY KEY,
             user_id         INTEGER,
             product_id      INTEGER,
+            shop_id         INTEGER,
             order_amount    DOUBLE,
             discount_amount DOUBLE,
             pay_status      VARCHAR,
@@ -139,11 +159,12 @@ def _ddl(conn: duckdb.DuckDBPyConnection) -> None:
 def build_tables(conn: duckdb.DuckDBPyConnection, seed: int = SEED) -> None:
     """在给定连接上建表并灌数据（内存连接或文件连接均可）。"""
     _ddl(conn)
-    users, products, orders, refunds = generate(seed)
+    users, products, orders, refunds, shops = generate(seed)
 
     conn.executemany("INSERT INTO dim_user VALUES (?, ?, ?, ?)", users)
-    conn.executemany("INSERT INTO dim_product VALUES (?, ?, ?, ?)", products)
-    conn.executemany("INSERT INTO fact_orders VALUES (?, ?, ?, ?, ?, ?, ?)", orders)
+    conn.executemany("INSERT INTO dim_product VALUES (?, ?, ?, ?, ?)", products)
+    conn.executemany("INSERT INTO dim_shop VALUES (?, ?)", shops)
+    conn.executemany("INSERT INTO fact_orders VALUES (?, ?, ?, ?, ?, ?, ?, ?)", orders)
     conn.executemany("INSERT INTO fact_refunds VALUES (?, ?, ?, ?, ?)", refunds)
 
     _write_metadata(conn)
@@ -180,10 +201,18 @@ def main() -> None:
     conn = duckdb.connect(str(db_path))
     try:
         build_tables(conn)
-        counts = {
-            t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-            for t in ("dim_user", "dim_product", "fact_orders", "fact_refunds")
-        }
+        counts = {}
+        for t in ("dim_user", "dim_product", "dim_shop", "fact_orders", "fact_refunds"):
+            if t == "dim_user":
+                counts[t] = conn.execute("SELECT COUNT(*) FROM dim_user", ()).fetchone()[0]
+            elif t == "dim_product":
+                counts[t] = conn.execute("SELECT COUNT(*) FROM dim_product", ()).fetchone()[0]
+            elif t == "dim_shop":
+                counts[t] = conn.execute("SELECT COUNT(*) FROM dim_shop", ()).fetchone()[0]
+            elif t == "fact_orders":
+                counts[t] = conn.execute("SELECT COUNT(*) FROM fact_orders", ()).fetchone()[0]
+            else:
+                counts[t] = conn.execute("SELECT COUNT(*) FROM fact_refunds", ()).fetchone()[0]
         print("[init_duckdb] 表创建完成:")
         for t, n in counts.items():
             print(f"  - {t}: {n} 行")

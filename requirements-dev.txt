@@ -2,3 +2,7 @@
 pytest>=8.0
 black>=24.0
 ruff>=0.4
+# 沙箱与技能包数值栈（Data Agent 分析能力；生产检索链路不依赖）
+numpy>=1.26
+pandas>=2.2
+pyarrow>=15.0

@@ -1,10 +1,11 @@
-"""FutureBI Web UI 服务（零依赖，标准库 http.server）+ 统一身份认证网关（P0）。
+"""DataAgent Web UI 服务（零依赖，标准库 http.server）+ 统一身份认证网关（P0）。
 
 用法:
     python -m web.server [端口]     # 默认 8000
 
 公开路由:
-    GET  /              -> 前端页面
+    GET  /              -> 前端主控制台（业务页面）
+    GET  /login         -> 独立登录页（未登录强制落地页）
     GET  /static/*      -> 静态资源
     GET  /api/health    -> 健康检查
     POST /api/auth/login   -> 登录：校验用户名/口令，签发 JWT + 会话
@@ -13,6 +14,10 @@
 
 受保护路由:
     POST /api/query     -> 完整链路（需 Bearer JWT 或会话）
+    GET/POST /api/settings/providers        -> 供应商列表 / 创建（响应不含 api_key）
+    PUT/DELETE /api/settings/providers/<id> -> 供应商更新 / 删除（预置供应商拒绝删除）
+    POST /api/settings/providers/test       -> 连通性探测（极小 ping 文本，返回延时）
+    POST /api/settings/providers/<id>/reveal -> 查看已保存 API Key（显式动作，记审计）
 
 P0 安全约束（网关层强制）：
 - principal 只由服务端从已认证身份映射（auth.gateway.authenticate），
@@ -26,7 +31,11 @@ X-Request-ID 请求头（或服务端生成）贯穿请求处理与审计链路�
 from __future__ import annotations
 
 import json
+import queue
 import sys
+import threading
+import time
+import uuid as uuid_mod
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -39,7 +48,11 @@ from auth.ratelimit import LoginRateLimitError, default_login_limiter
 from auth.session import default_session_store
 from auth.tokens import create_token
 from config import settings
+from core.orchestrator.agent import run_agent
+from core.orchestrator.state import AgentState
+from providers.context import pop_request_model, set_request_model
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
+from web import providers_api
 from web.service import ensure_db, run_query
 from web.tasks import default_task_manager
 
@@ -58,6 +71,9 @@ MIME = {
 
 _access_logger = get_logger("web.access")
 _auth_logger = get_logger("web.auth")
+
+# HITL 暂停态（进程内存；属主绑定）：resume_token -> {owner, state}
+_AGENT_PAUSED_STATES: dict[str, dict] = {}
 
 
 def _level_from_str(level: str) -> int:
@@ -91,6 +107,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", MIME.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(body)))
+        # 前端脚本/样式更新必须即时生效：禁止浏览器缓存旧版 app.js，
+        # 否则修复后的交互逻辑（供应商/模型保存）对用户表现为"修了没生效"。
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Request-ID", get_request_id())
         self.end_headers()
         self.wfile.write(body)
@@ -127,7 +146,7 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ #
     def do_GET(self) -> None:
         # 每个请求入口注入结构化日志上下文（request_id 贯穿）
-        """GET 路由：健康检查 / 指标 / 审计 / 导出下载 / 静态前端文件。"""
+        """GET 路由：健康检查 / 指标 / 审计 / 导出下载 / SSE 流 / 静态前端文件。"""
         set_request_context(request_id=self.headers.get("X-Request-ID"))
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
@@ -140,8 +159,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_me()
         if parsed.path.startswith("/api/tasks/"):
             return self._get_task(parsed.path[len("/api/tasks/") :])
+        if parsed.path == "/api/v1/agent/chat/stream":
+            return self._get_agent_chat_stream()
+        if parsed.path == "/api/schema/summary":
+            ctx = self._authenticate()
+            if ctx is None:
+                return self._send_json({"error": "unauthorized"}, 401)
+            set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+            code, body = self._schema_summary(ctx)
+            return self._send_json(body, code)
+        if parsed.path == "/api/settings/providers":
+            return self._protected(providers_api.list_providers)
         if parsed.path in ("/", "/index.html"):
             return self._send_file("index.html")
+        if parsed.path == "/login":
+            return self._send_file("login.html")
         rel = parsed.path[len("/static/") :] if parsed.path.startswith("/static/") else ""
         return self._send_file(rel)
 
@@ -157,6 +189,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_query()
         if parsed.path == "/api/query/async":
             return self._post_query_async()
+        if parsed.path == "/api/agent/run":
+            return self._post_agent_run()
+        if parsed.path == "/api/settings/providers":
+            return self._post_providers()
+        if parsed.path == "/api/settings/providers/test":
+            return self._post_providers_test()
+        if parsed.path.startswith("/api/settings/providers/") and parsed.path.endswith("/reveal"):
+            # 查看已保存的真实 API Key（显式动作；响应含明文，记审计日志）
+            provider_id = parsed.path[len("/api/settings/providers/") : -len("/reveal")]
+            return self._protected(providers_api.reveal_provider_key, provider_id)
+        return self._send_json({"error": "not found"}, 404)
+
+    def do_PUT(self) -> None:
+        """PUT 路由：供应商配置更新（id / is_preset 不可变更）。"""
+        set_request_context(request_id=self.headers.get("X-Request-ID"))
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/settings/providers/"):
+            provider_id = parsed.path[len("/api/settings/providers/") :]
+            return self._put_provider(provider_id)
+        return self._send_json({"error": "not found"}, 404)
+
+    def do_DELETE(self) -> None:
+        """DELETE 路由：供应商配置删除（预置供应商拒绝）。"""
+        set_request_context(request_id=self.headers.get("X-Request-ID"))
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/settings/providers/"):
+            provider_id = parsed.path[len("/api/settings/providers/") :]
+            return self._delete_provider(provider_id)
         return self._send_json({"error": "not found"}, 404)
 
     # ------------------------------------------------------------------ #
@@ -293,6 +353,10 @@ class Handler(BaseHTTPRequestHandler):
         request_id = self.headers.get("X-Request-ID")
         set_request_context(request_id=request_id, session_id=session_id, user=ctx.username)
 
+        # 请求级模型切换：随任务闭包透传（run_query 在工作线程内绑定上下文）
+        provider_id = str(body.get("provider_id") or "").strip() or None
+        model_id = str(body.get("model_id") or "").strip() or None
+
         def _run_query_task() -> dict:
             return run_query(
                 query,
@@ -300,6 +364,8 @@ class Handler(BaseHTTPRequestHandler):
                 request_id=request_id,
                 session_id=session_id,
                 user=ctx.username,
+                provider_id=provider_id,
+                model_id=model_id,
             )
 
         task_id = default_task_manager().submit(_run_query_task, owner=ctx.username)
@@ -324,6 +390,41 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": "task not found"}, 404)
         snap.pop("owner", None)  # 快照对外不暴露属主字段
         self._send_json(snap)
+
+    # ------------------------------------------------------------------ #
+    # 受保护：/api/settings/providers（Model Provider 配置管理与连通性探测）
+    # ------------------------------------------------------------------ #
+    def _protected(self, endpoint, *args) -> None:
+        """统一鉴权封装：认证通过后调用 providers_api 端点并回传 JSON。"""
+        ctx = self._authenticate()
+        if ctx is None:
+            return self._send_json({"error": "unauthorized"}, 401)
+        set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+        code, body = endpoint(*args)
+        return self._send_json(body, code)
+
+    def _post_providers(self) -> None:
+        """POST /api/settings/providers：创建自定义供应商。"""
+        body = self._read_body()
+        if body is None:
+            return self._send_json({"error": "invalid json"}, 400)
+        return self._protected(providers_api.create_provider, body)
+
+    def _post_providers_test(self) -> None:
+        """POST /api/settings/providers/test：连通性探测（业务失败以 200+success=false 返回）。"""
+        body = self._read_body() or {}
+        return self._protected(providers_api.test_provider, body)
+
+    def _put_provider(self, provider_id: str) -> None:
+        """PUT /api/settings/providers/<id>：更新供应商配置。"""
+        body = self._read_body()
+        if body is None:
+            return self._send_json({"error": "invalid json"}, 400)
+        return self._protected(providers_api.update_provider, provider_id, body)
+
+    def _delete_provider(self, provider_id: str) -> None:
+        """DELETE /api/settings/providers/<id>：删除自定义供应商。"""
+        return self._protected(providers_api.delete_provider, provider_id)
 
     # 受保护：/api/query
     # ------------------------------------------------------------------ #
@@ -350,6 +451,11 @@ class Handler(BaseHTTPRequestHandler):
 
         session_id = ctx.session_id or _bound_session_id(self.headers, ctx.username)
 
+        # 请求级模型切换（Chat 界面模型切换器）：provider_id / model_id 可选透传，
+        # 服务端据此把本次查询的所有 LLM 调用转发到目标供应商
+        provider_id = str(body.get("provider_id") or "").strip() or None
+        model_id = str(body.get("model_id") or "").strip() or None
+
         # 客户端传入的 principal 一律忽略（P0：服务端强制绑定）
         client_principal = body.get("principal")
         if client_principal is not None and str(client_principal) != ctx.principal:
@@ -373,9 +479,262 @@ class Handler(BaseHTTPRequestHandler):
             request_id=self.headers.get("X-Request-ID"),
             session_id=session_id,
             user=ctx.username,
+            provider_id=provider_id,
+            model_id=model_id,
         )
         result["auth"] = ctx.to_dict()
         return self._send_json(result)
+
+    # ------------------------------------------------------------------ #
+    # 受保护：/api/agent/run（Data Agent 编排：多步分析 + 沙箱 + 归因）
+    # ------------------------------------------------------------------ #
+    def _post_agent_run(self) -> None:
+        """POST /api/agent/run：编排器同步执行（多步分析可能较慢）。
+
+        请求体：{"query": "...", "human_reply": 可选（HITL 答复）,
+                 "resume_token": 可选（上一次 clarify 暂停态的恢复句柄）}
+        响应：
+        - phase=clarify（需要澄清）：{"phase": "clarify", "clarification": "...",
+          "resume_token": "..."} —— 用户答复后携 token+human_reply 重调；
+        - phase=done：AgentTrace（report/steps/artifacts/self_heal_count）。
+        暂停态仅驻留本进程内存（属主绑定），进程重启后 token 失效。
+        """
+        ctx = self._authenticate()
+        if ctx is None:
+            return self._send_json({"error": "unauthorized"}, 401)
+        body = self._read_body()
+        if body is None:
+            return self._send_json({"error": "invalid json"}, 400)
+        query = str(body.get("query", "")).strip()
+        if not query:
+            return self._send_json({"error": "query is required"}, 400)
+        human_reply = body.get("human_reply")
+        human_reply = str(human_reply).strip() if isinstance(human_reply, str) else None
+        resume_token = str(body.get("resume_token") or "").strip() or None
+
+        set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+
+        resume_state: AgentState | None = None
+        if resume_token:
+            paused = _AGENT_PAUSED_STATES.pop(resume_token, None)
+            if paused is None or paused.get("owner") != ctx.username:
+                return self._send_json({"error": "resume token 无效或已过期"}, 404)
+            resume_state = AgentState.model_validate(paused["state"])
+            resume_state = resume_state.model_copy(update={"human_reply": human_reply})
+
+        result = run_agent(
+            query,
+            session_id=ctx.session_id or ctx.username,
+            human_reply=None if resume_state else human_reply,
+            resume_state=resume_state,
+        )
+        if isinstance(result, AgentState):
+            # HITL 中断：登记属主化的暂停态，返回恢复句柄
+            import uuid
+
+            token = f"hitl-{uuid.uuid4().hex[:16]}"
+            _AGENT_PAUSED_STATES[token] = {
+                "owner": ctx.username,
+                "state": result.model_dump(mode="json"),
+            }
+            return self._send_json(
+                {
+                    "phase": "clarify",
+                    "clarification": result.clarification,
+                    "resume_token": token,
+                    "session_id": result.session_id,
+                }
+            )
+        result_dict = result.to_dict()
+        result_dict["auth"] = ctx.to_dict()
+        return self._send_json(result_dict)
+
+    # ------------------------------------------------------------------ #
+    # 受保护：/api/v1/agent/chat/stream（SSE 流式 Data Agent 会话）
+    # ------------------------------------------------------------------ #
+    def _get_agent_chat_stream(self) -> None:
+        """SSE 流式编排端点（EventSource 语义走 GET，鉴权用 Bearer/会话头）。
+
+        协议：``text/event-stream``，每帧 ``data: <AgentStreamEvent JSON>\\n\\n``；
+        事件类型与前端 ``AgentEventType`` 契约一一对应（plan_created / step_start /
+        tool_start / tool_end / reflection / hitl_request / artifact_emit / done /
+        error）。编排器在后台线程同步执行，事件经有界队列转发到响应流——
+        编排异常 / 客户端断开都不会崩流，异常统一收敛为 error 事件后正常收尾。
+
+        查询参数：query（必填）、human_reply / resume_token（HITL 恢复）、
+        provider_id / model_id（请求级模型切换）。
+        """
+        ctx = self._authenticate()
+        if ctx is None:
+            # 未认证：以普通 401 JSON 响应（EventSource onerror 可感知）
+            return self._send_json({"error": "unauthorized"}, 401)
+
+        parsed = urlparse(self.path)
+        params: dict[str, str] = {}
+        if parsed.query:
+            from urllib.parse import parse_qs
+
+            for key, values in parse_qs(parsed.query).items():
+                if values:
+                    params[key] = values[0]
+        query = params.get("query", "").strip()
+        if not query:
+            return self._send_json({"error": "query is required"}, 400)
+        human_reply = params.get("human_reply", "").strip() or None
+        resume_token = params.get("resume_token", "").strip() or None
+        provider_id = params.get("provider_id", "").strip() or None
+        model_id = params.get("model_id", "").strip() or None
+
+        set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+
+        # SSE 响应头：close-delimited 流（无 Content-Length，写完关闭连接）
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        events_q: queue.Queue[dict | None] = queue.Queue(maxsize=256)
+
+        def _observer(event: dict) -> None:
+            """编排事件 -> 队列（有界：队列满时丢弃最旧事件，防止编排线程阻塞）。
+
+            run_agent 内置的 hitl_request（不含 resume_token）在此丢弃——
+            SSE 端点在编排返回后用带 resume_token 的版本统一下发。
+            """
+            if event.get("event") == "hitl_request":
+                return
+            try:
+                events_q.put_nowait(event)
+            except queue.Full:
+                try:
+                    events_q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    events_q.put_nowait(event)
+                except queue.Full:
+                    pass
+
+        def _run_orchestration() -> None:
+            """后台执行编排（同线程 contextvar 对观察者可见）。"""
+            pop_request_model()
+            if provider_id or model_id:
+                set_request_model(provider_id or "", model_id or "")
+            try:
+                resume_state: AgentState | None = None
+                if resume_token:
+                    paused = _AGENT_PAUSED_STATES.pop(resume_token, None)
+                    if paused is None or paused.get("owner") != ctx.username:
+                        events_q.put(
+                            {
+                                "turn_id": "",
+                                "event": "error",
+                                "timestamp": int(time.time() * 1000),
+                                "payload": {"error": "resume token 无效或已过期"},
+                            }
+                        )
+                        return
+                    resume_state = AgentState.model_validate(paused["state"])
+                    resume_state = resume_state.model_copy(update={"human_reply": human_reply})
+                result = run_agent(
+                    query,
+                    session_id=ctx.session_id or ctx.username,
+                    human_reply=None if resume_state else human_reply,
+                    resume_state=resume_state,
+                    on_event=_observer,
+                )
+                if isinstance(result, AgentState):
+                    # HITL 中断：登记属主化暂停态，经事件流下发恢复句柄
+                    token = f"hitl-{uuid_mod.uuid4().hex[:16]}"
+                    _AGENT_PAUSED_STATES[token] = {
+                        "owner": ctx.username,
+                        "state": result.model_dump(mode="json"),
+                    }
+                    events_q.put(
+                        {
+                            "turn_id": result.turn_id,
+                            "event": "hitl_request",
+                            "timestamp": int(time.time() * 1000),
+                            "payload": {
+                                "hitl": {
+                                    "question": result.clarification or "请补充分析需求",
+                                    "resume_token": token,
+                                }
+                            },
+                        }
+                    )
+            except Exception as exc:  # 编排异常收敛为 error 事件（不崩流）
+                events_q.put(
+                    {
+                        "turn_id": "",
+                        "event": "error",
+                        "timestamp": int(time.time() * 1000),
+                        "payload": {"error": f"{type(exc).__name__}: {exc}"},
+                    }
+                )
+            finally:
+                pop_request_model()
+                events_q.put(None)  # 哨兵：流结束
+
+        worker = threading.Thread(target=_run_orchestration, daemon=True)
+        worker.start()
+
+        try:
+            while True:
+                try:
+                    event = events_q.get(timeout=300)
+                except queue.Empty:
+                    event = {
+                        "turn_id": "",
+                        "event": "error",
+                        "timestamp": int(time.time() * 1000),
+                        "payload": {"error": "编排超时（300s 无事件），连接已终止"},
+                    }
+                    self._sse_write(event)
+                    break
+                if event is None:
+                    break
+                self._sse_write(event)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return  # 客户端断开：编排线程继续跑完（结果弃置），响应流终止
+        finally:
+            try:
+                self.wfile.flush()
+                self.close_connection = True
+            except OSError:
+                pass
+
+    def _sse_write(self, event: dict) -> None:
+        """写一帧 SSE 事件（``data: <json>\\n\\n``）并立即 flush。"""
+        frame = json.dumps(event, ensure_ascii=False)
+        self.wfile.write(f"data: {frame}\n\n".encode())
+        self.wfile.flush()
+
+    # ------------------------------------------------------------------ #
+    # 受保护：/api/schema/summary（知识上下文：语义目录字段清单）
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _schema_summary(ctx: AuthContext) -> tuple[int, dict]:
+        """语义目录摘要（Header「Schema 选择器」数据源）。
+
+        输出按物理表分组的字段清单（逻辑字段名 / 物理列 / 类型），
+        供前端展示"知识上下文 & DuckDB Schema"；只读目录，不触库。
+        """
+        from semantic.catalog import COLUMNS
+
+        tables: dict[str, list[dict]] = {}
+        for logical, meta in sorted(COLUMNS.items()):
+            tables.setdefault(meta.table, []).append(
+                {"field": logical, "column": meta.column, "dtype": meta.dtype}
+            )
+        return 200, {
+            "principal": ctx.principal,
+            "tables": [
+                {"table": name, "fields": fields} for name, fields in sorted(tables.items())
+            ],
+        }
 
     # ------------------------------------------------------------------ #
     # 受保护：/api/export/<id>（导出文件下载，P0-4 表格导出链路）
@@ -497,7 +856,7 @@ def main() -> None:
     )
     display_host = "localhost" if host in {"0.0.0.0", "::"} else host
     print(
-        f"FutureBI Web UI running at http://{display_host}:{port}  [auth={auth_state}]", flush=True
+        f"DataAgent Web UI running at http://{display_host}:{port}  [auth={auth_state}]", flush=True
     )
     server.serve_forever()
 

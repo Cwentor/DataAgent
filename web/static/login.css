@@ -1,0 +1,156 @@
+/* DataAgent 独立登录页：深蓝氛围 + 玻璃拟态居中卡片 */
+
+:root {
+  --accent: #4f6ef7;
+  --accent-dark: #3b56d4;
+  --text: #1a1d2e;
+  --muted: #6b7280;
+  --danger: #b91c1c;
+}
+
+* { box-sizing: border-box; }
+
+body.login-page {
+  margin: 0;
+  min-height: 100vh;
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #eef1ff;
+  background: radial-gradient(1200px 800px at 15% 10%, #232a5c 0%, transparent 60%),
+              radial-gradient(1000px 700px at 85% 90%, #1d4a5e 0%, transparent 55%),
+              linear-gradient(160deg, #10132a 0%, #171d3f 55%, #0d1124 100%);
+  overflow-x: hidden;
+}
+
+/* 背景装饰光斑 */
+.glow {
+  position: fixed; border-radius: 50%; filter: blur(90px); opacity: .35;
+  pointer-events: none; z-index: 0;
+}
+.glow-a { width: 420px; height: 420px; left: -120px; top: -120px; background: #4f6ef7; }
+.glow-b { width: 380px; height: 380px; right: -100px; bottom: -120px; background: #12b8cf; }
+
+.login-stage {
+  position: relative; z-index: 1;
+  min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 40px 16px 24px;
+}
+
+.login-card {
+  width: 420px; max-width: 100%;
+  padding: 36px 36px 26px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+/* 品牌区 */
+.login-brand { text-align: center; margin-bottom: 24px; }
+.login-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 56px; height: 56px; border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent), #12b8cf);
+  font-size: 30px; font-weight: 800; color: #fff;
+  box-shadow: 0 10px 30px rgba(79, 110, 247, 0.45);
+  margin-bottom: 14px;
+}
+.login-brand h1 { margin: 0; font-size: 26px; letter-spacing: .5px; }
+.login-slogan {
+  margin: 10px 0 0; font-size: 12px; line-height: 1.7;
+  color: #aab3d6;
+}
+
+/* 通用隐藏工具类：登录页 alert / spinner 等依赖 .hidden 切换显隐 */
+.hidden { display: none !important; }
+
+/* 行内 Alert（优雅错误提示） */
+.login-alert {
+  margin-bottom: 16px; padding: 10px 14px; border-radius: 10px;
+  font-size: 13.5px; line-height: 1.6;
+  background: rgba(226, 72, 72, 0.14);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #ffb4b4;
+  animation: alert-in .18s ease-out;
+}
+@keyframes alert-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+/* 表单 */
+.field { margin-bottom: 16px; }
+.field label {
+  display: block; margin-bottom: 7px;
+  font-size: 13px; font-weight: 600; color: #c6cdea;
+}
+.control {
+  position: relative; display: flex; align-items: center;
+}
+.control-icon {
+  position: absolute; left: 13px; font-size: 14px; opacity: .75; pointer-events: none;
+}
+.control input {
+  width: 100%; padding: 12px 14px 12px 40px;
+  font-size: 14.5px; color: #eef1ff;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 11px; outline: none;
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.control input::placeholder { color: #7d87ad; }
+.control input:focus {
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.25);
+}
+
+.pw-eye {
+  position: absolute; right: 8px;
+  padding: 6px 9px; font-size: 14px;
+  background: transparent; border: none; border-radius: 8px;
+  cursor: pointer; color: #aab3d6;
+}
+.pw-eye:hover { background: rgba(255, 255, 255, 0.1); }
+
+/* 记住我 */
+.remember-row {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin: 2px 0 20px; font-size: 13.5px; color: #c6cdea; cursor: pointer;
+  user-select: none;
+}
+.remember-row input {
+  width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer;
+}
+
+/* 提交按钮（含 Loading 态） */
+.login-submit {
+  position: relative;
+  width: 100%; padding: 13px 0;
+  border: none; border-radius: 11px; cursor: pointer;
+  background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+  color: #fff; font-size: 15.5px; font-weight: 700; letter-spacing: 4px;
+  box-shadow: 0 10px 26px rgba(59, 86, 212, 0.45);
+  transition: transform .12s, box-shadow .12s, filter .12s;
+}
+.login-submit:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+.login-submit:disabled { opacity: .72; cursor: default; }
+.spinner {
+  display: inline-block; vertical-align: -3px; margin-right: 8px;
+  width: 15px; height: 15px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35); border-top-color: #fff;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.login-hint {
+  margin: 18px 0 0; text-align: center;
+  font-size: 12px; color: #7d87ad;
+}
+
+.login-footer {
+  margin-top: 22px; font-size: 12px; color: #6a7194; text-align: center;
+}
+
+@media (max-width: 480px) {
+  .login-card { padding: 28px 22px 20px; border-radius: 14px; }
+}

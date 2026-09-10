@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import OrderedDict
@@ -43,6 +44,8 @@ from config import settings
 from persistence.kvstore import SqliteKVStore
 from security.policy import POLICIES, PRINCIPAL_ATTRS
 from semantic.dsl_schema import Dimension, Filter, FilterOperator, QueryDSL, TimeFilter
+
+logger = logging.getLogger(__name__)
 
 # 未提供身份时的兜底绑定标识（直接调用 run_query 且未传 user/principal 的测试场景）
 _ANONYMOUS = "anonymous"
@@ -72,6 +75,32 @@ _TREND_KEYWORDS: tuple[str, ...] = (
     "补齐",
 )
 _ADD_DIM_KEYWORDS: tuple[str, ...] = ("下钻", "展开", "细分")
+
+# 排他/覆盖引导词：命中即判定为"重开新指标"（RESET），严禁继承上一轮 metrics/dimensions。
+# 注意：不含"换成"——"换成近30天/换成浙江"属于合法的维度/时间替换继承（走 _apply_deltas），
+# 若一刀切纳入会误伤微调场景（任务 Spec §1 与 §2 对"换成"的归类本身就是矛盾的，取 §2 的更安全取向）。
+_EXCLUSIVE_TERMS: tuple[str, ...] = (
+    "我只需要知道",
+    "只要看",
+    "仅看",
+    "仅统计",
+    "只看",
+    "只统计",
+    "不要之前的",
+    "光看",
+    "光要",
+)
+
+# "独立维度请求"语气词：与维度字段关键词共同命中时，视为"只问这个维度本身"（如数量/枚举），
+# 属于全新指标请求（count_distinct），应 RESET 而非继承上轮金额度量。
+_DIM_QUESTION_WORDS: tuple[str, ...] = (
+    "多少个",
+    "多少种",
+    "几个",
+    "多少",
+    "数量",
+    "数目",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -348,9 +377,91 @@ def _collect_deltas(query: str) -> _Deltas:
 
 
 def _has_metric_term(query: str) -> bool:
-    """是否包含已定义的业务指标词（视为"完整新问题"而非省略指代）。"""
+    """是否包含已定义的业务指标词（视为"完整新问题"而非省略指代）。
+
+    除口径词典别名（订单数/GMV/去重用户…）外，数量式提问（"多少订单/几个用户/多少笔"）
+    同样命中：它们代表**全新计数指标**（heuristic._count_entity_metric），
+    必须推向 topic_switch（RESET），杜绝"仅凭时间词就继承上轮 SUM(gmv)"的贪婪判定。
+    """
     q = query.lower()
-    return any(term in q for term in METRIC_TERMS)
+    if any(term in q for term in METRIC_TERMS):
+        return True
+    return _h._count_entity_metric(query) is not None
+
+
+def _has_exclusive_term(query: str) -> bool:
+    """是否包含排他/覆盖引导词（"我只需要知道"等）——命中则本轮必须 RESET。"""
+    return any(term in query for term in _EXCLUSIVE_TERMS)
+
+
+def _dimension_cardinality_request(query: str) -> str | None:
+    """独立维度基数/枚举请求判定：问句明确"只问某维度本身"时返回维度字段。
+
+    - 维度字段由语义目录感知的启发式探查（_enum_dimension_field）识别；
+    - 与计数语气词（"多少个/多少种/几个"）或维度枚举表达（"有哪些/所有"，
+      复用 heuristic._is_dim_enum_form）共同命中时，视为全新 count_distinct 请求，
+      必须 RESET 上轮 metrics/dimensions。
+    - 反例"那华南地区呢"无计数/枚举语气 -> 返回 None，走正常 inherit。
+    """
+    field = _h._enum_dimension_field(query)
+    if field is None:
+        return None
+    if any(w in query for w in _DIM_QUESTION_WORDS) or _h._is_dim_enum_form(query):
+        return field
+    return None
+
+
+def normalize_filters(filters: list[Filter]) -> list[Filter]:
+    """同字段过滤条件去重归一化（压缩/合并拦截层）。
+
+    合并融入上轮 DSL 时，同一字段可能因历史脏数据 / RLS 残留 / 并发注入而出现多条
+    逻辑等价的过滤（典型：``province eq '广东'`` 与 ``province in ['广东']`` 并存，
+    会被编译器拼成 ``WHERE province='广东' AND province IN ('广东')``）。
+
+    策略（同字段仅保留一条，值等价则折叠）：
+    1. EQ 与命中同值的 IN 等价 -> 只保留 EQ 标量（消除 WHERE 冗余 AND）；
+    2. 多个 IN -> 并集去重（布尔等价）；
+    3. 其余冲突（同字段异值/异操作符）按"后到覆盖"保持确定性，仅保留一条。
+    """
+    if not filters:
+        return filters
+    grouped: dict[str, list[Filter]] = {}
+    for flt in filters:
+        grouped.setdefault(flt.field, []).append(flt)
+
+    result: list[Filter] = []
+    for fld, group in grouped.items():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+
+        eq: Filter | None = None
+        in_values: list[Any] = []
+        others: list[Filter] = []
+        for flt in group:
+            if flt.operator == FilterOperator.EQ:
+                eq = flt
+            elif flt.operator == FilterOperator.IN and isinstance(flt.value, list):
+                in_values.extend(flt.value)
+            else:
+                others.append(flt)
+
+        if eq is not None:
+            # EQ 与命中同值的 IN 语义等价：保留 EQ，IN 全部折叠（既有 IN 是重复条件）
+            result.append(eq)
+        elif in_values:
+            if others:
+                # 同字段存在非 IN 条件（异值冲突）：确定性保留最后一条，折叠 IN
+                result.append(others[-1])
+            else:
+                result.append(
+                    Filter(
+                        field=fld, operator=FilterOperator.IN, value=list(dict.fromkeys(in_values))
+                    )
+                )
+        else:
+            result.append(others[-1])
+    return result
 
 
 def _expand_dimension(query: str) -> str | None:
@@ -468,6 +579,9 @@ def _apply_deltas(base: QueryDSL, deltas: _Deltas) -> QueryDSL:
     if deltas.category is not None:
         filters = [f for f in filters if f.field != "category"]
         filters.append(Filter(field="category", operator=FilterOperator.EQ, value=deltas.category))
+    # 去重拦截层：同一字段仅保留一条逻辑等价的过滤（EQ 命中值等价 IN 时折叠为 EQ），
+    # 杜绝编译产物出现 `province='广东' AND province IN ('广东')` 类冗余谓词。
+    filters = normalize_filters(filters)
     update: dict[str, Any] = {"filters": filters}
     if deltas.time_filter is not None:
         update["time_filter"] = deltas.time_filter
@@ -499,7 +613,7 @@ def _compose_summary(deltas: _Deltas, *, expand: str | None = None, trend: bool 
     return "，".join(parts) + "。"
 
 
-def resolve_context(
+def _resolve_context_impl(
     query: str, last_dsl: QueryDSL | None, principal: str | None
 ) -> ContextResolution:
     """判定本轮查询与上一轮 DSL 的关系，返回合并结果（确定性、可单测）。
@@ -507,8 +621,10 @@ def resolve_context(
     判定规则（按优先级）：
     1. 无上一轮 DSL            -> fresh（no_history，无可继承）；
     2. 含显式业务指标词        -> fresh（topic_switch，完整新问题，调用方清理旧 DSL）；
-    3. 无指标词但含语义增量    -> inherit / drilldown（基于上轮 DSL 结构化合并）；
-    4. 无任何有效增量          -> fresh（no_delta，避免把无效短句误拼进上轮语义）。
+    3. 含排他/覆盖引导词        -> fresh（reset_intent，如"我只需要知道"，禁用继承）；
+    4. 含独立维度基数/枚举请求  -> fresh（reset_intent，如"有多少种品类" -> count_distinct 新指标）；
+    5. 无指标词但含语义增量    -> inherit / drilldown（基于上轮 DSL 结构化合并）；
+    6. 无任何有效增量          -> fresh（no_delta，避免把无效短句误拼进上轮语义）。
     """
     if last_dsl is None:
         return ContextResolution(mode="fresh", reason="no_history")
@@ -518,6 +634,14 @@ def resolve_context(
             mode="fresh",
             reason="topic_switch",
             summary="已识别为新问题，重置上一轮查询上下文",
+        )
+
+    # 排他/覆盖意图（优先级高于继承）：即使问句仅含省份名等 delta，也禁止沿用上轮指标。
+    if _has_exclusive_term(query) or _dimension_cardinality_request(query) is not None:
+        return ContextResolution(
+            mode="fresh",
+            reason="reset_intent",
+            summary="检测到排他/独立维度请求（我只需要知道 / 几个维度），清空上轮指标与分组，按本轮重新解析",
         )
 
     deltas = _collect_deltas(query)
@@ -555,6 +679,26 @@ def resolve_context(
     )
 
 
+def resolve_context(
+    query: str, last_dsl: QueryDSL | None, principal: str | None
+) -> ContextResolution:
+    """判定本轮查询与上一轮 DSL 的关系，返回合并结果（确定性、可单测）。
+
+    对外包装：在确定性判定之外留痕"上下文合并决策路径"，便于排查多轮
+    RESET / INHERIT 误判（与审计可观测性对齐），判定逻辑见 _resolve_context_impl。
+    """
+    resolution = _resolve_context_impl(query, last_dsl, principal)
+    logger.info(
+        "上下文合并决策 session=%r query=%r last=%-8s mode=%s reason=%s",
+        principal,
+        query,
+        "有" if last_dsl is not None else "无",
+        resolution.mode,
+        resolution.reason,
+    )
+    return resolution
+
+
 # --------------------------------------------------------------------------- #
 # 状态维护辅助
 # --------------------------------------------------------------------------- #
@@ -588,6 +732,7 @@ __all__ = [
     "append_message",
     "default_session_store",
     "derive_active_entities",
+    "normalize_filters",
     "resolve_context",
     "strip_rls_filters",
 ]

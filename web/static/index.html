@@ -3,82 +3,241 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FutureBI · Spec-Driven ChatBI</title>
+  <title>DataAgent · 企业级 Data Agent 工作台</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/workspace.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="logo">F</span>
+      <span class="logo">D</span>
       <div>
-        <h1>FutureBI</h1>
-        <p class="tag">Spec-Driven ChatBI · 自然语言 → DSL → 确定性 SQL → 结果 → 解释 + 图表</p>
+        <h1>DataAgent</h1>
+        <p class="tag">Spec-Driven Data Agent · 自然语言 → DSL → 确定性 SQL → 多步分析 → 报告</p>
       </div>
     </div>
-    <div class="authbar">
-      <!-- 登录态：未登录时展示 -->
-      <form id="login-form" class="login-form">
-        <input id="username" type="text" placeholder="用户名" autocomplete="username">
-        <input id="password" type="password" placeholder="口令" autocomplete="current-password">
-        <button type="submit" id="login-btn">登录</button>
-      </form>
-      <!-- 登录态：已登录时展示 -->
-      <div id="userinfo" class="userinfo hidden">
-        <span id="display-name" class="user-name"></span>
-        <span id="principal-badge" class="principal-badge"></span>
-        <button type="button" id="logout-btn" class="ghost-btn">退出</button>
+
+    <div class="header-right">
+      <!-- Agent 状态指示灯：Idle / Planning / Executing / Awaiting User -->
+      <div id="agent-status" class="agent-status idle" title="Agent 当前状态">
+        <span id="agent-status-dot" class="agent-status-dot" aria-hidden="true"></span>
+        <span id="agent-status-text">空闲</span>
+      </div>
+
+      <!-- 知识上下文：DuckDB Schema 选择器（语义目录字段清单） -->
+      <div id="schema-picker" class="header-dropdown">
+        <button type="button" id="schema-btn" class="header-drop-btn"
+                aria-haspopup="true" aria-expanded="false" title="知识上下文：语义目录字段清单">▣ Schema</button>
+        <div id="schema-panel" class="header-panel hidden" aria-label="DuckDB Schema">
+          <div class="hp-head">语义目录 · 可查询字段</div>
+          <div id="schema-panel-body" class="hp-body"><div class="hp-empty">加载中…</div></div>
+        </div>
+      </div>
+
+      <!-- 会话历史 / 新线程 CTA -->
+      <div id="thread-picker" class="header-dropdown">
+        <button type="button" id="new-thread-btn" class="header-drop-btn" title="开启新分析线程（重置工作区）">＋ 新线程</button>
+        <button type="button" id="thread-history-btn" class="header-drop-btn"
+                aria-haspopup="true" aria-expanded="false" title="会话历史">⏱ 历史</button>
+        <div id="thread-panel" class="header-panel hidden" aria-label="会话历史">
+          <div class="hp-head">会话历史（本机）</div>
+          <div id="thread-panel-body" class="hp-body"><div class="hp-empty">暂无历史会话</div></div>
+        </div>
+      </div>
+
+      <!-- 轻量级模型状态指示（纯信息展示；供应商配置统一入口在「设置」） -->
+      <div id="model-indicator" class="model-indicator"
+           title="当前生效模型（可在查询栏切换；供应商在「设置」中配置）">
+        <span id="model-pill" class="model-pill">
+          <span id="model-dot" class="model-dot off" aria-hidden="true"></span>
+          <span id="model-indicator-text">默认模型</span>
+        </span>
+      </div>
+
+      <!-- 常驻设置入口：模型供应商等系统配置统一收纳于此 -->
+      <button type="button" id="settings-btn" class="settings-btn"
+              title="模型供应商设置" aria-haspopup="dialog">⚙ 设置</button>
+
+      <!-- 用户中心：头像 + 用户名 + 角色标签 + 下拉菜单 -->
+      <div id="user-center" class="user-center">
+        <button type="button" id="user-menu-btn" class="user-btn" aria-haspopup="menu"
+                aria-expanded="false" title="账号菜单">
+          <span id="user-avatar" class="avatar" aria-hidden="true">·</span>
+          <span class="user-meta">
+            <span id="display-name" class="user-name">—</span>
+            <span id="user-roles" class="user-roles">—</span>
+          </span>
+          <span class="caret" aria-hidden="true">▾</span>
+        </button>
+        <div id="user-menu" class="user-menu hidden" role="menu" aria-label="用户菜单">
+          <div class="menu-id">
+            <div id="menu-display-name" class="mi-name">—</div>
+            <div id="menu-principal" class="mi-sub">—</div>
+          </div>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" id="menu-profile" role="menuitem">
+            <span class="mi-icon" aria-hidden="true">👤</span>用户资料与权限
+          </button>
+          <button type="button" class="menu-item" id="menu-model-settings" role="menuitem">
+            <span class="mi-icon" aria-hidden="true">⚙</span>模型供应商设置
+          </button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item danger" id="menu-logout" role="menuitem">
+            <span class="mi-icon" aria-hidden="true">⏻</span>退出登录
+          </button>
+        </div>
       </div>
     </div>
   </header>
 
-  <main class="container">
-    <section class="query-bar">
-      <input id="query" type="text" placeholder="用自然语言提问，例如：各品类成功订单的GMV分布？"
-             value="2024年6月成功订单的GMV是多少？" autocomplete="off">
-      <button id="run" type="button">查询</button>
+  <main class="workspace-root">
+    <!-- 顶部 Command Bar：模型切换 + 自然语言提问 + 提交 -->
+    <section class="command-bar">
+      <div class="command-inner">
+        <select id="model-switch" class="model-switch"
+                title="切换本次查询使用的模型供应商与模型">
+          <option value="">默认模型（自动选择）</option>
+        </select>
+        <span class="command-divider" aria-hidden="true"></span>
+        <input id="query" type="text" class="command-input"
+               placeholder="用自然语言提问，Agent 将自动规划取数、沙箱分析并生成报告"
+               value="分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位" autocomplete="off">
+        <button id="run" type="button" class="command-run">开始分析</button>
+      </div>
+    </section>
+
+    <!-- 未配置可用模型时的轻量引导横幅 -->
+    <section id="model-banner" class="model-banner hidden">
+      <span class="mb-text">尚未配置可用模型，</span>
+      <button type="button" id="goto-model-settings" class="mb-link">前往配置模型 →</button>
     </section>
 
     <section id="error" class="error hidden"></section>
 
-    <section id="answer" class="answer hidden">
-      <div id="answer-title" class="answer-title"></div>
-      <div id="answer-body" class="answer-body"></div>
-    </section>
+    <!-- 双栏工作区：左 = 执行与对话流（40%）；右 = 产物画布（60%） -->
+    <section class="split-workspace">
+      <!-- 左栏：AgentChatStream -->
+      <div id="stream-pane" class="stream-pane">
+        <div id="stream-scroll" class="stream-scroll">
+          <div id="stream" class="stream"></div>
+        </div>
+      </div>
 
-    <section class="pipeline">
-      <div class="card">
-        <h2>⓪ Agent 调度轨迹</h2>
-        <div id="steps" class="steps"></div>
-      </div>
-      <div class="card">
-        <h2>① 结构化 DSL</h2>
-        <pre id="dsl" class="code"></pre>
-      </div>
-      <div class="card">
-        <h2>② 确定性 SQL</h2>
-        <pre id="sql" class="code"></pre>
-      </div>
-      <div class="card">
-        <h2>③ 自然语言解释</h2>
-        <div id="explain" class="explain"></div>
-      </div>
-    </section>
-
-    <section class="output">
-      <div class="card chart-card">
-        <h2>④ 可视化</h2>
-        <div id="chart" class="chart"></div>
-      </div>
-      <div class="card table-card">
-        <h2>⑤ 数据结果</h2>
-        <div id="table" class="table-wrap"></div>
+      <!-- 右栏：ArtifactCanvas（多标签页） -->
+      <div class="canvas-pane">
+        <div class="canvas-tabs" role="tablist">
+          <button type="button" class="canvas-tab active" data-tab="report" role="tab">执行报告</button>
+          <button type="button" class="canvas-tab" data-tab="charts" role="tab">图表</button>
+          <button type="button" class="canvas-tab" data-tab="code" role="tab">代码沙箱</button>
+          <button type="button" class="canvas-tab" data-tab="data" role="tab">数据审计</button>
+          <span class="spacer"></span>
+          <button type="button" id="export-md" class="mini-btn" title="导出 Markdown 报告">⬇ Markdown</button>
+          <button type="button" id="export-html" class="mini-btn" title="导出 HTML 报告">⬇ HTML</button>
+        </div>
+        <div class="canvas-body">
+          <div id="tab-report" class="canvas-view active" role="tabpanel">
+            <div id="report-empty" class="canvas-empty">Agent 运行后，这里展示执行摘要与归因报告。</div>
+            <div id="report-content" class="report-content hidden"></div>
+          </div>
+          <div id="tab-charts" class="canvas-view" role="tabpanel">
+            <div id="charts-empty" class="canvas-empty">Agent 生成的交互式图表将展示在这里。</div>
+            <div id="charts-content" class="charts-content hidden"></div>
+          </div>
+          <div id="tab-code" class="canvas-view" role="tabpanel">
+            <div id="code-empty" class="canvas-empty">Agent 编写的沙箱分析代码与运行输出将展示在这里。</div>
+            <div id="code-content" class="code-content hidden"></div>
+          </div>
+          <div id="tab-data" class="canvas-view" role="tabpanel">
+            <div id="data-empty" class="canvas-empty">各取数步骤返回的数据切片将展示在这里。</div>
+            <div id="data-content" class="data-content hidden"></div>
+          </div>
+        </div>
       </div>
     </section>
   </main>
 
-  <footer class="footer">FutureBI · MIT · 本地 DuckDB 沙箱 · 统一身份认证 + 服务端强制 principal</footer>
+  <!-- 模型供应商设置弹窗（左右两栏：列表 + 详情表单；仅从用户菜单触发） -->
+  <div id="settings-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>模型供应商设置</h2>
+        <button type="button" id="settings-close" class="ghost-btn" title="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <aside class="provider-pane">
+          <div class="pane-head">
+            <span>供应商</span>
+            <button type="button" id="provider-add" class="mini-btn">＋ 添加供应商</button>
+          </div>
+          <div id="provider-list" class="provider-list"></div>
+        </aside>
+        <section class="provider-detail">
+          <div id="provider-form" class="hidden">
+            <div class="form-row head-row">
+              <input id="pf-name" class="name-input" placeholder="供应商名称">
+              <label class="switch" title="启用 / 禁用">
+                <input id="pf-enabled" type="checkbox" checked>
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="form-row">
+              <label>API 协议格式</label>
+              <select id="pf-protocol">
+                <option value="openai_chat">OpenAI Chat Completions（/chat/completions）</option>
+                <option value="openai_responses">OpenAI Responses（/responses）</option>
+                <option value="anthropic">Anthropic Messages（/v1/messages）</option>
+                <option value="gemini">Google Gemini（generateContent）</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>Base URL</label>
+              <input id="pf-base-url" placeholder="例如 https://api.openai.com/v1">
+            </div>
+            <div class="form-row">
+              <label>API Key <span id="pf-key-badge" class="key-badge hidden" title="密钥已加密保存在服务端，刷新后无需重填"></span></label>
+              <div class="key-row">
+                <input id="pf-api-key" type="password" placeholder="粘贴 API Key">
+                <button type="button" id="pf-eye" class="eye-btn" title="查看 / 隐藏">👁</button>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>模型列表</label>
+              <div id="pf-models" class="model-chips"></div>
+              <div class="model-add-row">
+                <input id="pf-model-input" placeholder="模型 ID，例如 glm-4.5-flash / gpt-4o">
+                <button type="button" id="pf-model-add" class="mini-btn">＋ 添加模型</button>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button type="button" id="pf-test" class="secondary-btn">测试连通性</button>
+              <span class="spacer"></span>
+              <button type="button" id="pf-delete" class="danger-btn hidden">删除供应商</button>
+              <button type="button" id="pf-save" class="primary-btn">保存</button>
+            </div>
+            <div id="pf-test-result" class="test-result hidden"></div>
+          </div>
+          <div id="provider-empty" class="provider-empty">选择左侧供应商，或点击「添加供应商」接入自定义中转站。</div>
+        </section>
+      </div>
+    </div>
+  </div>
 
+  <div id="toast-box" class="toast-box"></div>
+
+  <script src="/static/vendor/echarts.min.js"></script>
+  <script src="/static/vendor/prism-core.min.js"></script>
+  <script src="/static/vendor/prism-markup.min.js"></script>
+  <script src="/static/vendor/prism-python.min.js"></script>
+  <script src="/static/vendor/prism-sql.min.js"></script>
+  <script src="/static/vendor/prism-markdown.min.js"></script>
+  <script src="/static/js/protocol.js"></script>
+  <script src="/static/js/store.js"></script>
+  <script src="/static/js/markdown.js"></script>
+  <script src="/static/js/stream.js"></script>
+  <script src="/static/js/stream-ui.js"></script>
+  <script src="/static/js/canvas.js"></script>
+  <script src="/static/js/header-ui.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

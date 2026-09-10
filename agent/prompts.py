@@ -10,6 +10,16 @@ from __future__ import annotations
 
 from security.scope import scoped_field_listing, scoped_fields
 
+# 维度基数探查约定：当用户询问"有几个 [维度]""[维度]数量"时，
+# 自动将维度字段映射为 count_distinct 聚合指标，无需强制指定业务度量；
+# "有哪些 [维度]" 除 count_distinct 指标外，需将维度字段加入 dimensions 以枚举成员值。
+_DIM_COUNT_CONVENTION = (
+    '维度基数探查："有几个地区/省份/品牌/品类" -> '
+    "metrics=[{kind:aggregate, field:<维度字段>, agg:count_distinct, alias:<维度数>}]；"
+    '"有哪些 [维度]" -> metrics=[{kind:aggregate, field:<维度字段>, agg:count_distinct, alias:<维度数>}]'
+    " + dimensions=[<维度字段>]"
+)
+
 # 固定结构说明块（与 DSL 契约一致，不随主体变化）
 _STRUCT_BLOCK = """QueryDSL JSON 结构（所有字段必须严格符合）：
 {
@@ -87,6 +97,15 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("category", "brand", "province", "order_time"),
     ),
     (
+        "区域过滤口径（大区展开，严禁字面值）：province 的合法值只有数仓实际存在的省份"
+        "（广东/浙江/江苏/北京/上海/四川/湖北/山东）；"
+        '用户提到大区（"华东/华南/华北/华中/西南"）时必须展开为省份 IN 列表：'
+        "华东 -> in [上海,江苏,浙江,山东]；华南 -> in [广东]；华北 -> in [北京]；"
+        "华中 -> in [湖北]；西南 -> in [四川]；"
+        '严禁生成 {"field": "province", "operator": "eq", "value": "华东"}（华东不是省份成员，必然空集）',
+        ("province",),
+    ),
+    (
         '排序：出现"最高/前N个" -> order_by=[{field:<主指标别名>, direction:desc}] 且 limit=N',
         (),
     ),
@@ -111,6 +130,52 @@ _CONVENTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "可与时间维度组合（按位配对）：prev CTE 时间列经 date_add 平移后 JOIN",
         (),
     ),
+    (
+        _DIM_COUNT_CONVENTION,
+        (),
+    ),
+    (
+        "指标覆盖与排他（多轮/独立新问题的关键判定）："
+        '用户出现"我只需要知道 / 只看 / 仅统计 / 只要看 / 换成 / 不要之前的…"等排他表述，'
+        '或询问"多少个 / 多少种 / 有几个 [维度实体]"（如"多少种品类""有几个地区""多少用户"）时，'
+        "一律视为**独立新指标请求**：metrics 只能以该维度实体的 count_distinct 计数为准，"
+        "**严禁复用上一轮金额/订单等指标，也不得把该维度实体只塞进 dimensions 延续旧度量**；"
+        '例："我只需要知道，广东有多少种品类" -> '
+        "metrics=[{field:category, agg:count_distinct, alias:category_count}]，"
+        "不保留历史 GMV/分组，filters 仅 {field:province, operator:eq, value:广东}；"
+        "filters 中同一字段只允许出现一条过滤条件（同值既不重复 eq 又 in，也不追加多条 AND）。",
+        (),
+    ),
+    (
+        "极值/实体维度（问什么就出什么维度）："
+        "查询主体必须进入 dimensions —— 产品/商品 -> {field:product_name}，"
+        "店铺/门店 -> {field:shop_name}，品类 -> {field:category}，品牌 -> {field:brand}；"
+        "极值修饰词 -> order_by 方向：最高/最大/最好 -> desc，最低/最小/最差 -> asc（按主指标别名）；"
+        '单数极值（"最高的X是什么/哪一个"）-> limit 1；"最高的N个 / 前N / N个店铺" -> limit N；'
+        '例："2024年GMV最高的产品是什么" -> '
+        "metrics=[{field:order_amount,agg:sum,alias:gmv}], dimensions=[{field:product_name}], "
+        "order_by=[{field:gmv,direction:desc}], limit=1；"
+        '纯标量统计（无实体维度，如"2024年总GMV是多少"）不得设置 order_by —— '
+        "无维度时编译器会省略 ORDER BY 与 LIMIT。",
+        (),
+    ),
+    (
+        "多轮计数 vs 时间微调（继承判定关键）："
+        '"2024年呢？/那最近30天呢？/那华南地区呢？" 仅调整时间/筛选，**保留上一轮 metrics**；'
+        '但 "2024年有多少订单" 含明确新计数度量，metrics **必须重置**为 '
+        "COUNT(order_id)（alias: order_count），严禁继续沿用上一轮 GMV/SUM(order_amount)；"
+        '同理 "多少 [用户|商品]" -> COUNT(DISTINCT user_id / product_id)。'
+        "计数单元（订单/单/笔/用户/人/客户/商品/产品）一旦与数量词共同出现，一律视为新指标。",
+        ("order_id", "order_amount", "user_id", "product_id"),
+    ),
+    (
+        "语义角色必须落到 DSL（不可只在解释中保留）："
+        "先识别 metric（指标）、entity_dimension（实体维度）、ranking_direction（排序方向）、"
+        "result_cardinality（返回条数）和 time_window（时间窗口），再输出 JSON；"
+        '"2024年GMV最高的产品是什么" 必须同时生成 product_name 维度、gmv DESC 排序和 limit=1；'
+        '"2024年总GMV是多少" 是纯标量，不应虚构维度或排序；最高/最低、哪个/是什么等语义不能丢失。',
+        ("order_amount", "product_name"),
+    ),
 )
 
 # 无论主体如何都成立的安全约束（末尾附加）
@@ -129,7 +194,7 @@ def build_system_prompt(principal: str | None = None) -> str:
     ]
     conventions = "\n".join(convention_lines)
     return (
-        "你是企业级 ChatBI 的语义解析器。你只能输出一个 JSON 对象，表示受限查询 DSL（QueryDSL）。\n"
+        "你是企业级 Data Agent 的语义解析器。你只能输出一个 JSON 对象，表示受限查询 DSL（QueryDSL）。\n"
         "不要输出任何解释、Markdown 代码块或多余文字；不要生成 SQL；不要输出不存在的字段。\n\n"
         + _STRUCT_BLOCK
         + "\n\n可引用的逻辑字段（当前主体可用白名单，其余一律不得出现）：\n"

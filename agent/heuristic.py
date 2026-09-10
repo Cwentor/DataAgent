@@ -12,7 +12,8 @@
 - 同比/环比（comparison）；
 - 窗口函数（累计 cumsum / 移动平均 moving_avg）；
 - 日期连续补零（fill_gaps）；
-- 分组 Top-N（每省/每品牌/每品类 Top N）。
+- 分组 Top-N（每省/每品牌/每品类 Top N）；
+- 维度基数探查（"有几个地区" -> count_distinct 自动兜底）。
 """
 
 from __future__ import annotations
@@ -29,16 +30,10 @@ from security.scope import scoped_fields
 from semantic import catalog
 from semantic.dsl_schema import Comparison, Granularity, QueryDSL, RatioMetric, WindowMetric
 
-# 大区 -> 省份列表（行政区划映射，仅收录 mock 数仓实际存在的省份，供"地区"类
-# 提问与会话上下文继承共用）。行政区划归属是业务知识（保留常量），但展开值域
-# 经 region_provinces() 与语义目录的省份成员词汇表取交集——库中裁撤的省份
-# 不会产出无效过滤（成员词汇表由 catalog_loader 从数仓 distinct 值重建）。
+# 大区 -> 省份映射单一事实来源已迁至 semantic.catalog.REGION_PROVINCE_MAPPING
+# （审计修复 M1：区域词展开的口径归口语义目录）。此别名保持既有导入路径兼容。
 REGIONS: dict[str, list[str]] = {
-    "华北": ["北京"],
-    "华东": ["上海", "江苏", "浙江", "山东"],
-    "华南": ["广东"],
-    "华中": ["湖北"],
-    "西南": ["四川"],
+    region: list(provinces) for region, provinces in catalog.REGION_PROVINCE_MAPPING.items()
 }
 
 
@@ -102,8 +97,37 @@ class DeterministicNL2DSL:
                 rank_dims = [d for d in dims if d["field"] not in partition]
                 dims = [{"field": p} for p in top_n["partition_by"]] + rank_dims
 
+            # 维度基数/枚举探查：统一修正分组维度
+            # - count 型（"有几个地区/多少品类"）：唯一指标即维度 count_distinct 兜底，
+            #   不分组（提示词要求）
+            # - 枚举型（"有哪些地区/所有品牌"）：除 count_distinct 指标外，将维度字段
+            #   加入 dimensions 以输出成员去重枚举
+            probe_field = self._enum_dimension_field(q)
+            metrics = self._metrics(q)
+            count_probe = (
+                metrics[0]
+                if (
+                    len(metrics) == 1
+                    and isinstance(metrics[0], dict)
+                    and metrics[0].get("kind") == "aggregate"
+                    and metrics[0].get("agg") == "count_distinct"
+                    and probe_field is not None
+                    and metrics[0].get("field") == probe_field
+                )
+                else None
+            )
+            if probe_field is not None:
+                if self._is_dim_enum_form(q):
+                    # 枚举型（"有哪些地区/所有品牌"）：确保维度字段在分组中以去重枚举
+                    if probe_field not in {d["field"] for d in dims}:
+                        dims.append({"field": probe_field})
+                elif count_probe is not None:
+                    # count 型（"有几个地区/多少品类"）：唯一指标即维度 count_distinct
+                    # 兜底，不分组（提示词要求）
+                    dims = [d for d in dims if d["field"] != probe_field]
+
             dsl: dict[str, Any] = {
-                "metrics": self._metrics(q),
+                "metrics": metrics,
                 "dimensions": dims,
                 "filters": self._filters(q),
                 "order_by": self._order_by(q),
@@ -276,8 +300,104 @@ class DeterministicNL2DSL:
                     }
                 )
             else:
-                raise PipelineError("无法识别指标（需要 GMV/订单数/去重用户/ARPU/客单价 之一）")
+                # 数量提问 -> COUNT/COUNT_DISTINCT 度量映射（"有多少订单/几个用户/多少商品"），
+                # 优先于维度基数兜底：这类问法命中"多少/几个 + 实体"即视为全新计数度量。
+                count_entity = self._count_entity_metric(q)
+                if count_entity is not None:
+                    metrics.append(count_entity)
+                elif self._dim_count_fallback(q) is not None:
+                    # 维度基数探查：自动将维度字段映射为 count_distinct 指标
+                    metrics.append(self._dim_count_fallback(q))
+                else:
+                    raise PipelineError("无法识别指标（需要 GMV/订单数/去重用户/ARPU/客单价 之一）")
         return metrics
+
+    def _count_entity_metric(self, q: str) -> dict[str, Any] | None:
+        """'数量提问 -> COUNT/COUNT_DISTINCT' 度量映射。
+
+        当问句命中"多少/几个 [订单|单|笔]"、"多少 [用户/客户/人]"、"多少 [商品/产品]"等
+        数量式提问时，返回对应主键的计数度量：订单 -> COUNT(order_id)，
+        用户/客户 -> COUNT(DISTINCT user_id)，商品/产品 -> COUNT(DISTINCT product_id)。
+
+        语义定位：这类问法代表**全新计数指标**而非对上一轮指标的微调继承，故与
+        memory._has_metric_term 同源——命中即把多轮判定推向 topic_switch（RESET），
+        从根源上阻断"仅凭时间词就沿用上轮 SUM(order_amount)/gmv"的贪婪判定。
+        """
+        # 触发数量语气词（不取裸"几"，避免误伤）
+        if not any(w in q for w in ("多少", "几个", "多少个", "几笔", "几单")):
+            return None
+        if any(k in q for k in ("订单", "单子", "笔", "单")):
+            return {
+                "kind": "aggregate",
+                "field": "order_id",
+                "agg": "count",
+                "alias": "order_count",
+            }
+        if any(k in q for k in ("用户", "客户", "人")) and "user_id" in catalog.COLUMNS:
+            return {
+                "kind": "aggregate",
+                "field": "user_id",
+                "agg": "count_distinct",
+                "alias": "active_users",
+            }
+        if any(k in q for k in ("商品", "产品")) and "product_id" in catalog.COLUMNS:
+            return {
+                "kind": "aggregate",
+                "field": "product_id",
+                "agg": "count_distinct",
+                "alias": "product_count",
+            }
+        return None
+
+    def _dim_count_fallback(self, q: str) -> dict[str, Any] | None:
+        """维度基数查询兜底：将维度字段映射为 count_distinct 聚合指标。
+
+        当用户询问"有几个 [维度]""[维度]数量"等无明确指标的基数问题时，
+        自动生成针对该维度的 count_distinct 指标，无需强制用户指定业务度量。
+        alias 必须符合 DSL 契约的英文字母数字标识符白名单（IDENTIFIER_PATTERN）。
+        """
+        for keywords, field, alias in self._DIM_KEYWORDS:
+            if any(k in q for k in keywords):
+                # 确认字段在语义目录中注册
+                if field in catalog.COLUMNS:
+                    return {
+                        "kind": "aggregate",
+                        "field": field,
+                        "agg": "count_distinct",
+                        "alias": alias,
+                    }
+                return None
+        return None
+
+    # 维度基数/枚举探查：关键词组 -> (field, alias, 维度中文名)
+    _DIM_KEYWORDS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+        (("地区", "省份", "省"), "province", "region_count"),
+        (("品牌",), "brand", "brand_count"),
+        (("品类", "类别"), "category", "category_count"),
+        (("用户",), "user_id", "user_count"),
+        (("性别",), "gender", "gender_count"),
+        (("支付状态", "支付方式"), "pay_status", "pay_status_count"),
+    )
+
+    def _enum_dimension_field(self, q: str) -> str | None:
+        """维度枚举探查：识别"有哪些 [维度]""[所有/全部] [维度]"返回维度字段。
+
+        枚举查询（纯维度列表）除 count_distinct 指标外，还需把维度字段加入
+        dimensions 用于成员去重枚举。命中多个关键词时取首个注册字段。
+        """
+        for keywords, field, _alias in self._DIM_KEYWORDS:
+            if any(k in q for k in keywords):
+                if field in catalog.COLUMNS:
+                    return field
+                return None
+        return None
+
+    @classmethod
+    def _is_dim_enum_form(cls, q: str) -> bool:
+        """枚举型语气词："有哪些/所有/全部/都有/列一下"。"""
+        return any(
+            k in q for k in ("有哪些", "有哪几", "所有", "全部", "都有哪些", "列表", "清单列出")
+        )
 
     def _window_metric(self, q: str) -> dict[str, Any] | None:
         """识别窗口指标：累计（cumsum）/ 移动平均（moving_avg）。"""
@@ -367,7 +487,17 @@ class DeterministicNL2DSL:
             add("category")
         if "品牌" in q:
             add("brand")
+        # 商品/店铺实体 -> 维度名称字段（"问什么就出什么维度"，仅当字段已在目录登记）
+        if any(k in q for k in ("产品", "商品")):
+            if "product_name" in catalog.COLUMNS:
+                add("product_name")
+        if any(k in q for k in ("店铺", "门店")):
+            if "shop_name" in catalog.COLUMNS:
+                add("shop_name")
         if any(k in q for k in ("各省", "按省份", "分省", "省份分布", "每省")):
+            add("province")
+        # "地区"分组语境（区别于 count 型"有几个地区"，后者不分组）
+        if any(k in q for k in ("各地区", "每个地区", "按地区", "分地区", "每地区", "地区分布")):
             add("province")
         if "支付状态" in q:
             add("pay_status")
@@ -633,6 +763,15 @@ class DeterministicNL2DSL:
     # ------------------------------------------------------------------ #
     # 排序 / 截断
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _extreme_kind(q: str) -> str | None:
+        """极值修饰词方向：最高/最大/最好 -> max（降序）；最低/最小/最差 -> min（升序）。"""
+        if any(k in q for k in ("最高", "最大", "最好", "最多", "最强")):
+            return "max"
+        if any(k in q for k in ("最低", "最小", "最差", "最少", "最弱", "最便宜")):
+            return "min"
+        return None
+
     def _order_by(self, q: str) -> list[dict[str, Any]]:
         # 趋势/窗口/补零 -> 按时间主轴升序（退款时序用 refund_time）
         if any(
@@ -650,7 +789,13 @@ class DeterministicNL2DSL:
             )
         ):
             return [{"field": self._time_dim_field(q), "direction": "asc"}]
-        # 最高/前N -> 按主指标降序
+        # 极值修饰词优先："GMV最高的产品" -> 按主指标降序；"退款率最低的3个店铺" -> 升序
+        ek = self._extreme_kind(q)
+        if ek == "min":
+            return [{"field": self._primary_alias(q), "direction": "asc"}]
+        if ek == "max":
+            return [{"field": self._primary_alias(q), "direction": "desc"}]
+        # 最高/排名/前N -> 按主指标降序
         if any(k in q for k in ("最高", "排名", "前")):
             return [{"field": self._primary_alias(q), "direction": "desc"}]
         # 有维度且非"分布"型 -> 按主指标降序（可控默认；"分布"视为不排序的清单型问题）
@@ -660,10 +805,26 @@ class DeterministicNL2DSL:
 
     def _primary_alias(self, q: str) -> str:
         m = self._metrics(q)
-        if len(m) == 1 and m[0]["kind"] == "aggregate":
-            return m[0]["alias"]
+        if len(m) == 1 and isinstance(m[0], dict):
+            return m[0]["alias"]  # 聚合 / 比率 / 窗口指标均携带 alias
         return "gmv"
 
     def _limit(self, q: str) -> int:
-        m = re.search(r"前\s*(\d+)\s*个", q)
-        return int(m.group(1)) if m else 100
+        # 显式 Top-N：前N个 / 最高的N个 / N个[实体]
+        m = re.search(
+            r"(?:前|最高|最低|最大|最小|最好|最差|最)?\s*(\d+)\s*"
+            r"个(?:产品|商品|店铺|门店|品牌|品类|地区|省份|用户|订单)?",
+            q,
+        )
+        if m:
+            return int(m.group(1))
+        # 单数极值："最高的X是什么/哪一个" -> 只展示 1 条，避免硬编码返回 100 条标量
+        if self._extreme_kind(q) is not None and any(
+            k in q for k in ("是什么", "是哪个", "哪一个", "哪个")
+        ):
+            return 1
+        # 维度基数统计只返回一个总数，不强制用户补充 limit。
+        if any(k in q for k in ("有几个", "有多少个", "数量", "数目")):
+            if self._dim_count_fallback(q) is not None:
+                return 1
+        return 100

@@ -18,11 +18,22 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any
+
+# 表名标识符白名单：仅允许安全字符，杜绝 SQL 标识符注入面
+_TABLE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _validate_table_name(table: str) -> str:
+    """校验表名为合法 SQL 标识符（字母/下划线开头，仅含字母数字下划线）。"""
+    if not _TABLE_NAME_RE.fullmatch(table):
+        raise ValueError(f"非法表名标识符: {table!r}")
+    return table
 
 
 def _json_default(obj: Any) -> str:
@@ -38,14 +49,26 @@ class SqliteKVStore:
     def __init__(self, db_path: str | Path, table: str = "kv", busy_timeout_ms: int = 5000) -> None:
         """打开 SQLite 连接并完成 WAL / busy_timeout 加固，按需建表。"""
         self._db_path = str(db_path)
-        self._table = table
+        # 表名标识符先经白名单校验再进入任何 SQL 文本（参数绑定只适用于值，
+        # 标识符必须走白名单）；busy_timeout 仅允许档位白名单（PRAGMA 不支持
+        # 参数绑定，只能静态字面量分派，杜绝任何运行期 SQL 构造）。
+        self._table = _validate_table_name(table)
+        timeout_ms = int(busy_timeout_ms)
+        if timeout_ms not in (1000, 3000, 5000):
+            raise ValueError(f"busy_timeout_ms 仅允许档位 [1000, 3000, 5000]: {busy_timeout_ms!r}")
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         # 多 worker 并发写加固：busy_timeout 为连接级属性（须在持锁操作前设置）；
         # WAL 为数据库级持久属性，仅首次切换需要排他锁。
-        self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        if timeout_ms == 1000:
+            self._conn.execute("PRAGMA busy_timeout=1000")
+        elif timeout_ms == 3000:
+            self._conn.execute("PRAGMA busy_timeout=3000")
+        else:
+            self._conn.execute("PRAGMA busy_timeout=5000")
         self._enable_wal()
+        tbl = _validate_table_name(self._table)
         self._conn.execute(
-            f'CREATE TABLE IF NOT EXISTS "{table}" ('
+            f'CREATE TABLE IF NOT EXISTS "{tbl}" ('
             "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL)"
         )
         self._conn.commit()
@@ -74,9 +97,10 @@ class SqliteKVStore:
 
     def get(self, key: str, ttl_seconds: float | None = None) -> Any | None:
         """读取键值；TTL 过期记录读取即删除并返回 None。"""
+        tbl = _validate_table_name(self._table)
         with self._lock:
             row = self._conn.execute(
-                f'SELECT value, updated_at FROM "{self._table}" WHERE key = ?', (key,)
+                f'SELECT value, updated_at FROM "{tbl}" WHERE key = ?', (key,)
             ).fetchone()
             if row is None:
                 return None
@@ -88,10 +112,10 @@ class SqliteKVStore:
 
     def set(self, key: str, value: Any) -> None:
         """写入（或覆盖）键值，刷新 updated_at。"""
+        tbl = _validate_table_name(self._table)
         with self._lock:
             self._conn.execute(
-                f'INSERT OR REPLACE INTO "{self._table}" (key, value, updated_at) '
-                "VALUES (?, ?, ?)",
+                f'INSERT OR REPLACE INTO "{tbl}" (key, value, updated_at) ' "VALUES (?, ?, ?)",
                 (key, json.dumps(value, ensure_ascii=False, default=_json_default), time.time()),
             )
             self._conn.commit()
@@ -105,8 +129,9 @@ class SqliteKVStore:
 
     def clear(self) -> int:
         """清空全部键值，返回清理条数。"""
+        tbl = _validate_table_name(self._table)
         with self._lock:
-            cur = self._conn.execute(f'DELETE FROM "{self._table}"')
+            cur = self._conn.execute(f'DELETE FROM "{tbl}"', ())
             self._conn.commit()
             return cur.rowcount
 
@@ -120,8 +145,9 @@ class SqliteKVStore:
 
     def __len__(self) -> int:
         """表内键值条目总数（Number of stored keys）。"""
+        tbl = _validate_table_name(self._table)
         with self._lock:
-            row = self._conn.execute(f'SELECT count(*) FROM "{self._table}"').fetchone()
+            row = self._conn.execute(f'SELECT count(*) FROM "{tbl}"', ()).fetchone()
             return int(row[0]) if row else 0
 
 

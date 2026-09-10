@@ -7,6 +7,7 @@ import pytest
 from agent.agent import LLMNL2DSL, extract_json
 from agent.errors import PipelineError
 from agent.heuristic import DeterministicNL2DSL
+from compiler.sql_compiler import compile_sql
 from eval.eval_runner import load_golden
 from semantic.dsl_schema import QueryDSL
 
@@ -29,6 +30,84 @@ def test_heuristic_rejects_unknown_query():
     h = DeterministicNL2DSL()
     with pytest.raises(PipelineError):
         h.run("今天天气怎么样？")
+
+
+# --------------------------------------------------------------------------- #
+# 极值/实体维度（模块 A/B/C 回归：遗漏分组维度 + Top-N 极值失效）
+# --------------------------------------------------------------------------- #
+def test_heuristic_extreme_product_dimension():
+    """测试用例 1（极值单实体）：'2024年GMV最高的产品是什么'
+    -> 产品维度 + 按 gmv 降序 + limit 1 + SQL 含 JOIN dim_product / GROUP BY。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("2024年GMV最高的产品是什么")
+    assert [d.field for d in dsl.dimensions] == ["product_name"]
+    assert [(o.field, o.direction.value) for o in dsl.order_by] == [("gmv", "desc")]
+    assert dsl.limit == 1
+    sql = compile_sql(dsl)
+    assert "JOIN dim_product p ON p.product_id = f.product_id" in sql
+    assert "GROUP BY p.product_name" in sql
+    assert 'ORDER BY "gmv" DESC' in sql
+    assert 'SELECT p.product_name AS "product_name", SUM(f.order_amount) AS "gmv"' in sql
+
+
+def test_heuristic_extreme_shop_dimension():
+    """测试用例 2（极值多实体）：'上季度退款率最低的3个店铺有哪些'
+    -> 店铺维度 + 退款率升序 + limit 3 + SQL 含 JOIN dim_shop / GROUP BY。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("上季度退款率最低的3个店铺有哪些")
+    assert [d.field for d in dsl.dimensions] == ["shop_name"]
+    assert dsl.metrics[0].kind == "ratio" and dsl.metrics[0].alias == "refund_rate"
+    assert [(o.field, o.direction.value) for o in dsl.order_by] == [("refund_rate", "asc")]
+    assert dsl.limit == 3
+    sql = compile_sql(dsl)
+    assert "JOIN dim_shop s ON s.shop_id = f.shop_id" in sql
+    assert "LEFT JOIN fact_refunds r ON r.order_id = f.order_id" in sql
+    assert "GROUP BY s.shop_name" in sql
+    assert 'ORDER BY "refund_rate" ASC' in sql
+
+
+def test_heuristic_scalar_no_orderby_limit():
+    """测试用例 3（对照组纯标量）：'2024年总GMV是多少'
+    -> 无维度、无冗余 ORDER BY 与 LIMIT（编译器对纯全局聚合省略）。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("2024年总GMV是多少")
+    assert dsl.dimensions == []
+    assert dsl.order_by == []
+    sql = compile_sql(dsl)
+    assert "ORDER BY" not in sql
+    assert "LIMIT" not in sql
+
+
+def test_heuristic_time_plus_order_count():
+    """模块 B 验收 1：'2024年有多少订单' -> COUNT(order_id)，严禁生成 SUM(order_amount)。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("2024年有多少订单")
+    assert len(dsl.metrics) == 1
+    assert dsl.metrics[0].field == "order_id"
+    assert dsl.metrics[0].agg == "count"
+    assert dsl.metrics[0].alias == "order_count"
+    assert dsl.time_filter is not None  # 2024 年时间窗口
+    sql = compile_sql(dsl)
+    assert "SUM(" not in sql and "order_amount" not in sql
+    assert 'COUNT(f.order_id) AS "order_count"' in sql
+
+
+def test_heuristic_order_count_variants():
+    """模块 B 变体：'多少笔/几个订单/多少单' 均解析为 COUNT(order_id)。"""
+    h = DeterministicNL2DSL()
+    for q in ("2024年有多少笔订单", "上个月几个订单", "今年多少单", "有多少订单"):
+        dsl = h.run(q)
+        assert dsl.metrics[0].field == "order_id"
+        assert dsl.metrics[0].agg == "count"
+        assert dsl.metrics[0].alias == "order_count"
+
+
+def test_heuristic_user_count_variant():
+    """模块 B 用户：'有多少用户/多少客户' -> COUNT(DISTINCT user_id)。"""
+    h = DeterministicNL2DSL()
+    dsl = h.run("2024年有多少用户")
+    assert dsl.metrics[0].field == "user_id"
+    assert dsl.metrics[0].agg == "count_distinct"
 
 
 # --------------------------------------------------------------------------- #
@@ -72,7 +151,31 @@ def test_llm_agent_valid_output():
     assert fake.calls == 1
 
 
-def test_llm_agent_retries_then_succeeds():
+def test_llm_agent_semantic_retry_for_entity_ranking():
+    """合法但漏掉实体/排序/limit 的 DSL 必须触发语义重试。"""
+    import json as _json
+
+    bad = _json.dumps(
+        {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]}
+    )
+    good = _json.dumps(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": [{"field": "product_name"}],
+            "order_by": [{"field": "gmv", "direction": "desc"}],
+            "limit": 1,
+        }
+    )
+    fake = FakeLLM([bad, good])
+    agent = LLMNL2DSL(fake, max_retries=1)
+    dsl = agent.run("2024年GMV最高的产品是什么")
+    assert [d.field for d in dsl.dimensions] == ["product_name"]
+    assert dsl.order_by[0].field == "gmv"
+    assert dsl.limit == 1
+    assert fake.calls == 2
+
     import json as _json
 
     bad = "这不是 JSON"
@@ -201,3 +304,116 @@ def test_heuristic_region_expansion_intersects_warehouse(monkeypatch):
     dsl = h.run("华东的GMV是多少")
     prov = [f for f in dsl.filters if f.field == "province"]
     assert len(prov) == 1 and set(prov[0].value) == {"上海", "江苏"}
+
+
+def test_heuristic_dimension_count_fallback():
+    """维度基数探查：纯维度查询自动生成 count_distinct 指标。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有几个地区")
+    assert dsl.metrics[0].kind == "aggregate"
+    assert dsl.metrics[0].field == "province"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert dsl.metrics[0].alias == "region_count"
+    assert dsl.dimensions == []
+    assert dsl.time_filter is None
+    assert dsl.limit == 1
+
+
+def test_heuristic_dimension_count_brand():
+    """维度基数探查：品牌数量查询。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有几个品牌")
+    assert dsl.metrics[0].field == "brand"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert dsl.metrics[0].alias == "brand_count"
+
+
+def test_heuristic_dimension_count_category():
+    """维度基数探查：品类数量查询。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有几个品类")
+    assert dsl.metrics[0].field == "category"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert dsl.metrics[0].alias == "category_count"
+
+
+def test_heuristic_dimension_count_fallback_with_time_filter():
+    """维度基数探查：查询含时间时仍正常生成，不因时间窗口缺失而失败。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("2024年6月有几个地区")
+    assert dsl.metrics[0].field == "province"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert dsl.time_filter is not None
+
+
+def test_heuristic_dimension_count_fallback_unknown_query():
+    """完全无法识别的查询仍抛出 PipelineError，不猜测。"""
+    h = DeterministicNL2DSL()
+
+    with pytest.raises(PipelineError):
+        h.run("今天的天气怎么样")
+
+
+def test_heuristic_uncovers_dim_count_fallback_without_metrics():
+    """空问句 (维度未指定) 时不会误匹配 count_distinct。"""
+    h = DeterministicNL2DSL()
+
+    with pytest.raises(PipelineError):
+        h.run("我想看一下数据")
+
+
+def test_heuristic_dim_count_fallback_still_handles_defined_metrics():
+    """含明确指标的维度计数不受干扰（例如"每个地区的GMV"正常生成聚合 + 分组维度）。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("每个地区的GMV")
+    assert any(m.field == "order_amount" and m.agg == "sum" for m in dsl.metrics)
+    assert any(d.field == "province" for d in dsl.dimensions)
+
+
+def test_heuristic_dim_count_province_query():
+    """方言变体：询问"有几个省"能命中维度计数兜底。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有几个省")
+    assert dsl.metrics[0].field == "province"
+    assert dsl.metrics[0].agg == "count_distinct"
+
+
+# --------------------------------------------------------------------------- #
+# 维度枚举查询（"有哪些 [维度]" / "所有 [维度]"）：除 count_distinct 指标外
+# 还需把维度字段加入 dimensions，用于成员去重枚举。
+# --------------------------------------------------------------------------- #
+def test_heuristic_dim_enum_province():
+    """ "有哪些地区" -> count_distinct 指标 + province 分组维度。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("有哪些地区")
+    assert dsl.metrics[0].field == "province"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert [d.field for d in dsl.dimensions] == ["province"]
+    assert dsl.time_filter is None  # 纯维度枚举不强加时间窗口
+
+
+def test_heuristic_dim_enum_brand():
+    """ "所有品牌" -> count_distinct 指标 + brand 分组维度。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("所有品牌")
+    assert dsl.metrics[0].field == "brand"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert [d.field for d in dsl.dimensions] == ["brand"]
+
+
+def test_heuristic_dim_enum_category():
+    """ "全部品类" -> count_distinct 指标 + category 分组维度。"""
+    h = DeterministicNL2DSL()
+
+    dsl = h.run("全部品类")
+    assert dsl.metrics[0].field == "category"
+    assert dsl.metrics[0].agg == "count_distinct"
+    assert [d.field for d in dsl.dimensions] == ["category"]

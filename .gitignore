@@ -43,6 +43,10 @@ htmlcov/
 .env
 .env.*
 !.env.example
+# Model Provider 供应商配置（服务端持久化，含 API Key 明文，绝不入库）
+config/providers.json
+config/providers.json.bak
+config/providers.json.tmp
 
 # --- 运行时产物（本地 DuckDB 数仓） ---
 *.duckdb
@@ -66,4 +70,8 @@ logs/
 
 # --- 开发工具缓存（DSH vision router 产物） ---
 .dsh-vision-router/
+.zcode/
+
+# --- Mimosa 安全插件本地状态（hook 会话缓存，不属仓库内容） ---
+.mimosa/
 

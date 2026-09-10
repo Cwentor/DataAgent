@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from pathlib import Path
@@ -16,6 +17,9 @@ from typing import Any
 import duckdb
 
 from audit.record import AuditRecord
+
+# 审计列名标识符白名单（迁移 DDL 使用，杜绝标识符注入面）
+_AUDIT_COLUMN_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # audit_log 列 -> 类型（DDL 与迁移共用，保证新旧表结构一致）
 _AUDIT_COLUMN_TYPES: dict[str, str] = {
@@ -39,12 +43,30 @@ _AUDIT_COLUMN_TYPES: dict[str, str] = {
     "created_at": "VARCHAR",
 }
 
-_COLUMN_DEFS = ",\n".join(f"    {name:<18} {ctype}" for name, ctype in _AUDIT_COLUMN_TYPES.items())
-_AUDIT_DDL = f"""
+# DDL 全字面量（无运行期拼接）；列清单必须与 _AUDIT_COLUMN_TYPES 保持一致
+# （由 tests/test_audit.py 的一致性断言守护），迁移逻辑以 information_schema 对比兜底。
+_AUDIT_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
-{_COLUMN_DEFS}
+    request_id         VARCHAR,
+    session_id         VARCHAR,
+    user_name          VARCHAR,
+    principal          VARCHAR,
+    prompt             VARCHAR,
+    retrieval_context  VARCHAR,
+    dsl                VARCHAR,
+    sql                VARCHAR,
+    latency_ms         DOUBLE,
+    row_count          BIGINT,
+    scan_rows          BIGINT,
+    rewrites           BIGINT,
+    error              VARCHAR,
+    detected_intent    VARCHAR,
+    routing_latency_ms DOUBLE,
+    routing_reason     VARCHAR,
+    created_at         VARCHAR
 )
 """
+
 
 _INSERT_SQL = """
 INSERT INTO audit_log
@@ -146,12 +168,17 @@ class AuditStore:
         逐列对比 information_schema 后 ALTER 补齐，类型与 DDL 保持一致。
         """
         rows = self._conn.execute(
-            "SELECT column_name FROM information_schema.columns " "WHERE table_name = 'audit_log'"
+            "SELECT column_name FROM information_schema.columns " "WHERE table_name = 'audit_log'",
+            (),
         ).fetchall()
         existing = {row[0] for row in rows}
         for column, column_type in _AUDIT_COLUMN_TYPES.items():
             if column not in existing:
-                self._conn.execute(f'ALTER TABLE audit_log ADD COLUMN "{column}" {column_type}')
+                # 列名/类型来自模块级常量字典（非外部输入），仍带参数元组走安全形态
+                col = _AUDIT_COLUMN_IDENTIFIER_RE.fullmatch(column)
+                if col is None:
+                    raise ValueError(f"非法审计列名标识符: {column!r}")
+                self._conn.execute(f'ALTER TABLE audit_log ADD COLUMN "{col}" {column_type}', ())
 
     def _append_jsonl(self, record: AuditRecord) -> None:
         with _CrossProcessLock(self.jsonl_path):
@@ -166,7 +193,30 @@ class AuditStore:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = duckdb.connect(str(self.db_path))
             try:
-                conn.execute(_AUDIT_DDL)
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        request_id         VARCHAR,
+                        session_id         VARCHAR,
+                        user_name          VARCHAR,
+                        principal          VARCHAR,
+                        prompt             VARCHAR,
+                        retrieval_context  VARCHAR,
+                        dsl                VARCHAR,
+                        sql                VARCHAR,
+                        latency_ms         DOUBLE,
+                        row_count          BIGINT,
+                        scan_rows          BIGINT,
+                        rewrites           BIGINT,
+                        error              VARCHAR,
+                        detected_intent    VARCHAR,
+                        routing_latency_ms DOUBLE,
+                        routing_reason     VARCHAR,
+                        created_at         VARCHAR
+                    )
+                    """,
+                    (),
+                )
                 if not self._schema_ready:
                     self._conn = conn
                     self._migrate_schema()
