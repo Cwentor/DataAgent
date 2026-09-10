@@ -66,6 +66,10 @@
     右栏产物画布（执行报告 / ECharts 交互图表 / 沙箱代码与输出 / 数据审计表 +
     Markdown/HTML 导出），Header 含知识上下文 Schema 选择器（`/api/schema/summary`
     语义目录字段清单）与会话历史/新线程 CTA，零前端框架（原生 JS + vendored ECharts/PrismJS）
+- **多模型供应商网关（providers/）**：智谱 / OpenAI / Anthropic / Gemini 预置供应商，
+  OpenAI Chat、OpenAI Responses、Anthropic、Gemini 四协议适配与 JSON Mode 抹平；API Key
+  落盘加密存储、列表响应零密钥回传，工作台设置页可视化 CRUD + 连通性探测，SSE 编排支持
+  请求级 `provider_id` / `model_id` 模型切换
 - **可解释交付**：DSL → 中文话术 + 图表自适应推荐，零前端框架
 - **可观测**：全链路审计快照、结构化日志、QPS/分位数指标
 
@@ -148,6 +152,10 @@ AUTH_STRICT=1                  # 严格生产安全模式
 > set LLM_BASE_URL=http://127.0.0.1:8765/v1
 > set LLM_MODEL=mock
 > ```
+
+> **多供应商管理**：除 `.env` 单供应商接入外，亦可在 Web 工作台「设置」中可视化配置多个
+> 模型供应商（预置智谱 / OpenAI / Anthropic / Gemini，Key 加密存储），编排请求支持请求级
+> 模型切换。详见 [环境配置](docs/configuration.md) 与 [API 参考](docs/api.md)。
 
 ### 五、启动服务
 
@@ -250,6 +258,7 @@ DataAgent/
 ├── core/         # Data Agent 升级层：retrieval 门面（typed Tool + PII 脱敏 + 裸 SQL 网关）、
 │                 # orchestrator（StateGraph 六节点编排）、sandbox（AST 守卫 + 限权 runner +
 │                 # Docker/子进程后端）、skills（熵下钻 / 分解树 / DTW / HW / Shapley）
+├── providers/    # 多模型供应商网关：四协议适配 / API Key 加密存储 / 连通性探测
 ├── compiler/     # DSL -> 确定性 SQL
 ├── exec/         # SQL 执行层：只读 AST 校验 / 超时 / 熔断 / 连接池 / 自愈
 ├── tools/        # 多工具编排：查数 / 趋势 / 导出 / 口径解释
@@ -260,7 +269,7 @@ DataAgent/
 ├── web/          # Web UI / HTTP 服务 / 异步查询 / 编排端点
 ├── eval/         # Golden 评测（25 用例，含多轮对话序列，双模式）
 ├── mock/         # 确定性 DuckDB 数仓
-├── tests/        # 25 个测试文件（364 用例）
+├── tests/        # 35 个测试文件（573 用例）
 └── docs/         # 详细文档 + 评审归档
 ```
 
