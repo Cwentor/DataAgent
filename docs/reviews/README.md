@@ -61,3 +61,5 @@ yyyymmdd-<类型>-<主题关键词>.md
 | [20260906-repair-chatbi-domain-specificity.md](20260906-repair-chatbi-domain-specificity.md) | 缺陷修复：ChatBI 领域专业性整改闭环 | 2026-09 |
 | [20260906-audit-authentication-error-null-root.md](20260906-audit-authentication-error-null-root.md) | 深度审计：AuthenticationError 空根遗留风险项核实 | 2026-09 |
 | [20260906-readiness-final-signoff.md](20260906-readiness-final-signoff.md) | 就绪度评审：终态生产就绪度综合审计与防退化验收 | 2026-09 |
+| [20260909-changelog-enterprise-data-agent.md](20260909-changelog-enterprise-data-agent.md) | 升级变更记录：企业级 Data Agent 重型升级 | 2026-09 |
+| [20260910-benchmark-judge-data-agent-e2e.md](20260910-benchmark-judge-data-agent-e2e.md) | 质量验收：Data Agent 全链路基准裁决（六维度 69 分 FAIL） | 2026-09 |
