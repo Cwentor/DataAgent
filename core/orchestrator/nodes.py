@@ -192,11 +192,20 @@ def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
 
 
 def planner_node(state: AgentState) -> AgentState:
-    """规划节点：LLM JSON 计划优先，启发式兜底（需求 §2.A PlannerNode）。"""
+    """规划节点：LLM JSON 计划优先，启发式兜底（需求 §2.A PlannerNode）。
+
+    重规划自愈（行动项 3）：error_context 非空时把最近失败摘要注入 Planner
+    提示词——LLM 必须针对性修正计划，而非盲重试。
+    """
     llm = _resolve_llm()
     steps: list[PlanStep] | None = None
     if llm is not None:
-        payload = _llm_json(llm, PLANNER_SYSTEM, planner_prompt(state.user_query, schema_digest()))
+        error_context = "\n".join(state.error_context.errors[-3:]) or None
+        payload = _llm_json(
+            llm,
+            PLANNER_SYSTEM,
+            planner_prompt(state.user_query, schema_digest(), error_context=error_context),
+        )
         if payload:
             if payload.get("clarification"):
                 return state.apply(phase="clarify", clarification=str(payload["clarification"]))
@@ -761,6 +770,9 @@ def critic_node(state: AgentState) -> AgentState:
     llm = _resolve_llm()
     if llm is not None and has_summary:
         trace_digest = "\n".join(r.summary or r.error or "" for r in state.tool_calls[-6:])
+        if state.error_context.errors:
+            # 反思层必须看见失败历史（行动项 3：与 Planner 同一断裂点修复）
+            trace_digest += "\n自愈错误记录：" + "；".join(state.error_context.errors[-3:])
         verdict = _llm_json(
             llm,
             '仅输出 JSON：{"verdict": "sufficient"|"insufficient", "reasons": [...]}',

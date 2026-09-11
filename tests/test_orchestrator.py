@@ -258,3 +258,70 @@ def test_planner_prompt_contract_examples_align_with_schema():
     assert "time_filter" in PLANNER_SYSTEM
     assert '"time_range"' not in PLANNER_SYSTEM
     assert 'operator": "eq|ne|in|gt|gte|lt|lte|between"' in PLANNER_SYSTEM
+
+
+# --------------------------------------------------------------------------- #
+# 重规划自愈上下文（pi-agent-harness 对齐：行动项 3）
+# --------------------------------------------------------------------------- #
+def test_planner_prompt_injects_error_context():
+    """planner_prompt 带 error_context：必须注入失败记录并要求针对性修正。"""
+    from core.orchestrator.prompts import planner_prompt
+
+    prompt = planner_prompt(
+        "查 GMV", "- gmv (fact_orders.order_amount)", error_context="CompileError: 字段不存在"
+    )
+    assert "上次失败记录" in prompt
+    assert "CompileError: 字段不存在" in prompt
+    assert "严禁原样重复上一轮计划" in prompt
+
+
+def test_planner_prompt_without_error_context_unchanged():
+    """planner_prompt 不带 error_context：不出现失败记录小节（首轮规划不变）。"""
+    from core.orchestrator.prompts import planner_prompt
+
+    prompt = planner_prompt("查 GMV", "- gmv (fact_orders.order_amount)")
+    assert "上次失败记录" not in prompt
+
+
+def test_planner_node_feeds_error_context_to_llm(monkeypatch):
+    """重规划时 planner_node 把最近失败摘要注入 LLM 提示词（断裂点修复实锤）。"""
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+
+    def fake_llm_json(llm, system, user):
+        captured["user"] = user
+        return None  # 走启发式兜底，重点在捕获提示词
+
+    monkeypatch.setattr(nodes, "_llm_json", fake_llm_json)
+    state = AgentState(user_query="查 GMV")
+    state.error_context.record("CompileError: 字段 nonexistent 不在语义目录")
+    nodes.planner_node(state)
+    assert "上次失败记录" in captured["user"]
+    assert "nonexistent 不在语义目录" in captured["user"]
+
+
+def test_critic_trace_digest_carries_error_history(monkeypatch):
+    """LLM 反思的执行轨迹必须包含自愈错误记录（反思层看得见失败历史）。"""
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState, Artifact
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+
+    def fake_llm_json(llm, system, user):
+        captured["user"] = user
+        return {"verdict": "sufficient", "reasons": ["ok"]}
+
+    monkeypatch.setattr(nodes, "_llm_json", fake_llm_json)
+    state = AgentState(
+        user_query="为什么下滑",
+        datasets={"s1": {"path": "x.parquet", "rows": 1, "columns": ["gmv"]}},
+        artifacts=[Artifact(kind="summary", name="s2", payload={"summary": {"title": "归因"}})],
+    )
+    state.error_context.record("沙箱执行失败: NameError")
+    nodes.critic_node(state)
+    assert "自愈错误记录" in captured["user"]
+    assert "NameError" in captured["user"]
