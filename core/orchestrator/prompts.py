@@ -140,12 +140,29 @@ PLANNER_FEWSHOT = """# 示例
 """
 
 
-def planner_prompt(user_query: str, schema_digest: str) -> str:
-    """组装 Planner 的用户消息（问题 + 语义目录摘要 + Few-Shot）。"""
-    return (
-        f"# 用户问题\n{user_query}\n\n# 语义目录（可用字段）\n{schema_digest}\n\n"
-        f"{PLANNER_FEWSHOT}\n# 现在，仅输出该问题的 JSON 计划。"
-    )
+def planner_prompt(
+    user_query: str, schema_digest: str, error_context: str | None = None
+) -> str:
+    """组装 Planner 的用户消息（问题 + 语义目录摘要 + 自愈错误上下文 + Few-Shot）。
+
+    ``error_context``：重规划自愈时注入的最近失败摘要（容错链路断裂点修复）——
+    此前编排层 query/analyze 失败回到 plan 后 LLM 看不到失败原因，重规划退化为
+    盲重试；注入后 LLM 必须针对性修正计划。
+    """
+    parts = [
+        f"# 用户问题\n{user_query}",
+        f"# 语义目录（可用字段）\n{schema_digest}",
+    ]
+    if error_context:
+        parts.append(
+            "# 上次失败记录（自愈重规划上下文）\n"
+            "以下是上一轮执行/取数的失败原因。你必须针对这些错误修正计划"
+            "（如修正 DSL 字段口径、过滤条件、时间窗口或依赖结构），"
+            "严禁原样重复上一轮计划：\n" + error_context
+        )
+    parts.append(PLANNER_FEWSHOT)
+    parts.append("# 现在，仅输出该问题的 JSON 计划。")
+    return "\n\n".join(parts)
 
 
 # --------------------------------------------------------------------------- #
