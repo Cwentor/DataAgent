@@ -90,3 +90,21 @@ run manifest 审计轨迹、HITL 检查点、复杂度分诊。
   `tests/test_orchestrator.py`；
 - 质量门：`black --check .` / `ruff check .` / `python -m pytest -q` 全绿；
 - 回归锚点：oracle 评测 25/25（`python -m eval.eval_runner`）、确定性种子 42 不变。
+
+## 七、后续项处置记录（2026-09-11 同分支续作）
+
+1. **字段动态 profiling——已落地**（commit d989709）：`core/retrieval/profiling.py`
+   对低基数（≤30）字符串字段 `SELECT DISTINCT` 探查实际取值，进程级缓存 +
+   逐字段失败降级；`schema_digest` 注入"可取值"清单，Planner 不再臆造过滤
+   字面值。仅 LLM 规划路径探查，离线环境零副作用。
+2. **web service 链路接入 DataQA——已落地**（commit a7f6d29）：
+   `run_guarded_query` 结果构建前跑同一 `run_quality_assertions`，
+   `GuardedQueryResult.qa_findings` 随 query_metric / trend_analysis 工具
+   data + meta 双透传；两条取数链路（编排器/web）质检同源同格式。
+3. **Planner 规则双写单点化——评估后维持现状（有意冗余）**：提示词内嵌
+   DSL 纪律（PLANNER_SYSTEM）与 `_normalize_dsl_draft` 代码规范化是"预防 +
+   治疗"的防线纵深，而非漂移缺陷：规范化层宽容接受常见笔误，契约层
+   （网关 validate，extra=forbid）是唯一裁决者，错误喂回自愈——三层职责
+   各自独立可单测。强行单点化（由代码生成提示词或反之）会引入生成链路
+   的间接性，成本高于收益。结论：不改代码，处置记录在案。
+
