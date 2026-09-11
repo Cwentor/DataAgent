@@ -36,5 +36,10 @@ class ParquetRef(BaseModel):
     query: str = Field(default="", description="产出该数据集的自然语言问题（溯源）")
     dsl: dict[str, Any] = Field(default_factory=dict, description="产出该数据集的 DSL（溯源）")
     masked_cells: int = Field(default=0, ge=0, description="导出时被 PII 脱敏的单元格数（审计）")
+    audit: dict[str, Any] = Field(
+        default_factory=dict,
+        description="执行审计与结果质检（DataQA/GuardrailAgent 结构化发现："
+        '{"guard": [...], "qa": [...]}，为空 dict 表示无发现）',
+    )
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)

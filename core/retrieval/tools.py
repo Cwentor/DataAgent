@@ -4,9 +4,11 @@
 1. ``guardrails.validate_dsl_payload``：网关层裸 SQL / 非法形态拒绝；
 2. ``security.guard.apply_policy``：表级 / 列级 / 行级 RLS 注入；
 3. ``compiler.compile_sql``：字段白名单 + 受限操作符确定性编译；
-4. ``exec.guards.execute_sql``：只读 AST 校验 / 超时 / 扫描行数熔断 /
-   LIMIT 硬上限；
-5. ``export.export_to_parquet``：PII 脱敏 + 行数上限截断 + Parquet 物化。
+4. ``exec.guards.execute_sql``：只读 AST 校验 / 执行前审计（笛卡尔积等）/
+   超时 / 扫描行数熔断 / LIMIT 硬上限；
+5. ``export.export_to_parquet``：PII 脱敏 + 行数上限截断 + Parquet 物化；
+6. ``quality.run_quality_assertions``：执行后 DataQA 结果断言（空结果 /
+   NULL 率 / 负值 / 维度唯一性），发现随 ParquetRef.audit 输出。
 
 与 NL 入口（run_guarded_query）的差异：本工具接收**结构化 DSL**（由编排器
 Planner 产出），编译/执行报错直接上抛，由编排层的 error_context 自愈循环
@@ -91,6 +93,12 @@ def execute_dsl_query(
 
             default_pool().release(conn)
 
+    # DataQAAgent 结果断言（执行后、导出前）：四类确定性质检，发现随
+    # ParquetRef.audit 传递（不否决执行；处置权在 critic 与报告层）
+    from core.retrieval.quality import run_quality_assertions
+
+    qa_findings = [f.to_dict() for f in run_quality_assertions(exec_result.columns, exec_result.rows, guarded_dsl)]
+
     inputs_dir = Path(workspace) / "inputs"
     return export_to_parquet(
         list(exec_result.columns),
@@ -100,6 +108,7 @@ def execute_dsl_query(
         query=query,
         dsl=guarded_dsl.model_dump(mode="json"),
         max_rows=max_rows,
+        audit={"guard": exec_result.findings, "qa": qa_findings},
     )
 
 

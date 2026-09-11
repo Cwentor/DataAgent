@@ -35,11 +35,14 @@ def export_to_parquet(
     query: str = "",
     dsl: dict | None = None,
     max_rows: int = DEFAULT_MAX_EXPORT_ROWS,
+    audit: dict | None = None,
 ) -> ParquetRef:
     """把结果集脱敏后写为 Parquet，返回 ParquetRef（失败抛异常，不吞错）。
 
     - ``name``：数据集逻辑名（须为安全文件名形态，正则约束）；
-    - ``max_rows``：超过即截断（编排层可据 ref.rows 判断是否截断）。
+    - ``max_rows``：超过即截断（编排层可据 ref.rows 判断是否截断）；
+    - ``audit``：执行审计与结果质检发现（GuardrailAgent/DataQAAgent 结构化
+      输出，随 ParquetRef.audit 契约字段传递至编排层与报告层）。
     """
     if not re_ok_name(name):
         raise ValueError(f"非法数据集名: {name!r}")
@@ -82,6 +85,7 @@ def export_to_parquet(
         query=query,
         dsl=dsl or {},
         masked_cells=report.total_masked,
+        audit=audit or {},
     )
 
 
