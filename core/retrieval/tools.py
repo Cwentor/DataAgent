@@ -22,13 +22,16 @@ from typing import Any
 
 import duckdb
 
+from audit.logging import get_logger
 from compiler.sql_compiler import compile_sql
 from core.retrieval.export import DEFAULT_MAX_EXPORT_ROWS, export_to_parquet
-from core.retrieval.guardrails import validate_dsl_payload
+from core.retrieval.guardrails import GuardrailViolation, validate_dsl_payload
 from core.retrieval.parquet_ref import ParquetRef
 from exec.guards import execute_sql
 from security.guard import apply_policy
 from semantic.dsl_schema import QueryDSL
+
+logger = get_logger("core.retrieval.tools")
 
 
 def _acquire_conn() -> duckdb.DuckDBPyConnection:
@@ -72,7 +75,12 @@ def execute_dsl_query(
     """
     from config import settings
 
-    dsl: QueryDSL = validate_dsl_payload(dsl_payload, where="execute_dsl_query")
+    try:
+        dsl: QueryDSL = validate_dsl_payload(dsl_payload, where="execute_dsl_query")
+    except GuardrailViolation as exc:
+        # 网关拒绝（裸 SQL 夹带 / 契约外字段）：安全审计必须留痕
+        logger.warning("DSL 网关拒绝载荷", extra={"error": str(exc)[:500]})
+        raise
     guarded_dsl = apply_policy(dsl, principal)
     sql = compile_sql(guarded_dsl)
 
@@ -101,6 +109,17 @@ def execute_dsl_query(
         f.to_dict()
         for f in run_quality_assertions(exec_result.columns, exec_result.rows, guarded_dsl)
     ]
+    # 质检发现分级留痕：error 级（维度组合重复=编译/聚合缺陷）必须可被采集告警
+    for finding in qa_findings:
+        record = logger.error if finding["severity"] == "error" else logger.warning
+        record(
+            f"DataQA 质检发现（{finding['check']}）",
+            extra={"error": finding["message"][:500]},
+        )
+    logger.info(
+        "DSL 查询执行完成",
+        extra={"row_count": len(exec_result.rows), "scan_rows": exec_result.scan_rows},
+    )
 
     inputs_dir = Path(workspace) / "inputs"
     return export_to_parquet(

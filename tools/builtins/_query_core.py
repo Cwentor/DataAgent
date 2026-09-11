@@ -30,6 +30,7 @@ from typing import Any
 import duckdb
 
 from agent.pipeline import rewrite_dsl, run_pipeline_with_status
+from audit.logging import get_logger
 from audit.metrics import default_registry
 from compiler.sql_compiler import CompileError, compile_sql
 from config import settings
@@ -37,6 +38,8 @@ from core.retrieval.quality import run_quality_assertions
 from exec.guards import ExecutionResult, SqlExecutionError, execute_sql
 from security.guard import apply_policy
 from semantic.dsl_schema import QueryDSL
+
+logger = get_logger("tools.builtins.query_core")
 
 __all__ = ["GuardedQueryResult", "run_guarded_query"]
 
@@ -158,7 +161,15 @@ def _run_guarded(
             break
         except (CompileError, SqlExecutionError) as exc:
             if rewrites >= max_rewrites:
+                logger.error(
+                    "自愈重试额度耗尽，透传编译/执行报错",
+                    extra={"error": f"{type(exc).__name__}: {exc}"[:500], "rewrites": rewrites},
+                )
                 raise
+            logger.warning(
+                "编译/执行报错，喂回 LLM 重写 DSL 自愈",
+                extra={"error": f"{type(exc).__name__}: {exc}"[:500], "rewrites": rewrites},
+            )
             try:
                 rewritten = rewriter(
                     query,
@@ -169,8 +180,13 @@ def _run_guarded(
                 )
                 current_dsl = apply_policy(rewritten, principal)
                 rewrites += 1
-            except Exception:
+                logger.info(f"DSL 自愈重写成功（第 {rewrites} 轮）")
+            except Exception as rewrite_exc:
                 # 自愈失败（无 LLM / LLM 拒绝 / 安全守卫拒绝）-> 透传原始报错
+                logger.error(
+                    "SQL 自愈重写失败，透传原始报错",
+                    extra={"error": f"{type(rewrite_exc).__name__}: {rewrite_exc}"[:500]},
+                )
                 default_registry().record_self_heal_failure()
                 raise exc from None
 

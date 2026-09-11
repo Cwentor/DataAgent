@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from audit.logging import get_logger
 from core.orchestrator import events
 from core.orchestrator.graph import StateGraph
 from core.orchestrator.nodes import (
@@ -31,6 +32,8 @@ from core.orchestrator.nodes import (
     synthesize_node,
 )
 from core.orchestrator.state import AgentState
+
+logger = get_logger("core.orchestrator.agent")
 
 
 class AgentTrace(BaseModel):
@@ -143,6 +146,14 @@ def run_agent(
             else:
                 events.emit_event(events.EVENT_DONE, {"report": final.report})
     except Exception as exc:
+        logger.exception(
+            "编排执行失败",
+            extra={
+                "error": f"{type(exc).__name__}: {exc}"[:500],
+                "session_id": session_id,
+                "turn_id": resolved_turn,
+            },
+        )
         if on_event is not None:
             events.emit_event(events.EVENT_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
         raise
@@ -154,6 +165,16 @@ def run_agent(
         # HITL：返回含澄清问题的中间态（调用方展示问题 -> 收集答复 -> 再次调用）
         return final
 
+    # 编排完成摘要（流程可观测：每轮一次 info，含自愈计数与产物统计）
+    logger.info(
+        "编排完成",
+        extra={
+            "session_id": final.session_id,
+            "event": final.phase,
+            "row_count": len(final.artifacts),
+            "error": f"self_heal={final.error_context.retries}, steps={len(final.tool_calls)}",
+        },
+    )
     return AgentTrace(
         report=final.report,
         phase=final.phase,

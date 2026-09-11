@@ -26,6 +26,7 @@ import time
 from typing import Any
 
 from agent.heuristic import region_provinces
+from audit.logging import get_logger
 from core.orchestrator import events
 from core.orchestrator.prompts import (
     DEGRADED_SUMMARIZER_SYSTEM,
@@ -46,7 +47,7 @@ from core.skills.decomposition import multiplicative_decomposition
 from core.skills.drilldown import drilldown_by_information_gain
 from semantic.catalog import REGION_PROVINCE_MAPPING as REGION_PROVINCE_MAPPING
 
-logger = __import__("audit.logging", fromlist=["get_logger"]).get_logger("core.orchestrator")
+logger = get_logger("core.orchestrator")
 
 
 # --------------------------------------------------------------------------- #
@@ -92,7 +93,12 @@ def _llm_json(llm: Any, system: str, user: str) -> dict[str, Any] | None:
             llm, [{"role": "system", "content": system}, {"role": "user", "content": user}]
         )
         return extract_json(text)
-    except Exception:
+    except Exception as exc:
+        # LLM 调用/解析失败：兜底路径可继续，但故障必须可采集（服务可用性信号）
+        logger.warning(
+            "LLM 调用或 JSON 解析失败，走确定性兜底",
+            extra={"error": f"{type(exc).__name__}: {exc}"[:500]},
+        )
         return None
 
 
@@ -497,6 +503,10 @@ def dsl_query_node(state: AgentState) -> AgentState:
             ]
         except Exception as exc:
             keep = updated.error_context.record(f"{type(exc).__name__}: {exc}")
+            logger.exception(
+                f"取数步骤执行失败: {step.id}",
+                extra={"error": f"{type(exc).__name__}: {exc}"[:500]},
+            )
             events.emit_tool_end(
                 "futurebi_dsl_query",
                 step.id,
@@ -517,10 +527,18 @@ def dsl_query_node(state: AgentState) -> AgentState:
                 for s in updated.plan_steps
             ]
             if not keep:
+                logger.error(
+                    f"取数自愈额度耗尽，编排终止: {step.id}",
+                    extra={"error": str(exc)[:500]},
+                )
                 return updated.apply(
                     phase="done",
                     report=f"取数在 {MAX_RETRIES} 次自愈后仍失败，已终止。\n最后一次错误：{exc}",
                 )
+            logger.warning(
+                "取数失败喂回规划节点重写 DSL 自愈",
+                extra={"error": f"retries={updated.error_context.retries}, step={step.id}"},
+            )
             events.emit_reflection(
                 f"取数失败：{exc}", "retry", "错误已喂回规划节点重写 DSL 计划自愈"
             )
@@ -737,11 +755,19 @@ def code_exec_node(state: AgentState) -> AgentState:
             )
         else:
             keep = updated.error_context.record(result.error or "沙箱执行失败")
+            logger.warning(
+                f"沙箱分析执行失败: {step.id}",
+                extra={"error": (result.error or "")[:500]},
+            )
             updated.plan_steps = [
                 s.model_copy(update={"status": "failed"}) if s.id == step.id else s
                 for s in updated.plan_steps
             ]
             if not keep:
+                logger.error(
+                    f"沙箱自愈额度耗尽，转 Critic 如实放弃: {step.id}",
+                    extra={"error": (result.error or "")[:500]},
+                )
                 return updated.apply(phase="critique")  # 让 Critic 决定如实放弃
             events.emit_reflection(
                 f"沙箱执行失败：{result.error}", "retry", "回到规划节点修正分析代码"
@@ -770,13 +796,16 @@ def critic_node(state: AgentState) -> AgentState:
 
     if not has_data:
         if exhausted:
+            logger.error("未获得任何数据集且自愈额度耗尽，转入综合节点如实报告失败")
             events.emit_reflection(
                 "未获得任何数据集且重试额度耗尽", "proceed", "转入综合节点如实报告失败"
             )
             return state.apply(phase="synthesize")
+        logger.warning("未获得任何数据集，触发重规划自愈")
         events.emit_reflection("未获得任何数据集", "replan", "取数失败，回到规划节点重写计划")
         return state.apply(phase="plan")
     if diagnostic and not has_summary and not exhausted:
+        logger.warning("诊断类问题缺少归因 summary 产物，触发重规划补齐分析")
         events.emit_reflection(
             "诊断类问题缺少归因 summary 产物", "replan", "补齐沙箱归因分析后再综合"
         )
@@ -798,10 +827,15 @@ def critic_node(state: AgentState) -> AgentState:
             # 只能靠迭代护栏兜底而空烧 LLM 调用）
             keep = state.error_context.record(f"LLM 反思判定产物不充分: {verdict.get('reasons')}")
             state.scratchpad.append(f"[critic-llm] {verdict.get('reasons')}")
+            logger.warning(
+                "LLM 反思判定产物不充分，触发重规划",
+                extra={"error": str(verdict.get("reasons", ""))[:500]},
+            )
             events.emit_reflection(
                 str(verdict.get("reasons", "")), "replan", "LLM 反思判定产物不充分，触发重规划"
             )
             if not keep:
+                logger.error("重规划额度耗尽，转入综合节点如实报告")
                 events.emit_reflection("重规划额度耗尽", "proceed", "转入综合节点如实报告")
                 return state.apply(phase="synthesize")
             return state.apply(phase="plan")
@@ -927,14 +961,20 @@ def _synthesize_with_llm(state: AgentState, material: str) -> str | None:
             ],
             json_mode=False,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "LLM 商业分析师综合失败，走确定性分析师兜底",
+            extra={"error": f"{type(exc).__name__}: {exc}"[:500]},
+        )
         return None
     if not text or not text.strip():
+        logger.warning("LLM 商业分析师综合返回空文本，走确定性分析师兜底")
         return None
     stripped = text.strip()
     # 反契约输出防御：LLM 若仍回 JSON（被 extract_json 成功解析），视为失败走兜底
     if stripped.startswith("{") or stripped.startswith("["):
         if extract_json(stripped) is not None:
+            logger.warning("LLM 综合输出反契约（JSON 形态），走确定性分析师兜底")
             return None
     return stripped
 
@@ -976,10 +1016,15 @@ def _degraded_report(state: AgentState) -> str:
                 and extract_json(stripped) is not None
             ):
                 llm_report = stripped
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "降级 Summarizer LLM 调用失败，走确定性降级简报",
+                extra={"error": f"{type(exc).__name__}: {exc}"[:500]},
+            )
             llm_report = None
     if llm_report:
         return llm_report
+    logger.warning("降级简报走确定性渲染（LLM 不可用或反契约）")
     # 确定性降级简报：只呈现部分数据事实与口径差异，无内部调试信息
     lines = ["### 部分结论（基于已获取数据）", ""]
     lines.append("本轮分析在多次自愈后仍未完整完成，以下仅呈现已获取的部分数据事实。")
@@ -1100,6 +1145,10 @@ def synthesize_node(state: AgentState) -> AgentState:
     # R3 降级保护：自愈额度耗尽 => 降级简报（无论是否已获取部分数据），
     # 严禁把未加工的 scratchpad / 工具执行结果吐给前端
     if state.error_context.retries >= MAX_RETRIES:
+        logger.warning(
+            "自愈额度耗尽，输出降级简报",
+            extra={"error": f"retries={state.error_context.retries}"},
+        )
         report = _degraded_report(state)
         events.emit_event(
             events.EVENT_ARTIFACT_EMIT,

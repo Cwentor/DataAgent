@@ -37,7 +37,10 @@ import duckdb
 import sqlglot
 from sqlglot import exp
 
+from audit.logging import get_logger
 from config import settings
+
+logger = get_logger("exec.guards")
 
 # --------------------------------------------------------------------------- #
 # 异常体系
@@ -386,6 +389,7 @@ def _run_with_timeout(
         except Exception:  # interrupt 失败也须继续走超时分支
             pass
         worker.join(2.0)
+        logger.error("查询超时被强制取消", extra={"error": f"timeout_ms={timeout_ms}"})
         raise QueryTimeoutError(f"查询超时（>{timeout_ms}ms），已强制取消")
 
     if "exc" in outcome:
@@ -416,12 +420,21 @@ def execute_sql(
     执行前审计（GuardrailAgent）：只读断言后追加笛卡尔积 / 无界输出静态审计，
     REJECTED 级发现抛 GuardrailRejected（不执行），WARNING 级随结果输出。
     """
-    assert_read_only_sql(sql)
+    try:
+        assert_read_only_sql(sql)
+    except UnsafeSqlError:
+        # 高危拦截（P0 防线）：必须留痕供安全审计，不改变异常传播
+        logger.exception("只读白名单拦截非只读/高危 SQL")
+        raise
     # 延迟导入：audit.py 依赖本模块异常体系（GuardrailRejected 继承 SqlExecutionError），
     # 顶层互导会形成循环；依赖方向固定为 audit -> guards
-    from exec.audit import assert_guardrails
+    from exec.audit import GuardrailRejected, assert_guardrails
 
-    guard_warnings = [f.to_dict() for f in assert_guardrails(sql)]
+    try:
+        guard_warnings = [f.to_dict() for f in assert_guardrails(sql)]
+    except GuardrailRejected as exc:
+        logger.error("执行前审计拒绝（笛卡尔积/只读结构违规）", extra={"error": str(exc)[:500]})
+        raise
     started = time.perf_counter()
     scan_rows = 0
 
@@ -447,6 +460,10 @@ def execute_sql(
             cache_scan_rows(sql, scanned)
         scan_rows = scanned
         if scanned > max_scan_rows:
+            logger.error(
+                "扫描行数上限熔断",
+                extra={"error": f"scanned={scanned}, limit={max_scan_rows}"},
+            )
             raise MaxRowsScannedExceeded(
                 f"扫描行数上限熔断：本次查询扫描 {scanned} 行，超过上限 {max_scan_rows}"
             )
@@ -457,10 +474,18 @@ def execute_sql(
     except QueryTimeoutError:
         raise
     except duckdb.Error as exc:
+        logger.warning(
+            "SQL 执行引擎报错（可自愈）",
+            extra={"error": f"{type(exc).__name__}: {exc}"[:500]},
+        )
         raise SqlExecutionError(f"{type(exc).__name__}: {exc}") from exc
 
     # 3) 返回行数硬上限
     if max_result_rows is not None and len(rows) > max_result_rows:
+        logger.error(
+            "LIMIT 硬上限熔断",
+            extra={"error": f"rows={len(rows)}, limit={max_result_rows}"},
+        )
         raise ResultLimitExceeded(
             f"LIMIT 硬上限熔断：返回 {len(rows)} 行，超过上限 {max_result_rows}"
         )

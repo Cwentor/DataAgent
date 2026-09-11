@@ -54,7 +54,10 @@ def profile_enum_values(
             if _ENUM_CACHE is not None:
                 return dict(_ENUM_CACHE)
 
+    from audit.logging import get_logger
     from semantic.catalog import COLUMNS
+
+    logger = get_logger("core.retrieval.profiling")
 
     enum_fields = {
         name: meta for name, meta in COLUMNS.items() if (meta.dtype or "").lower() == "str"
@@ -65,6 +68,7 @@ def profile_enum_values(
         try:
             conn = _acquire_conn()
         except Exception:
+            logger.warning("枚举探查无法获取数据库连接，降级为空结果", exc_info=True)
             return {}
     try:
         for name, meta in enum_fields.items():
@@ -74,8 +78,13 @@ def profile_enum_values(
                     [max_distinct + 1],
                 )
                 values = [str(row[0]) for row in cursor.fetchall() if row[0] is not None]
-            except Exception:
-                continue  # 单字段失败跳过（表缺失/权限等），不中断整批
+            except Exception as exc:
+                # 单字段失败跳过（表缺失/权限等），不中断整批；留痕便于排查
+                logger.warning(
+                    f"字段枚举探查失败，已跳过: {name}",
+                    extra={"error": f"{type(exc).__name__}: {exc}"[:300]},
+                )
+                continue
             if len(values) > max_distinct:
                 continue  # 高基数字段不注入（防提示词膨胀）
             result[name] = values
