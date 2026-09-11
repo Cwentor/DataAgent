@@ -82,7 +82,7 @@ python -m web.server 8000
 semantic/   语义目录 + DSL 契约（Single Source of Truth）
 compiler/   DSL -> SQL 确定性编译器
 agent/      NL -> DSL Agent（LLM + 启发式兜底）
-exec/       SQL 执行层（P0/P1 资源治理：超时取消 / 扫描行数熔断 / LIMIT 硬上限）
+exec/       SQL 执行层（P0/P1 资源治理：执行前审计门 / 超时取消 / 扫描行数熔断 / LIMIT 硬上限）
 eval/       Golden 评测骨架与用例
 mock/       确定性 mock 数仓（DuckDB）
 present/    展示层（解释 + 可视化推荐）
@@ -99,9 +99,13 @@ web/        Web 可视化 UI（service + server + static 前端）
 
 ```
 core/retrieval/     检索门面：DSL 管道 typed Tool 化（execute_dsl_query -> ParquetRef）、
-                    PII 脱敏导出、裸 SQL 网关守卫（GuardrailViolation）
+                    PII 脱敏导出、裸 SQL 网关守卫（GuardrailViolation）、
+                    动态 profiling（低基数字段枚举值注入规划上下文）、
+                    DataQA 结果断言（空结果 / NULL 率 / 负值 / 维度唯一性，
+                    发现随 ParquetRef.audit 输出，编排与 web 双链路同源）
 core/orchestrator/  图式编排：StateGraph（六节点 + 条件边 + HITL 中断恢复 +
-                    反思重规划 ≤3 次自愈）；Planner/Coder/Reflector 提示词与 Few-Shot
+                    反思重规划 ≤3 次自愈 + 自愈错误上下文注入 Planner）；
+                    Planner/Coder/Reflector 提示词与 Few-Shot
 core/sandbox/       沙箱代码解释器：AST 静态守卫 + 限权 runner（模块白名单 import +
                     workspace 受限 open）+ 可插拔后端（Docker 强隔离 / 子进程兜底）
 core/skills/        归因技能包：熵下钻 / 指标分解树（乘法对数链式 + 加法）/
@@ -128,7 +132,9 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy + 标准�
 - DSL 模型一律 `extra="forbid"`，Agent 只能产出契约内字段；
 - 评测锚点 `AS_OF_DATE = 2024-06-30`、随机种子 42，保证确定性可复现；
 - DSL 进阶语义：窗口指标 `WindowMetric`（cumsum/moving_avg，需时间维度）、日期补零 `fill_gaps`（需时间维度+明确时间窗口，仅 day/month）、分组 `TopN`（ROW_NUMBER 分区过滤）；编译器对 comparison / top_n / fill_gaps / window 的互斥组合显式抛 `CompileError`；
-- SQL 执行层（`exec/`）：statement_timeout 用线程看门狗 + `conn.interrupt()` 取消；扫描行数上限用 `EXPLAIN ANALYZE` 预检熔断；LIMIT 硬上限对返回行数做防御性熔断；编译/引擎精确报错会喂回 LLM 重写 DSL 自愈（至少 1 次，`SQL_SELF_HEAL_MAX_RETRIES`），确定性兜底模式下透传原始报错；
+- SQL 执行层（`exec/`）：statement_timeout 用线程看门狗 + `conn.interrupt()` 取消；扫描行数上限用 `EXPLAIN ANALYZE` 预检熔断；LIMIT 硬上限对返回行数做防御性熔断；执行前审计门（`exec/audit.py`）对编译产物做静态审计——笛卡尔积 / 只读结构违规 REJECTED 熔断（`GuardrailRejected`，拒绝原因可自愈）、无界输出 WARNING（真实边界由返回行数硬上限承担，勿升级为 REJECTED）；编译/引擎精确报错会喂回 LLM 重写 DSL 自愈（至少 1 次，`SQL_SELF_HEAL_MAX_RETRIES`），确定性兜底模式下透传原始报错；
+- 结果断言层（`core/retrieval/quality.py`）：执行后、导出前四类确定性质检（空结果 / NULL 率 / 非负指标负值 / 聚合维度组合唯一性），发现随 `ParquetRef.audit`（{guard, qa}）全链路可见（SSE 事件 / critic / 报告质检小节 / 分级日志），不自动否决执行；ratio/window 派生指标不做负值断言；
+- 重规划自愈上下文：编排链路失败回 plan 时，`planner_prompt` 必须注入 `error_context`（最近失败摘要）——严禁让 LLM 盲重试；`error_context=None` 时提示词与旧契约逐字一致；
 - 提交前确保 `black --check .`、`ruff check .`、`python -m pytest -q` 全绿。
 
 ## 评审落盘规范（Review Archive）
