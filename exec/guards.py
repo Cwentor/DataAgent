@@ -30,7 +30,7 @@ import hashlib
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import duckdb
@@ -278,6 +278,8 @@ class ExecutionResult:
     rows: list[list[Any]]
     scan_rows: int = 0
     duration_ms: float = 0.0
+    # 执行前审计的 WARNING 级发现（REJECTED 级在执行前已熔断抛 GuardrailRejected）
+    findings: list[dict[str, str]] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -410,8 +412,16 @@ def execute_sql(
     - statement_timeout_ms：语句超时（毫秒），超时中断并抛 QueryTimeoutError；
     - max_scan_rows：扫描行数上限，预检超过即抛 MaxRowsScannedExceeded；
     - max_result_rows：返回行数硬上限，超过即抛 ResultLimitExceeded。
+
+    执行前审计（GuardrailAgent）：只读断言后追加笛卡尔积 / 无界输出静态审计，
+    REJECTED 级发现抛 GuardrailRejected（不执行），WARNING 级随结果输出。
     """
     assert_read_only_sql(sql)
+    # 延迟导入：audit.py 依赖本模块异常体系（GuardrailRejected 继承 SqlExecutionError），
+    # 顶层互导会形成循环；依赖方向固定为 audit -> guards
+    from exec.audit import assert_guardrails
+
+    guard_warnings = [f.to_dict() for f in assert_guardrails(sql)]
     started = time.perf_counter()
     scan_rows = 0
 
@@ -456,4 +466,10 @@ def execute_sql(
         )
 
     duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
-    return ExecutionResult(columns=columns, rows=rows, scan_rows=scan_rows, duration_ms=duration_ms)
+    return ExecutionResult(
+        columns=columns,
+        rows=rows,
+        scan_rows=scan_rows,
+        duration_ms=duration_ms,
+        findings=guard_warnings,
+    )
