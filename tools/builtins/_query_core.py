@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field as dataclasses_field
+from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 from typing import Any
 
 import duckdb
@@ -177,7 +178,8 @@ def _run_guarded(
     # DataQA 结果断言（与编排链路 execute_dsl_query 同一质检，后续项 2）：
     # 发现随 GuardedQueryResult.qa_findings 输出（不否决执行；展示与审计层消费）
     qa_findings = [
-        f.to_dict() for f in run_quality_assertions(exec_result.columns, exec_result.rows, current_dsl)
+        f.to_dict()
+        for f in run_quality_assertions(exec_result.columns, exec_result.rows, current_dsl)
     ]
     return GuardedQueryResult(
         query=query,
