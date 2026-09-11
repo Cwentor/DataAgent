@@ -70,8 +70,7 @@ def profile_enum_values(
         for name, meta in enum_fields.items():
             try:
                 cursor = conn.execute(
-                    f'SELECT DISTINCT "{meta.column}" FROM "{meta.table}" '
-                    "ORDER BY 1 LIMIT ?",
+                    f'SELECT DISTINCT "{meta.column}" FROM "{meta.table}" ' "ORDER BY 1 LIMIT ?",
                     [max_distinct + 1],
                 )
                 values = [str(row[0]) for row in cursor.fetchall() if row[0] is not None]
