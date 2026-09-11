@@ -49,11 +49,14 @@
 - **受限 DSL 契约**：Pydantic V2 + `extra="forbid"`，字段、操作符、聚合均为受限枚举
 - **确定性编译**：SQL 只由编译器生成，支持聚合/比率/时间/窗口/补零/Top-N/同比环比
 - **纵深安全**：统一认证（JWT + Session）+ 生成前作用域 + 表/列/行级权限守卫（RLS）
-- **受控执行**：只读白名单、超时取消、扫描行数熔断、返回行数上限、SQL 自愈
+- **受控执行**：只读白名单、执行前审计门（笛卡尔积/只读违规 REJECTED 熔断、无界输出 WARNING）、超时取消、扫描行数熔断、返回行数上限、SQL 自愈
 - **对话式体验**：意图路由、多轮指代继承（"那华南呢？"）、口径澄清与槽位回填、多工具编排
 - **观察驱动重规划**：执行后把调度轨迹喂回规划器继续决策（继续查 / 作答 / 反问 / 终止），受 Max Steps 硬预算约束；对比型问题自动分解为多次单实体查询并跨步对比作答；反思层在调度终止后自检结果充分性（必要时受控追加一次查询）
 - **企业级 Data Agent（core/ 升级层）**：
-  - **图式编排**：StateGraph 六节点（澄清 HITL → 规划 → 受控取数 → 沙箱分析 → 反思重规划 → 综合报告），计划为步骤 DAG，受控自愈 ≤3 次
+  - **图式编排**：StateGraph 六节点（澄清 HITL → 规划 → 受控取数 → 沙箱分析 → 反思重规划 → 综合报告），计划为步骤 DAG，受控自愈 ≤3 次；重规划时错误上下文注入 Planner——自愈是针对性修正而非盲重试
+  - **GuardrailAgent 执行前审计**：编译产物 SQL 经 sqlglot AST 静态审计——笛卡尔积（逗号/CROSS/无 ON JOIN）与只读结构违规 **REJECTED 执行前熔断**（拒绝原因进入自愈上下文），无界输出 WARNING 审计轨迹；结构化裁决（check/severity/message/suggestion）
+  - **DataQAAgent 结果断言**：空结果 / NULL 率 / 非负指标负值 / 聚合维度组合唯一性四类确定性质检，编排与 web 双取数链路同源；发现随 `ParquetRef.audit` 经 SSE 事件、critic 反思视野、报告"数据质检"小节与结构化日志全链路可见（不误杀不吞错）
+  - **SchemaAgent 动态 profiling**：低基数（≤30）字符串字段实际取值探查并注入规划上下文（"可取值: a|b|c"），Planner 不再臆造过滤字面值；进程级缓存 + 失败降级，离线环境零副作用
   - **沙箱代码解释器**：AST 静态守卫（黑名单 import/调用/dunder 逃逸）+ 限权 runner（模块白名单 import、workspace 受限 open）+ 可插拔后端（Docker `--net=none --cap-drop=ALL` 强隔离 / 子进程兜底），聚合矩阵 ≤100 行防数据外泄
   - **归因技能包**：维度熵/信息增益下钻、乘法对数链式指标分解树（GMV=UV×CR×AOV）、加法差额分解、DTW 相似性、Holt-Winters 异常检测、Shapley 值公平归因——全部与已知解析解对拍
   - **数据交换协议**：DSL 查询结果 PII 脱敏（列名启发式 + 值形态正则，确定性哈希掩码）后物化为 ParquetRef（sha256 可审计），沙箱零网络零 DB socket
@@ -71,7 +74,7 @@
   落盘加密存储、列表响应零密钥回传，工作台设置页可视化 CRUD + 连通性探测，SSE 编排支持
   请求级 `provider_id` / `model_id` 模型切换
 - **可解释交付**：DSL → 中文话术 + 图表自适应推荐，零前端框架
-- **可观测**：全链路审计快照、结构化日志、QPS/分位数指标
+- **可观测**：全链路审计快照、结构化 JSON 日志（request_id 贯穿，error=熔断/审计拒绝/额度耗尽、warning=可自愈/降级、info=流程转折）、QPS/分位数指标、DataQA 质检发现分级采集
 
 ## 🚀 快速开始
 
@@ -255,12 +258,13 @@ curl -X POST http://127.0.0.1:8000/api/query \
 DataAgent/
 ├── semantic/     # 语义层：受限 DSL 契约 + 数据驱动字段目录
 ├── agent/        # NL -> DSL：LLM / 启发式双路径、意图路由、RAG、多轮记忆、重规划与反思
-├── core/         # Data Agent 升级层：retrieval 门面（typed Tool + PII 脱敏 + 裸 SQL 网关）、
-│                 # orchestrator（StateGraph 六节点编排）、sandbox（AST 守卫 + 限权 runner +
-│                 # Docker/子进程后端）、skills（熵下钻 / 分解树 / DTW / HW / Shapley）
+├── core/         # Data Agent 升级层：retrieval 门面（typed Tool + PII 脱敏 + 裸 SQL 网关 +
+│                 # 动态 profiling + DataQA 结果断言）、orchestrator（StateGraph 六节点编排 +
+│                 # 重规划错误上下文）、sandbox（AST 守卫 + 限权 runner + Docker/子进程后端）、
+│                 # skills（熵下钻 / 分解树 / DTW / HW / Shapley）
 ├── providers/    # 多模型供应商网关：四协议适配 / API Key 加密存储 / 连通性探测
 ├── compiler/     # DSL -> 确定性 SQL
-├── exec/         # SQL 执行层：只读 AST 校验 / 超时 / 熔断 / 连接池 / 自愈
+├── exec/         # SQL 执行层：只读 AST 校验 / 执行前审计（笛卡尔积熔断）/ 超时 / 熔断 / 连接池 / 自愈
 ├── tools/        # 多工具编排：查数 / 趋势 / 导出 / 口径解释
 ├── present/      # 解释 + 图表自适应推荐
 ├── security/     # 权限：表级 / 列级 / 行级 RLS（配置驱动）
@@ -269,7 +273,7 @@ DataAgent/
 ├── web/          # Web UI / HTTP 服务 / 异步查询 / 编排端点
 ├── eval/         # Golden 评测（25 用例，含多轮对话序列，双模式）
 ├── mock/         # 确定性 DuckDB 数仓
-├── tests/        # 35 个测试文件（573 用例）
+├── tests/        # 39 个测试文件（622 用例，含执行前审计 / 结果断言 / 日志可见性回归）
 └── docs/         # 详细文档 + 评审归档
 ```
 
