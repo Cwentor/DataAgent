@@ -52,14 +52,21 @@ logger = __import__("audit.logging", fromlist=["get_logger"]).get_logger("core.o
 # --------------------------------------------------------------------------- #
 # 语义目录摘要（注入 Planner）
 # --------------------------------------------------------------------------- #
-def schema_digest() -> str:
-    """语义字段 -> 紧凑文本摘要（Planner 可用字段清单）。"""
+def schema_digest(enum_values: dict[str, list[str]] | None = None) -> str:
+    """语义字段 -> 紧凑文本摘要（Planner 可用字段清单）。
+
+    ``enum_values``：低基数字段的实际取值（SchemaAgent 动态 profiling，
+    core.retrieval.profiling）——注入后 Planner 不再臆造过滤字面值。
+    """
     from semantic.catalog import COLUMNS
 
-    lines = [
-        f"- {name} ({meta.table}.{meta.column}, {meta.dtype})"
-        for name, meta in sorted(COLUMNS.items())
-    ]
+    lines = []
+    for name, meta in sorted(COLUMNS.items()):
+        line = f"- {name} ({meta.table}.{meta.column}, {meta.dtype})"
+        values = (enum_values or {}).get(name)
+        if values:
+            line += " 可取值: " + "|".join(values)
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -200,11 +207,19 @@ def planner_node(state: AgentState) -> AgentState:
     llm = _resolve_llm()
     steps: list[PlanStep] | None = None
     if llm is not None:
+        # SchemaAgent 动态 profiling（后续项）：低基数字段枚举值注入规划上下文；
+        # 探查失败降级为空 dict（不阻断规划主链路），离线/无库环境无副作用
+        from core.retrieval.profiling import profile_enum_values
+
         error_context = "\n".join(state.error_context.errors[-3:]) or None
         payload = _llm_json(
             llm,
             PLANNER_SYSTEM,
-            planner_prompt(state.user_query, schema_digest(), error_context=error_context),
+            planner_prompt(
+                state.user_query,
+                schema_digest(profile_enum_values()),
+                error_context=error_context,
+            ),
         )
         if payload:
             if payload.get("clarification"):
