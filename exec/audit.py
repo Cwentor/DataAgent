@@ -37,7 +37,7 @@ class GuardrailRejected(SqlExecutionError):
 class GuardrailFinding:
     """一条审计发现：检查项 + 严重级 + 说明 + 优化建议（结构化审计轨迹）。"""
 
-    __slots__ = ("check", "severity", "message", "suggestion")
+    __slots__ = ("check", "message", "severity", "suggestion")
 
     def __init__(self, check: str, severity: str, message: str, suggestion: str = "") -> None:
         self.check = check

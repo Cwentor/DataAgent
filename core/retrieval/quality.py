@@ -178,4 +178,4 @@ def run_quality_assertions(
     return findings
 
 
-__all__ = ["QaFinding", "NULL_RATE_THRESHOLD", "run_quality_assertions"]
+__all__ = ["NULL_RATE_THRESHOLD", "QaFinding", "run_quality_assertions"]
