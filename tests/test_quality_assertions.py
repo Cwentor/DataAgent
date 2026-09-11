@@ -30,9 +30,7 @@ def _checks(findings):
 
 def test_clean_aggregate_no_findings():
     """正常聚合结果：零发现。"""
-    findings = run_quality_assertions(
-        ["province", "gmv"], [["广东", 100.0], ["浙江", 50.0]], DSL
-    )
+    findings = run_quality_assertions(["province", "gmv"], [["广东", 100.0], ["浙江", 50.0]], DSL)
     assert findings == []
 
 
@@ -97,7 +95,9 @@ def test_dimension_uniqueness_duplicate_combo_error():
     """聚合查询维度组合重复：dimension_uniqueness error（编译/聚合缺陷信号）。"""
     dsl = QueryDSL.model_validate(
         {
-            "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
             "dimensions": [{"field": "province"}],
         }
     )

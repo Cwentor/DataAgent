@@ -140,9 +140,7 @@ PLANNER_FEWSHOT = """# 示例
 """
 
 
-def planner_prompt(
-    user_query: str, schema_digest: str, error_context: str | None = None
-) -> str:
+def planner_prompt(user_query: str, schema_digest: str, error_context: str | None = None) -> str:
     """组装 Planner 的用户消息（问题 + 语义目录摘要 + 自愈错误上下文 + Few-Shot）。
 
     ``error_context``：重规划自愈时注入的最近失败摘要（容错链路断裂点修复）——

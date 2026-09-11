@@ -97,7 +97,10 @@ def execute_dsl_query(
     # ParquetRef.audit 传递（不否决执行；处置权在 critic 与报告层）
     from core.retrieval.quality import run_quality_assertions
 
-    qa_findings = [f.to_dict() for f in run_quality_assertions(exec_result.columns, exec_result.rows, guarded_dsl)]
+    qa_findings = [
+        f.to_dict()
+        for f in run_quality_assertions(exec_result.columns, exec_result.rows, guarded_dsl)
+    ]
 
     inputs_dir = Path(workspace) / "inputs"
     return export_to_parquet(

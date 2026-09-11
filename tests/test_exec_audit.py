@@ -33,7 +33,9 @@ def conn() -> duckdb.DuckDBPyConnection:
 
 def test_audit_clean_query_no_findings():
     """带 LIMIT 的常规查询：APPROVED（无发现）。"""
-    findings = audit_compiled_sql("SELECT province, SUM(amount) AS gmv FROM orders GROUP BY 1 LIMIT 10")
+    findings = audit_compiled_sql(
+        "SELECT province, SUM(amount) AS gmv FROM orders GROUP BY 1 LIMIT 10"
+    )
     assert findings == []
 
 
@@ -58,9 +60,7 @@ def test_audit_cartesian_comma_join_rejected():
 
 def test_audit_cartesian_cross_join_rejected():
     """CROSS JOIN：REJECTED。"""
-    findings = audit_compiled_sql(
-        "SELECT o.id, s.name FROM orders o CROSS JOIN shops s LIMIT 5"
-    )
+    findings = audit_compiled_sql("SELECT o.id, s.name FROM orders o CROSS JOIN shops s LIMIT 5")
     assert any(f.check == "cartesian_product" and f.severity == "rejected" for f in findings)
 
 
