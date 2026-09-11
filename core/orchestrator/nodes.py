@@ -428,6 +428,14 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
         )
         state.datasets[name] = ref.model_dump(by_alias=True)
         notes.append(f"{name}: {ref.rows} 行 × {len(ref.columns)} 列")
+        # DataQA/Guardrail 审计面（行动项 1/2）：结构化发现随事件下发前端，
+        # QA 发现摘要并入 notes（=> record.summary => critic 反思视野）
+        audit_payload = ref.audit or {}
+        qa_findings = audit_payload.get("qa") or []
+        guard_findings = audit_payload.get("guard") or []
+        if qa_findings:
+            qa_text = "；".join(f"[{f['check']}] {f['message']}" for f in qa_findings)
+            notes.append(f"{name} 质检发现：{qa_text}")
         # 审计预览：读取物化 Parquet 前 30 行随 tool_end 下发（数据审计 Tab）。
         # ParquetRef.path 相对 workspace/inputs/（沙箱 read_input 同一约定）
         preview_rows = _preview_rows(str(workspace / "inputs" / ref.path))
@@ -441,6 +449,8 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
                 "rows": ref.rows,
                 "columns": list(ref.columns),
                 "preview_rows": preview_rows,
+                "guard_findings": guard_findings,
+                "qa_findings": qa_findings,
             },
         )
 
@@ -1025,10 +1035,16 @@ def _analysis_material(state: AgentState, *, include_trace: bool = True) -> str:
             if preview
             else "（预览不可用）"
         )
-        parts.append(
+        part = (
             f"[数据集 {name}] {ref.get('rows', 0)} 行，列 {list(ref.get('columns', []))}，"
             f"预览：{rows_desc[:3000]}"
         )
+        # DataQA 质检发现进入 LLM 综合素材（报告必须如实引用质量提示）
+        qa_findings = (ref.get("audit") or {}).get("qa") or []
+        if qa_findings:
+            qa_text = "；".join(f"[{f['check']}] {f['message']}" for f in qa_findings)
+            part += f"\n[数据质检发现 {name}] {qa_text}"
+        parts.append(part)
     if include_trace and state.error_context.errors:
         parts.append(f"[自愈记录] 共 {len(state.error_context.errors)} 次错误被捕获并重试")
     return "\n\n".join(parts)
@@ -1112,6 +1128,13 @@ def synthesize_node(state: AgentState) -> AgentState:
         lines.append(section)
         if table_artifact is not None:
             events.emit_event(events.EVENT_ARTIFACT_EMIT, {"artifact": table_artifact})
+        # DataQA 质检小节（行动项 2）：结果断言发现必须向用户可见（不吞错）
+        qa_findings = (ref.get("audit") or {}).get("qa") or []
+        if qa_findings:
+            lines.append("")
+            lines.append(f"**数据质检（{name}）**：")
+            for f in qa_findings:
+                lines.append(f"- 质检提示（{f['check']}）：{f['message']}")
     if not state.artifacts and not state.datasets:
         lines.append("未能获得有效的分析产物。")
     if state.datasets and all(int(ref.get("rows", 0) or 0) == 0 for ref in state.datasets.values()):
