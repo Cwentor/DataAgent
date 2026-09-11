@@ -108,11 +108,16 @@ def test_result_limit_trips(big_conn):
 
 
 def test_statement_timeout_interrupts(big_conn):
-    """病态大查询超过语句超时 -> 中断取消，连接可复用。"""
+    """病态大查询超过语句超时 -> 中断取消，连接可复用。
+
+    慢查询用超大范围扫描（20e9 行流式聚合，远超 300ms 预算）；不再用多表
+    笛卡尔积——执行前审计（exec.audit）已将笛卡尔积升级为执行前熔断，
+    笛卡尔积查询现在根本不会进入超时路径（见 tests/test_exec_audit.py）。
+    """
     with pytest.raises(QueryTimeoutError):
         execute_sql(
             big_conn,
-            "SELECT count(*) FROM big a, big b, big c",
+            "SELECT sum(range) FROM range(20000000000)",
             statement_timeout_ms=300,
         )
     # 中断后连接仍可复用
