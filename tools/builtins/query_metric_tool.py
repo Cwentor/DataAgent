@@ -61,6 +61,7 @@ class QueryMetricTool(BaseTool):
             "degraded": result.degraded,
             "explanation": explain(result.dsl),
             "viz": viz,
+            "qa_findings": result.qa_findings,
             "chart_spec": build_chart_spec(
                 result.dsl, result.columns, result.rows, data=True
             ).to_dict(),
@@ -75,6 +76,7 @@ class QueryMetricTool(BaseTool):
                 "rewrites": result.rewrites,
                 "degraded": result.degraded,
                 "duration_ms": result.duration_ms,
+                "qa_findings": result.qa_findings,
             },
         )
 

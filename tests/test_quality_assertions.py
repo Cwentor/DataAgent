@@ -192,3 +192,42 @@ def test_analysis_material_carries_qa_findings(tmp_path, monkeypatch):
     material = _analysis_material(state)
     assert "[数据质检发现 s1]" in material
     assert "negative_metric" in material
+
+
+# --------------------------------------------------------------------------- #
+# web service 链路接入（后续项 2：run_guarded_query 同一质检）
+# --------------------------------------------------------------------------- #
+def test_run_guarded_query_carries_qa_findings():
+    """web 链路：注入桩执行器返回负值行 -> qa_findings 含 negative_metric。"""
+    import duckdb
+
+    from exec.guards import ExecutionResult
+    from tools.builtins._query_core import run_guarded_query
+
+    def fake_executor(conn, sql, **kwargs):
+        return ExecutionResult(columns=["gmv"], rows=[[-5.0]], scan_rows=0, duration_ms=0.0)
+
+    c = duckdb.connect(":memory:")
+    try:
+        result = run_guarded_query(
+            "查 GMV",
+            principal="admin",
+            conn=c,
+            executor=fake_executor,
+            dsl=DSL,
+        )
+    finally:
+        c.close()
+    checks = [f["check"] for f in result.qa_findings]
+    assert "negative_metric" in checks
+    assert result.rows == [[-5.0]]  # QA 不否决执行，原始结果照常返回
+
+
+def test_run_guarded_query_clean_result_no_findings(conn):
+    """web 链路：mock 数仓正常聚合 -> qa_findings 为空（零误报）。"""
+    from tools.builtins._query_core import run_guarded_query
+
+    result = run_guarded_query(
+        "2024年5月成功支付订单的GMV总额是多少", principal="admin", conn=conn, dsl=DSL
+    )
+    assert result.qa_findings == []

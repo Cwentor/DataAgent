@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclasses_field
 from typing import Any
 
 import duckdb
@@ -32,6 +32,7 @@ from agent.pipeline import rewrite_dsl, run_pipeline_with_status
 from audit.metrics import default_registry
 from compiler.sql_compiler import CompileError, compile_sql
 from config import settings
+from core.retrieval.quality import run_quality_assertions
 from exec.guards import ExecutionResult, SqlExecutionError, execute_sql
 from security.guard import apply_policy
 from semantic.dsl_schema import QueryDSL
@@ -54,6 +55,8 @@ class GuardedQueryResult:
     duration_ms: float
     # 结果缓存命中标记（QUERY_CACHE_ENABLED 开启时可能为 True）
     cached: bool = False
+    # DataQA 结果断言发现（空列表 = 全部通过；与编排链路 ParquetRef.audit["qa"] 同源）
+    qa_findings: list[dict[str, str]] = dataclasses_field(default_factory=list)
 
 
 def _acquire_conn() -> duckdb.DuckDBPyConnection:
@@ -171,6 +174,11 @@ def _run_guarded(
                 raise exc from None
 
     duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
+    # DataQA 结果断言（与编排链路 execute_dsl_query 同一质检，后续项 2）：
+    # 发现随 GuardedQueryResult.qa_findings 输出（不否决执行；展示与审计层消费）
+    qa_findings = [
+        f.to_dict() for f in run_quality_assertions(exec_result.columns, exec_result.rows, current_dsl)
+    ]
     return GuardedQueryResult(
         query=query,
         dsl=current_dsl,
@@ -182,6 +190,7 @@ def _run_guarded(
         degraded=degraded,
         duration_ms=duration_ms,
         cached=_cached_flag,
+        qa_findings=qa_findings,
     )
 
 

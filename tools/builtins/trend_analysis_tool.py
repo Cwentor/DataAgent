@@ -105,6 +105,7 @@ class TrendAnalysisTool(BaseTool):
             "degraded": result.degraded or degraded,
             "explanation": explain(result.dsl),
             "viz": viz,
+            "qa_findings": result.qa_findings,
             "chart_spec": build_chart_spec(
                 result.dsl, result.columns, result.rows, data=True
             ).to_dict(),
@@ -119,6 +120,7 @@ class TrendAnalysisTool(BaseTool):
                 "rewrites": result.rewrites,
                 "degraded": result.degraded or degraded,
                 "duration_ms": result.duration_ms,
+                "qa_findings": result.qa_findings,
             },
         )
 
