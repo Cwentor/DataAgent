@@ -25,7 +25,10 @@ from __future__ import annotations
 import sqlglot
 from sqlglot import exp
 
+from audit.logging import get_logger
 from exec.guards import SqlExecutionError, UnsafeSqlError, _assert_read_only_structure
+
+logger = get_logger("exec.audit")
 
 
 class GuardrailRejected(SqlExecutionError):
@@ -190,6 +193,7 @@ def assert_guardrails(sql: str) -> list[GuardrailFinding]:
     rejected = [f for f in findings if f.severity == "rejected"]
     if rejected:
         detail = "；".join(f"[{f.check}] {f.message}" for f in rejected)
+        logger.error("执行前审计 REJECTED", extra={"error": detail[:500]})
         raise GuardrailRejected(f"执行前审计拒绝（{len(rejected)} 项）：{detail}")
     return [f for f in findings if f.severity == "warning"]
 

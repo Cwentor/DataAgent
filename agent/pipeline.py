@@ -19,9 +19,12 @@ from agent.agent import LLMNL2DSL
 from agent.errors import PipelineError
 from agent.heuristic import DeterministicNL2DSL
 from agent.llm import LLMError, resolve_default_client
+from audit.logging import get_logger
 from config import settings
 from security.guard import apply_policy
 from semantic.dsl_schema import QueryDSL
+
+logger = get_logger("agent.pipeline")
 
 __all__ = ["PipelineError", "run_pipeline", "run_pipeline_with_status"]
 
@@ -46,11 +49,20 @@ def run_pipeline_with_status(query: str, principal: str | None = None) -> tuple[
         dsl = _default_agent().run(query, principal=principal)
     except (LLMError, PipelineError) as original_error:
         # LLM 结构/语义重试耗尽时，仅对确定性覆盖范围内的问题安全降级。
+        logger.warning(
+            "NL->DSL 生成失败，尝试确定性降级",
+            extra={"error": f"{type(original_error).__name__}: {original_error}"[:500]},
+        )
         try:
             dsl = DeterministicNL2DSL().run(query, principal=principal)
         except Exception:
+            logger.error(
+                "确定性降级同样失败，透传原始报错",
+                extra={"error": f"{type(original_error).__name__}: {original_error}"[:300]},
+            )
             raise original_error from original_error
         degraded = True
+        logger.warning("已降级为确定性启发式 DSL 生成（degraded=True）")
     return apply_policy(dsl, principal), degraded
 
 
@@ -76,5 +88,6 @@ def rewrite_dsl(
     agent = _default_agent()
     rewrite = getattr(agent, "rewrite", None)
     if rewrite is None:
+        logger.warning("当前 Agent 不支持 SQL 自愈重写（离线兜底模式）")
         raise PipelineError("当前 Agent 不支持 SQL 自愈重写")
     return rewrite(query, dsl, error, attempts=attempts, principal=principal)

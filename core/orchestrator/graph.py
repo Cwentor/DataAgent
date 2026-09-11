@@ -18,8 +18,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from audit.logging import get_logger
 from core.orchestrator import events
 from core.orchestrator.state import AgentState
+
+logger = get_logger("core.orchestrator.graph")
 
 NodeFn = Callable[[AgentState], AgentState]
 RouterFn = Callable[[AgentState], str]
@@ -89,6 +92,10 @@ class StateGraph:
         while current is not None and current != "END":
             state.iteration += 1
             if state.iteration > self._max_iterations:
+                logger.error(
+                    "图迭代步数超限，强制终止",
+                    extra={"error": f"iterations={state.iteration}, node={current}"},
+                )
                 return state.apply(
                     phase="done",
                     report=(state.report or "") + "\n[编排器] 迭代步数超限，强制终止。",
@@ -98,6 +105,7 @@ class StateGraph:
             state = node_fn(state)
             # HITL 中断语义：clarify 阶段挂起等待用户回复（记录暂停节点供 resume）
             if state.phase == "clarify":
+                logger.info(f"HITL 中断：等待用户澄清（暂停于 {current}）")
                 self._interrupted_at = current
                 return state
             current = self._route(current, state)
@@ -112,9 +120,14 @@ class StateGraph:
                 key = edge.router(state)
                 target = edge.route_map.get(key)
                 if target is None:
+                    logger.error(
+                        "条件边路由到未映射键",
+                        extra={"error": f"from={from_node}, key={key!r}"},
+                    )
                     raise GraphError(f"路由函数返回未映射键: {key!r}")
                 return None if target == "END" else target
             return edge.to_node
+        logger.error("节点缺少出边定义", extra={"error": f"node={from_node}"})
         raise GraphError(f"节点缺少出边: {from_node}")
 
     def resume(self, state: AgentState) -> AgentState:
