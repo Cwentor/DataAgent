@@ -81,27 +81,34 @@ class _HttpStub:
 # --------------------------------------------------------------------------- #
 # ProviderStore
 # --------------------------------------------------------------------------- #
-def test_store_preset_seed_and_keyless_view(tmp_path):
-    """预置种子自动写入；对外视图不含 api_key（仅 has_api_key 布尔位）。"""
+def test_store_zero_presets_and_keyless_view(tmp_path):
+    """零预置：新配置为空；对外视图不含 api_key（仅 has_api_key 布尔位）。"""
     store = ProviderStore(tmp_path / "providers.json")
-    ids = [p.id for p in store.list_providers()]
-    # 供应商控制收窄：预置仅 OpenAI / Anthropic 两家
-    assert set(ids) == {"openai", "anthropic"}
-    view = store.public_view(store.get_provider("openai"))
-    assert "api_key" not in view and view["has_api_key"] is False
-    # 配置 Key 后对外视图仍不含 Key 明文 / 脱敏串
-    openai_key = fake_key("openai")
-    store.update_provider("openai", {"api_key": openai_key})
-    view = store.public_view(store.get_provider("openai"))
+    assert store.list_providers() == []  # 系统不预置任何供应商
+    gw_key = fake_key("gw")
+    store.create_provider(
+        {"id": "gw", "name": "中转", "base_url": "https://gw/v1", "api_key": gw_key}
+    )
+    view = store.public_view(store.get_provider("gw"))
     assert "api_key" not in view and view["has_api_key"] is True
-    assert openai_key not in json.dumps(view, ensure_ascii=False)
+    assert gw_key not in json.dumps(view, ensure_ascii=False)
 
 
 def test_store_prunes_legacy_presets_keeps_custom_with_backup(tmp_path):
-    """预置白名单迁移：只清白名单外的历史预置（智谱），自定义条目保留。"""
+    """零预置迁移：清掉全部历史预置（openai / 智谱），自定义条目保留。"""
     path = tmp_path / "providers.json"
     legacy = json.dumps(
         [
+            {
+                "id": "openai",
+                "name": "OpenAI",
+                "is_preset": True,
+                "enabled": True,
+                "base_url": "https://api.openai.com/v1",
+                "protocol": "openai_chat",
+                "models": [{"id": "gpt-4o"}],
+                "api_key": "",
+            },
             {
                 "id": "zhipu",
                 "name": "智谱",
@@ -128,13 +135,14 @@ def test_store_prunes_legacy_presets_keeps_custom_with_backup(tmp_path):
     path.write_text(legacy, encoding="utf-8")
     store = ProviderStore(path)
     ids = {p.id for p in store.list_providers()}
-    # 智谱被清理（白名单外预置）；自定义条目保留；预置种子补齐两家
-    assert ids == {"openai", "anthropic", "p_legacy"}
-    # 清理结果立即写回：磁盘文件不再含智谱，自定义仍在
+    # 历史预置全部清理（零预置），自定义条目保留
+    assert ids == {"p_legacy"}
+    # 清理结果立即写回：磁盘文件不再含预置条目，自定义仍在
     persisted = {item["id"] for item in json.loads(path.read_text(encoding="utf-8"))}
-    assert persisted == {"openai", "anthropic", "p_legacy"}
+    assert persisted == {"p_legacy"}
     backup = tmp_path / "providers.json.bak"
-    assert backup.exists() and "zhipu" in backup.read_text(encoding="utf-8")
+    backup_text = backup.read_text(encoding="utf-8")
+    assert "openai" in backup_text and "zhipu" in backup_text
 
 
 def test_store_key_encrypted_at_rest(tmp_path):
@@ -158,11 +166,11 @@ def test_store_legacy_plaintext_migrated_on_load(tmp_path):
     legacy_key = fake_key("legacy")
     legacy = [
         {
-            "id": "openai",
-            "name": "OpenAI",
-            "is_preset": True,
+            "id": "old1",
+            "name": "Old",
+            "is_preset": False,
             "enabled": True,
-            "base_url": "https://api.openai.com/v1",
+            "base_url": "https://old/v1",
             "api_key": legacy_key,
             "protocol": "openai_chat",
             "models": [],
@@ -173,7 +181,7 @@ def test_store_legacy_plaintext_migrated_on_load(tmp_path):
     ]
     path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
     store = ProviderStore(path)
-    assert store.reveal_key("openai") == legacy_key
+    assert store.reveal_key("old1") == legacy_key
     assert legacy_key not in path.read_text(encoding="utf-8")  # 已加密迁移
 
 
@@ -196,10 +204,24 @@ def test_store_masked_key_does_not_overwrite_plaintext(tmp_path):
 
 def test_store_preset_delete_rejected_and_custom_deleted(tmp_path):
     store = ProviderStore(tmp_path / "providers.json")
-    assert store.delete_provider("openai") is False  # 预置不可删
+    # 不存在的供应商删除返回 False；自定义供应商可删
+    assert store.delete_provider("nope") is False
     store.create_provider({"id": "c2", "name": "C2", "base_url": "https://c2/v1"})
     assert store.delete_provider("c2") is True
     assert store.get_provider("c2") is None
+    # 历史预置条目（is_preset=True）即使被外部注入也不可删
+    store._providers["legacy_preset"] = ProviderConfig.model_validate(
+        {
+            "id": "legacy_preset",
+            "name": "Legacy",
+            "is_preset": True,
+            "enabled": True,
+            "base_url": "https://legacy/v1",
+            "protocol": "openai_chat",
+            "models": [],
+        }
+    )
+    assert store.delete_provider("legacy_preset") is False
 
 
 def test_store_update_with_models_list_dict_persists(tmp_path):
@@ -413,9 +435,17 @@ def test_factory_requires_key_for_default_dispatch(tmp_path):
     # 显式指定也要求启用 + 存在
     with pytest.raises(ProviderNotConfiguredError):
         factory.resolve("nope", "m")
-    store.update_provider("openai", {"api_key": fake_key("openai")})
-    adapter = factory.resolve("openai", "gpt-4o")
-    assert adapter.model_id == "gpt-4o"
+    store.create_provider(
+        {
+            "id": "gw",
+            "name": "中转",
+            "base_url": "https://gw/v1",
+            "api_key": fake_key("gw"),
+            "models": [{"id": "gw-model"}],
+        }
+    )
+    adapter = factory.resolve("gw", "gw-model")
+    assert adapter.model_id == "gw-model"
 
 
 def test_request_scoped_model_dispatch(monkeypatch, tmp_path):
@@ -423,7 +453,15 @@ def test_request_scoped_model_dispatch(monkeypatch, tmp_path):
     from providers.context import dispatching_adapter, reset_dispatching_adapter
 
     store = ProviderStore(tmp_path / "providers.json")
-    store.update_provider("openai", {"api_key": fake_key("openai")})
+    store.create_provider(
+        {
+            "id": "primary",
+            "name": "A-Primary",
+            "base_url": "https://primary-gw/v1",
+            "api_key": fake_key("primary"),
+            "models": [{"id": "p-default"}],
+        }
+    )
     store.create_provider(
         {
             "id": "proxy",
@@ -446,9 +484,9 @@ def test_request_scoped_model_dispatch(monkeypatch, tmp_path):
     monkeypatch.setattr("providers.adapters._http_post", spy)
 
     proxy = dispatching_adapter()
-    # 未绑定请求上下文 -> 默认分派（首位有 Key 的启用供应商 = openai）
+    # 未绑定请求上下文 -> 默认分派（首位有 Key 的启用供应商 = primary）
     proxy.chat_text([{"role": "user", "content": "q"}])
-    assert "api.openai.com" in seen_urls[-1]
+    assert "primary-gw" in seen_urls[-1]
     # 绑定请求上下文 -> 转发到目标供应商
     set_request_model("proxy", "p-model")
     try:
@@ -547,10 +585,9 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port, "POST", "/api/auth/login", {"username": "admin", "password": "admin123"}
         )
         H = {"Authorization": "Bearer " + login["token"]}
-        # 列表含预置种子（OpenAI / Anthropic 两家系统预置）
+        # 列表为零预置（系统不预置任何供应商，全部由用户添加）
         status, body = _req(port, "GET", "/api/settings/providers", headers=H)
-        assert status == 200
-        assert {"openai", "anthropic"} <= {p["id"] for p in body["providers"]}
+        assert status == 200 and body["providers"] == []
         # 创建 gemini 协议 -> 400（控制面协议白名单：chat/responses/anthropic）
         status, body = _req(
             port,
@@ -616,11 +653,11 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port, "POST", "/api/settings/providers/test", {"provider_id": "ghost"}, headers=H
         )
         assert status == 404
-        # 删除自定义 -> ok；删除预置 -> 400
+        # 删除自定义 -> ok；删除不存在的供应商 -> 404
         status, body = _req(port, "DELETE", f"/api/settings/providers/{created['id']}", headers=H)
         assert status == 200 and body["ok"] is True
-        status, body = _req(port, "DELETE", "/api/settings/providers/openai", headers=H)
-        assert status == 400 and "不可删除" in body["error"]
+        status, body = _req(port, "DELETE", "/api/settings/providers/ghost", headers=H)
+        assert status == 404
     finally:
         server.shutdown()
         server.server_close()

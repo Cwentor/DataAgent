@@ -295,7 +295,8 @@
         + " data-id='" + esc(p.id) + "'>"
         + "<span class='p-name'>" + esc(p.name) + "</span>" + badge + "</div>";
     });
-    box.innerHTML = html || "<div class='provider-empty'>暂无供应商</div>";
+    box.innerHTML = html
+      || "<div class='provider-empty'>尚未配置供应商——点击上方「＋ 添加供应商」接入你的模型端点。</div>";
     box.querySelectorAll(".provider-item").forEach(function (el) {
       el.addEventListener("click", function () { openProvider(el.getAttribute("data-id")); });
     });
