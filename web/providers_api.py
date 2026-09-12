@@ -2,13 +2,16 @@
 
 路由（均需认证，与 /api/query 同一鉴权语义）：
 - GET    /api/settings/providers             -> 全量供应商列表（不含 api_key）+ 模型切换器候选
-- POST   /api/settings/providers             -> 已停用（403）：供应商控制仅保留 OpenAI / Anthropic
+- POST   /api/settings/providers             -> 创建自定义供应商（协议限白名单：chat/responses/anthropic）
 - PUT    /api/settings/providers/<id>        -> 更新（id / is_preset 不可变更；空 Key 保留原值）
-- DELETE /api/settings/providers/<id>        -> 已停用（400）：供应商控制仅保留 OpenAI / Anthropic
+- DELETE /api/settings/providers/<id>        -> 删除（预置供应商拒绝，返回 400）
 - POST   /api/settings/providers/test        -> 连通性探测（极小 ping 文本，返回 HTTP 200 + 延时）
 - POST   /api/settings/providers/<id>/reveal -> 查看已保存的真实 API Key（显式动作，记审计日志）
 
 设计约束：
+- 供应商控制开放多供应商接入：任意端点只要接口协议符合白名单
+  （openai_chat / openai_responses / anthropic）即可添加；gemini 协议
+  不在控制面白名单内（预置与 UI 均不提供）；
 - API Key 落盘加密存储（providers.crypto），文件内容不含明文；
 - 列表/详情响应**完全不含 api_key 字段**：前端不再回填脱敏串，杜绝
   「把脱敏串当真 Key 用」导致的连通失败；编辑时留空 = 保持原 Key；
@@ -29,7 +32,13 @@ from providers.store import default_provider_store
 
 logger = get_logger("web.providers")
 
+# 控制面协议白名单：自定义供应商仅允许接入这三类接口协议。
+SUPPORTED_PROTOCOLS: frozenset[ApiProtocol] = frozenset(
+    {ApiProtocol.OPENAI_CHAT, ApiProtocol.OPENAI_RESPONSES, ApiProtocol.ANTHROPIC}
+)
+
 __all__ = [
+    "SUPPORTED_PROTOCOLS",
     "create_provider",
     "delete_provider",
     "list_providers",
@@ -55,14 +64,18 @@ def _factory():
 def _normalize_provider_payload(body: dict[str, Any]) -> dict[str, Any]:
     """规范化创建/更新请求体：协议字符串校验 + 模型条目结构透传 pydantic。
 
+    协议白名单：仅接受 SUPPORTED_PROTOCOLS 内的接口协议（gemini 拒绝）。
     额外防御：客户端提交的 ``is_preset`` 一律忽略（预置标记只由系统管理）。
     """
     payload = {k: v for k, v in dict(body).items() if k != "is_preset"}
     if "protocol" in payload:
         try:
-            payload["protocol"] = ApiProtocol(str(payload["protocol"]))
+            protocol = ApiProtocol(str(payload["protocol"]))
         except ValueError as exc:
             raise ValueError(f"不支持的 API 协议: {payload['protocol']}") from exc
+        if protocol not in SUPPORTED_PROTOCOLS:
+            raise ValueError(f"不支持的 API 协议: {protocol.value}")
+        payload["protocol"] = protocol
     return payload
 
 
@@ -83,6 +96,12 @@ def _resolve_test_provider(body: dict[str, Any]) -> tuple[ProviderConfig | None,
     if not base_url:
         return None, model_id, "缺少 provider_id 或 base_url"
     try:
+        protocol = ApiProtocol(str(body.get("protocol") or "openai_chat"))
+    except ValueError:
+        return None, model_id, f"不支持的 API 协议: {body.get('protocol')}"
+    if protocol not in SUPPORTED_PROTOCOLS:
+        return None, model_id, f"不支持的 API 协议: {protocol.value}"
+    try:
         provider = ProviderConfig(
             id="tmp",
             name=str(body.get("name") or "临时供应商"),
@@ -90,7 +109,7 @@ def _resolve_test_provider(body: dict[str, Any]) -> tuple[ProviderConfig | None,
             enabled=True,
             base_url=base_url,
             api_key=str(body.get("api_key") or ""),
-            protocol=ApiProtocol(str(body.get("protocol") or "openai_chat")),
+            protocol=protocol,
             models=[ModelItem(id=model_id)] if model_id else [],
             custom_headers=dict(body.get("custom_headers") or {}),
         )
@@ -111,8 +130,21 @@ def list_providers() -> tuple[int, dict[str, Any]]:
 
 
 def create_provider(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    """POST /api/settings/providers：已停用——供应商控制仅保留 OpenAI / Anthropic。"""
-    return 403, {"error": "供应商控制仅支持 OpenAI 与 Anthropic，暂不支持接入自定义供应商"}
+    """POST /api/settings/providers：创建自定义供应商（is_preset 固定为 False）。
+
+    接口协议必须符合白名单（chat/responses/anthropic），gemini 返回 400。
+    """
+    if not isinstance(body, dict) or not str(body.get("name") or "").strip():
+        return 400, {"error": "供应商名称（name）必填"}
+    try:
+        payload = _normalize_provider_payload(body)
+        payload.setdefault("is_preset", False)
+        provider = _store().create_provider(payload)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+    invalidate_provider_caches(provider.id)
+    logger.info("provider_created", extra={"event": "provider_created", "provider_id": provider.id})
+    return 200, {"provider": _store().public_view(provider)}
 
 
 def update_provider(provider_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -132,8 +164,16 @@ def update_provider(provider_id: str, body: dict[str, Any]) -> tuple[int, dict[s
 
 
 def delete_provider(provider_id: str) -> tuple[int, dict[str, Any]]:
-    """DELETE /api/settings/providers/<id>：已停用——供应商控制仅保留 OpenAI / Anthropic。"""
-    return 400, {"error": "供应商控制仅支持 OpenAI 与 Anthropic，预置供应商不可删除"}
+    """DELETE /api/settings/providers/<id>：预置供应商拒绝删除（400）。"""
+    deleted = _store().delete_provider(provider_id)
+    if not deleted:
+        existing = _store().get_provider(provider_id)
+        if existing is None:
+            return 404, {"error": f"供应商不存在: {provider_id}"}
+        return 400, {"error": "预置供应商不可删除，可禁用或编辑"}
+    invalidate_provider_caches(provider_id)
+    logger.info("provider_deleted", extra={"event": "provider_deleted", "provider_id": provider_id})
+    return 200, {"ok": True}
 
 
 def reveal_provider_key(provider_id: str) -> tuple[int, dict[str, Any]]:
