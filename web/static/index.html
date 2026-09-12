@@ -168,7 +168,6 @@
         <aside class="provider-pane">
           <div class="pane-head">
             <span>供应商</span>
-            <button type="button" id="provider-add" class="mini-btn">＋ 添加供应商</button>
           </div>
           <div id="provider-list" class="provider-list"></div>
         </aside>
@@ -187,7 +186,6 @@
                 <option value="openai_chat">OpenAI Chat Completions（/chat/completions）</option>
                 <option value="openai_responses">OpenAI Responses（/responses）</option>
                 <option value="anthropic">Anthropic Messages（/v1/messages）</option>
-                <option value="gemini">Google Gemini（generateContent）</option>
               </select>
             </div>
             <div class="form-row">
@@ -205,19 +203,18 @@
               <label>模型列表</label>
               <div id="pf-models" class="model-chips"></div>
               <div class="model-add-row">
-                <input id="pf-model-input" placeholder="模型 ID，例如 glm-4.5-flash / gpt-4o">
+                <input id="pf-model-input" placeholder="模型 ID，例如 gpt-4o / claude-sonnet-4-20250514">
                 <button type="button" id="pf-model-add" class="mini-btn">＋ 添加模型</button>
               </div>
             </div>
             <div class="form-actions">
               <button type="button" id="pf-test" class="secondary-btn">测试连通性</button>
               <span class="spacer"></span>
-              <button type="button" id="pf-delete" class="danger-btn hidden">删除供应商</button>
               <button type="button" id="pf-save" class="primary-btn">保存</button>
             </div>
             <div id="pf-test-result" class="test-result hidden"></div>
           </div>
-          <div id="provider-empty" class="provider-empty">选择左侧供应商，或点击「添加供应商」接入自定义中转站。</div>
+          <div id="provider-empty" class="provider-empty">选择左侧供应商，配置 API Key 与模型后启用。</div>
         </section>
       </div>
     </div>
