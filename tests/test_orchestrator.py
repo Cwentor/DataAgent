@@ -325,3 +325,338 @@ def test_critic_trace_digest_carries_error_history(monkeypatch):
     nodes.critic_node(state)
     assert "自愈错误记录" in captured["user"]
     assert "NameError" in captured["user"]
+
+
+# --------------------------------------------------------------------------- #
+# 重规划数据集归属（回归锚点：跨轮次错配 -> 假下滑结论）
+# --------------------------------------------------------------------------- #
+def test_resolve_step_inputs_follows_dependency_not_dict_order():
+    """analyze 输入必须取自依赖步骤的本轮产出，而不是 datasets 字典首尾。
+
+    回归锚点：此前按 list(state.datasets)[0]/[-1] 取两期输入，重规划后
+    datasets 累积上轮键，首尾会指向上轮遗留数据集，产出"下滑 57.9%"式错配。
+    """
+    from core.orchestrator.nodes import _resolve_step_inputs
+    from core.orchestrator.state import AgentState, PlanStep
+
+    state = AgentState(user_query="分析 5 月 GMV 下滑原因")
+    state = state.apply(
+        datasets={
+            "s1_v0": {"path": "a.parquet", "rows": 8, "columns": ["province", "gmv"]},
+            "s1_v1": {"path": "b.parquet", "rows": 8, "columns": ["province", "gmv"]},
+        },
+        step_outputs={"s1": ["s1_v0", "s1_v1"]},
+        plan_steps=[
+            PlanStep(id="s1", goal="取两期明细", kind="query"),
+            PlanStep(id="s2", goal="归因", kind="analyze", depends_on=["s1"]),
+        ],
+    )
+    assert _resolve_step_inputs(state, state.plan_steps[1]) == ["s1_v0", "s1_v1"]
+
+
+def test_resolve_step_inputs_ignores_stale_datasets_from_prior_round():
+    """重规划后 datasets 含上轮遗留键时，必须只读本轮依赖产出（不复用旧键）。"""
+    from core.orchestrator.nodes import _resolve_step_inputs
+    from core.orchestrator.state import AgentState, PlanStep
+
+    state = AgentState(user_query="分析 5 月 GMV 下滑原因")
+    # 上轮遗留 s1/s2/s3，本轮 s1 覆盖为 s1_v0/s1_v1
+    state = state.apply(
+        datasets={
+            "s1": {"path": "old1.parquet", "rows": 8, "columns": ["province", "gmv"]},
+            "s2": {"path": "old2.parquet", "rows": 8, "columns": ["province", "gmv"]},
+            "s3": {"path": "old3.parquet", "rows": 8, "columns": ["province", "gmv"]},
+            "s1_v0": {"path": "new0.parquet", "rows": 8, "columns": ["province", "gmv"]},
+            "s1_v1": {"path": "new1.parquet", "rows": 8, "columns": ["province", "gmv"]},
+        },
+        step_outputs={"s1": ["s1_v0", "s1_v1"]},
+        plan_steps=[
+            PlanStep(id="s1", goal="取两期明细", kind="query"),
+            PlanStep(id="s2", goal="归因", kind="analyze", depends_on=["s1"]),
+        ],
+    )
+    assert _resolve_step_inputs(state, state.plan_steps[1]) == ["s1_v0", "s1_v1"]
+
+
+def test_diagnostic_dsl_pair_carries_driver_factor_metrics():
+    """诊断兜底两期对必须同时带订单量与买家数因子（反思归因诉求首轮即满足）。"""
+    from core.orchestrator.nodes import _diagnostic_dsl_pair
+
+    base, curr = _diagnostic_dsl_pair("分析 5 月第一周比第二周 GMV 下滑原因")
+    for dsl in (base, curr):
+        aliases = {m["alias"] for m in dsl["metrics"]}
+        assert {"gmv", "orders", "buyers"} <= aliases
+
+
+# --------------------------------------------------------------------------- #
+# 反思护栏（回归锚点：不可执行缺口 / 计划无进展 -> 禁止空转重规划）
+# --------------------------------------------------------------------------- #
+def _critic_state(**overrides):
+    """构造带 summary 产物的诊断状态（默认产物列为 gmv/orders/buyers）。"""
+    from core.orchestrator.state import AgentState, Artifact
+
+    state = AgentState(user_query="分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位")
+    defaults = {
+        "datasets": {
+            "s1_v0": {
+                "path": "a.parquet",
+                "rows": 8,
+                "columns": ["province", "gmv", "orders", "buyers"],
+            }
+        },
+        "artifacts": [Artifact(kind="summary", name="s2", payload={"summary": {"title": "归因"}})],
+    }
+    defaults.update(overrides)
+    return state.apply(**defaults)
+
+
+def test_reflector_scope_lists_available_fields():
+    """反思提示词必须携带数仓可用字段清单（判定边界的客观依据）。"""
+    from core.orchestrator.nodes import _reflector_available_scope
+
+    scope = _reflector_available_scope()
+    assert "数仓可用字段清单" in scope
+    assert "order_amount" in scope and "province" in scope
+    assert "流量" in scope  # 明示清单外概念不得作为重规划理由
+
+
+def test_guard_rejects_out_of_scope_reasons():
+    """反思以数仓未采集的维度（流量/活动/异常单）为由判不充分 => 不可执行。"""
+    import core.orchestrator.nodes as nodes
+
+    verdict = {
+        "verdict": "insufficient",
+        "reasons": ["缺少对订单量、客单价、流量、活动、异常单等影响因素的归因分析"],
+    }
+    assert nodes._insufficient_is_actionable(verdict, _critic_state()) is False
+
+
+def test_guard_rejects_when_reasons_all_covered_by_products():
+    """理由提到的概念已被本轮产物覆盖 => 属分析深度诉求，不可执行。"""
+    import core.orchestrator.nodes as nodes
+
+    verdict = {
+        "verdict": "insufficient",
+        "reasons": ["最终结果只列出下降幅度较大的地区及指标，未解释具体下滑原因"],
+        "missing": ["缺少订单量与买家数的归因分析"],
+    }
+    assert nodes._insufficient_is_actionable(verdict, _critic_state()) is False
+
+
+def test_guard_allows_actionable_gap_within_scope():
+    """理由指向可用域内尚未取到的数据（如品类）=> 可执行，允许重规划。"""
+    import core.orchestrator.nodes as nodes
+
+    verdict = {
+        "verdict": "insufficient",
+        "reasons": ["未按品类拆分下滑贡献，无法定位品类级主因"],
+        "missing": ["取品类维度的两期明细"],
+    }
+    # 产物列为 province/gmv/orders/buyers，品类字段未取到 => 可执行
+    assert nodes._insufficient_is_actionable(verdict, _critic_state()) is True
+
+
+def test_guard_rejects_when_replan_makes_no_progress():
+    """产物指纹与上次重规划相同 => 重规划无进展，直接综合（防空转）。"""
+    import core.orchestrator.nodes as nodes
+
+    state = _critic_state()
+    state = state.apply(last_replan_fingerprint=nodes._artifact_fingerprint(state))
+    verdict = {
+        "verdict": "insufficient",
+        "reasons": ["未按品类拆分下滑贡献"],
+        "missing": ["取品类维度明细"],
+    }
+    assert nodes._insufficient_is_actionable(verdict, state) is False
+
+
+def test_critic_guard_converts_unsatisfiable_replan_to_synthesize(monkeypatch):
+    """LLM 反思判定不充分但缺口不可执行时，critic 直接转综合（不空烧重试）。"""
+    import core.orchestrator.nodes as nodes
+
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        nodes,
+        "_llm_json",
+        lambda llm, system, user: {
+            "verdict": "insufficient",
+            "reasons": ["缺少对订单量、客单价、流量、活动、异常单等影响因素的归因分析"],
+        },
+    )
+    out = nodes.critic_node(_critic_state())
+    assert out.phase == "synthesize"
+    assert out.error_context.retries == 0  # 未消耗重试额度（非空转重规划）
+
+
+def test_critic_replans_and_records_progress_fingerprint(monkeypatch):
+    """缺口可执行时照常重规划，并记录本轮产物指纹供下轮无进展判定。"""
+    import core.orchestrator.nodes as nodes
+
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        nodes,
+        "_llm_json",
+        lambda llm, system, user: {
+            "verdict": "insufficient",
+            "reasons": ["未按品类拆分下滑贡献"],
+            "missing": ["取品类维度明细"],
+        },
+    )
+    state = _critic_state()
+    out = nodes.critic_node(state)
+    assert out.phase == "plan"
+    assert out.error_context.retries == 1
+    assert out.last_replan_fingerprint == nodes._artifact_fingerprint(state)
+
+
+# --------------------------------------------------------------------------- #
+# 无数据诚实守卫（2026-09 审计修复：编造时段严禁产出归因报告）
+# --------------------------------------------------------------------------- #
+def test_parse_explicit_time_window():
+    """显式年份/月份解析：年月 / 整年；无年份月份返回 None 由调用方锚定。"""
+    from agent.time_utils import parse_explicit_time_window
+
+    assert parse_explicit_time_window("分析一下 2030 年 5 月第二周比第三周 GMV 下滑") == (
+        "2030-05-01",
+        "2030-06-01",
+    )
+    assert parse_explicit_time_window("2024年GMV是多少") == ("2024-01-01", "2025-01-01")
+    assert parse_explicit_time_window("12月GMV是多少") is None
+    assert parse_explicit_time_window("上个月GMV") is None
+
+
+def test_time_window_outside_domain():
+    """数据域守卫判据：窗口整体晚于数据域上界 = 必然空集（确定性可证）。"""
+    from agent.time_utils import time_window_outside_domain
+    from semantic.dsl_schema import TimeFilter
+
+    future = TimeFilter.model_validate(
+        {"range_type": "absolute", "absolute": {"start": "2030-05-01", "end": "2030-06-01"}}
+    )
+    past = TimeFilter.model_validate(
+        {"range_type": "absolute", "absolute": {"start": "2024-05-01", "end": "2024-06-01"}}
+    )
+    assert time_window_outside_domain(future) is True
+    assert time_window_outside_domain(past) is False
+
+
+def test_diagnostic_dsl_pair_respects_explicit_time():
+    """兜底两期对必须尊重用户显式时间（严禁静默替换成 2024-05 域内窗口）。"""
+    from core.orchestrator.nodes import _diagnostic_dsl_pair, _scalar_dsl
+
+    baseline, current = _diagnostic_dsl_pair("分析一下 2030 年 5 月 GMV 下滑的原因")
+    assert baseline["time_filter"]["absolute"]["start"] == "2030-05-01"
+    assert current["time_filter"]["absolute"]["end"] == "2030-06-01"
+    # 两期相邻不重叠（半开区间共用分界）
+    assert baseline["time_filter"]["absolute"]["end"] == current["time_filter"]["absolute"]["start"]
+
+    scalar = _scalar_dsl("2030 年 5 月的 GMV 总额是多少？")
+    assert scalar["time_filter"]["absolute"] == {"start": "2030-05-01", "end": "2030-06-01"}
+
+    # 无显式时间 => 缺省锚不变（评测确定性回归锚点）
+    b_default, c_default = _diagnostic_dsl_pair("为什么 GMV 下滑了")
+    assert b_default["time_filter"]["absolute"] == {"start": "2024-05-01", "end": "2024-05-08"}
+    assert c_default["time_filter"]["absolute"] == {"start": "2024-05-08", "end": "2024-05-15"}
+
+
+def test_run_agent_fabricated_year_reports_no_data(tmp_path, monkeypatch):
+    """E2E：编造年份（2030）严禁产出归因报告，必须如实说明无数据。
+
+    回归锚点（2026-09 审计）：此前兜底窗口硬编码 2024-05，用域内数据冒充
+    用户问的 2030 时段产出"下滑归因"报告 = 数据造假。
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    trace = run_agent(
+        "分析一下 2030 年 5 月第二周比第三周 GMV 下滑的原因，按地区定位",
+        session_id="fab-year",
+    )
+    assert trace.phase == "done"
+    # 严禁沙箱假产物：无数据时不做因子分解/维度下钻
+    assert not any(a["kind"] == "summary" for a in trace.artifacts)
+    assert not any(a["kind"] == "echarts" for a in trace.artifacts)
+    # 取数被守卫拦截（不产出数据集）
+    query_steps = [s for s in trace.steps if s["tool"] == "execute_dsl_query"]
+    assert query_steps and all(not s["ok"] for s in query_steps)
+    # 报告如实说明超界与数据域边界，且不出现编造结论话术
+    assert "无任何数据" in trace.report
+    assert "2024-06-30" in trace.report
+    assert "驱动因子分解" not in trace.report
+    assert "归因矩阵" not in trace.report
+
+
+def test_critic_short_circuits_on_no_data_reason(monkeypatch):
+    """时间域守卫拦截后 critic 直接转综合（严禁重规划空转、不进 LLM 反思）。"""
+    import core.orchestrator.nodes as nodes
+
+    calls: list[int] = []
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: calls.append(1) or object())
+    state = _critic_state(
+        no_data_reason="查询时间范围 2030-05-01 ~ 2030-06-01 整体晚于数仓数据域上界",
+        datasets={},
+        artifacts=[],
+    )
+    out = nodes.critic_node(state)
+    assert out.phase == "synthesize"
+    assert out.error_context.retries == 0
+    assert not calls
+
+
+def test_critic_short_circuits_on_all_empty_datasets(monkeypatch):
+    """全部数据集 0 行：critic 转综合如实说明（不判'缺归因产物'触发重规划）。"""
+    import core.orchestrator.nodes as nodes
+
+    calls: list[int] = []
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: calls.append(1) or object())
+    state = _critic_state(
+        datasets={
+            "s1_v0": {"path": "a.parquet", "rows": 0, "columns": ["province", "gmv"]},
+            "s1_v1": {"path": "b.parquet", "rows": 0, "columns": ["province", "gmv"]},
+        },
+        artifacts=[],
+    )
+    out = nodes.critic_node(state)
+    assert out.phase == "synthesize"
+    assert out.error_context.retries == 0
+    assert not calls
+
+
+def test_analysis_template_guards_empty_inputs():
+    """依赖数据集全 0 行 => 无匹配数据模板（严禁在空 DataFrame 上跑分解/下钻）。"""
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState, PlanStep
+
+    state = AgentState(
+        user_query="分析一下 2024 年 5 月 GMV 下滑的原因",
+        plan_steps=[
+            PlanStep(id="s1", goal="取数", kind="query"),
+            PlanStep(id="s2", goal="沙箱内做乘法因子分解", kind="analyze", depends_on=["s1"]),
+        ],
+        datasets={"s1_v0": {"path": "a.parquet", "rows": 0, "columns": ["province", "gmv"]}},
+        step_outputs={"s1": ["s1_v0"]},
+    )
+    code = nodes._analysis_template(state, state.plan_steps[1])
+    assert "无匹配数据" in code
+    # 严禁落到因子分解模板（不读数据集、不产出分解小节）
+    assert "read_input" not in code
+    assert "驱动因子分解" not in code
+
+
+def test_synthesize_no_data_skips_llm(monkeypatch):
+    """无数据时 synthesize 跳过 LLM 综合，输出确定性数据说明（严禁编故事）。"""
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState
+
+    calls: list[str] = []
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        nodes, "_synthesize_with_llm", lambda state, material: calls.append(material)
+    )
+    state = AgentState(user_query="2030 年 5 月 GMV 下滑原因", no_data_reason="查询时间范围超界")
+    out = nodes.synthesize_node(state)
+    assert out.phase == "done"
+    assert not calls
+    assert "无法进行" in out.report
+    assert "2024-06-30" in out.report
+    assert "不会以其他时段的数据代替作答" in out.report
