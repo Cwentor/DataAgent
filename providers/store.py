@@ -9,8 +9,10 @@
   前端不再回填任何脱敏串，杜绝「把脱敏串当真 Key 用」；需要查看密钥走
   ``reveal_key``（受认证保护的显式端点，并记审计日志）；
 - 更新时若提交的 Key 为历史脱敏串或空串，保留服务端原 Key（向后兼容旧客户端）；
-- 预置供应商（智谱 / OpenAI / Anthropic / Gemini）首次加载自动写入，
-  ``is_preset=True`` 不可删除（可禁用 / 编辑）；
+- 预置供应商（OpenAI / Anthropic）首次加载自动写入，``is_preset=True``
+  不可删除（可禁用 / 编辑）；供应商控制只开放这两家；
+- 加载时自动清理不在预置清单内的历史条目（智谱 / Gemini / 自定义中转站），
+  清理前把原文件备份为 ``providers.json.bak``；
 - 历史明文文件在加载时自动迁移为加密格式（一次性写回）。
 """
 
@@ -34,31 +36,6 @@ from providers.models import (
 )
 
 PRESET_PROVIDERS: list[dict[str, Any]] = [
-    {
-        "id": "zhipu",
-        "name": "智谱",
-        "is_preset": True,
-        "enabled": True,
-        "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "protocol": ApiProtocol.OPENAI_CHAT,
-        "models": [
-            {
-                "id": "glm-5.3-flash",
-                "context_window": 128000,
-                "capabilities": ["json_schema", "function_calling"],
-            },
-            {
-                "id": "glm-4.6-flash",
-                "context_window": 128000,
-                "capabilities": ["json_schema", "function_calling"],
-            },
-            {
-                "id": "glm-4.5-flash",
-                "context_window": 128000,
-                "capabilities": ["json_schema", "function_calling"],
-            },
-        ],
-    },
     {
         "id": "openai",
         "name": "OpenAI",
@@ -99,27 +76,10 @@ PRESET_PROVIDERS: list[dict[str, Any]] = [
             },
         ],
     },
-    {
-        "id": "gemini",
-        "name": "Google Gemini",
-        "is_preset": True,
-        "enabled": False,
-        "base_url": "https://generativelanguage.googleapis.com",
-        "protocol": ApiProtocol.GEMINI,
-        "models": [
-            {
-                "id": "gemini-1.5-pro",
-                "context_window": 1000000,
-                "capabilities": ["vision", "json_schema"],
-            },
-            {
-                "id": "gemini-1.5-flash",
-                "context_window": 1000000,
-                "capabilities": ["vision", "json_schema"],
-            },
-        ],
-    },
 ]
+
+# 供应商控制白名单：仅保留 OpenAI 与 Anthropic 两家预置供应商。
+SUPPORTED_PRESET_IDS: frozenset[str] = frozenset(p["id"] for p in PRESET_PROVIDERS)
 
 
 def _new_id() -> str:
@@ -172,13 +132,31 @@ class ProviderStore:
                     pass
                 items = []
             if items:
+                supported_items = [item for item in items if item["id"] in SUPPORTED_PRESET_IDS]
+                pruned = len(supported_items) != len(items)
+                if pruned:
+                    # 供应商控制收窄迁移：清掉非白名单条目（智谱 / Gemini /
+                    # 自定义中转站），原文件先备份，避免密文配置不可恢复丢失。
+                    try:
+                        backup = self.path.with_suffix(self.path.suffix + ".bak")
+                        backup.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
+                    except OSError:
+                        pass
+                    items = supported_items
+                if not items:
+                    return self._seed_presets()  # 清理后为空：回落预置种子
                 self._providers = {
                     item["id"]: ProviderConfig.model_validate(item) for item in items
                 }
                 migrated = self._decrypt_all()
-                if migrated:
-                    self._save()  # 历史明文自动迁移为加密格式
+                if pruned or migrated:
+                    # 清理 / 明文迁移结果立即写回，避免下次加载重复迁移
+                    self._save()
                 return
+        self._seed_presets()
+
+    def _seed_presets(self) -> None:
+        """写入预置种子（OpenAI / Anthropic）并落盘。"""
         self._providers = {p["id"]: ProviderConfig.model_validate(p) for p in PRESET_PROVIDERS}
         self._save()
 
@@ -372,6 +350,7 @@ def reset_default_provider_store(store: ProviderStore | None = None) -> None:
 
 __all__ = [
     "PRESET_PROVIDERS",
+    "SUPPORTED_PRESET_IDS",
     "ProviderStore",
     "default_provider_store",
     "reset_default_provider_store",

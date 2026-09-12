@@ -85,15 +85,55 @@ def test_store_preset_seed_and_keyless_view(tmp_path):
     """预置种子自动写入；对外视图不含 api_key（仅 has_api_key 布尔位）。"""
     store = ProviderStore(tmp_path / "providers.json")
     ids = [p.id for p in store.list_providers()]
-    assert "zhipu" in ids and "openai" in ids  # 预置种子自动写入
-    view = store.public_view(store.get_provider("zhipu"))
+    # 供应商控制收窄：预置仅 OpenAI / Anthropic 两家
+    assert set(ids) == {"openai", "anthropic"}
+    view = store.public_view(store.get_provider("openai"))
     assert "api_key" not in view and view["has_api_key"] is False
     # 配置 Key 后对外视图仍不含 Key 明文 / 脱敏串
-    zhipu_key = fake_key("zhipu")
-    store.update_provider("zhipu", {"api_key": zhipu_key})
-    view = store.public_view(store.get_provider("zhipu"))
+    openai_key = fake_key("openai")
+    store.update_provider("openai", {"api_key": openai_key})
+    view = store.public_view(store.get_provider("openai"))
     assert "api_key" not in view and view["has_api_key"] is True
-    assert zhipu_key not in json.dumps(view, ensure_ascii=False)
+    assert openai_key not in json.dumps(view, ensure_ascii=False)
+
+
+def test_store_prunes_unsupported_entries_with_backup(tmp_path):
+    """收窄迁移：加载时清掉白名单外条目（智谱 / 自定义），原文件留 .bak 备份。"""
+    path = tmp_path / "providers.json"
+    legacy = json.dumps(
+        [
+            {
+                "id": "zhipu",
+                "name": "智谱",
+                "is_preset": True,
+                "enabled": True,
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "protocol": "openai_chat",
+                "models": [{"id": "glm-4.5-flash"}],
+                "api_key": "",
+            },
+            {
+                "id": "p_legacy",
+                "name": "旧中转",
+                "is_preset": False,
+                "enabled": True,
+                "base_url": "https://legacy/v1",
+                "protocol": "openai_chat",
+                "models": [{"id": "m"}],
+                "api_key": "",
+            },
+        ],
+        ensure_ascii=False,
+    )
+    path.write_text(legacy, encoding="utf-8")
+    store = ProviderStore(path)
+    ids = [p.id for p in store.list_providers()]
+    assert set(ids) == {"openai", "anthropic"}  # 清理后回落预置种子
+    # 清理结果立即写回：磁盘文件不再含白名单外条目
+    persisted = {item["id"] for item in json.loads(path.read_text(encoding="utf-8"))}
+    assert persisted == {"openai", "anthropic"}
+    backup = tmp_path / "providers.json.bak"
+    assert backup.exists() and "p_legacy" in backup.read_text(encoding="utf-8")
 
 
 def test_store_key_encrypted_at_rest(tmp_path):
@@ -117,11 +157,11 @@ def test_store_legacy_plaintext_migrated_on_load(tmp_path):
     legacy_key = fake_key("legacy")
     legacy = [
         {
-            "id": "old1",
-            "name": "Old",
-            "is_preset": False,
+            "id": "openai",
+            "name": "OpenAI",
+            "is_preset": True,
             "enabled": True,
-            "base_url": "https://old/v1",
+            "base_url": "https://api.openai.com/v1",
             "api_key": legacy_key,
             "protocol": "openai_chat",
             "models": [],
@@ -132,7 +172,7 @@ def test_store_legacy_plaintext_migrated_on_load(tmp_path):
     ]
     path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
     store = ProviderStore(path)
-    assert store.reveal_key("old1") == legacy_key
+    assert store.reveal_key("openai") == legacy_key
     assert legacy_key not in path.read_text(encoding="utf-8")  # 已加密迁移
 
 
@@ -155,7 +195,7 @@ def test_store_masked_key_does_not_overwrite_plaintext(tmp_path):
 
 def test_store_preset_delete_rejected_and_custom_deleted(tmp_path):
     store = ProviderStore(tmp_path / "providers.json")
-    assert store.delete_provider("zhipu") is False  # 预置不可删
+    assert store.delete_provider("openai") is False  # 预置不可删
     store.create_provider({"id": "c2", "name": "C2", "base_url": "https://c2/v1"})
     assert store.delete_provider("c2") is True
     assert store.get_provider("c2") is None
@@ -170,30 +210,28 @@ def test_store_update_with_models_list_dict_persists(tmp_path):
     """
     path = tmp_path / "providers.json"
     store = ProviderStore(path)
-    ark_key = fake_key("ark")
-    store.create_provider(
-        {"id": "c1", "name": "火山", "base_url": "https://ark/v1", "api_key": ark_key}
-    )
+    openai_key = fake_key("openai")
+    store.update_provider("openai", {"api_key": openai_key})
     updated = store.update_provider(
-        "c1",
+        "openai",
         {
-            "name": "火山改名",
-            "models": [{"id": "doubao-seed-1-6", "name": "doubao-seed-1-6"}],
+            "name": "OpenAI 官方",
+            "models": [{"id": "gpt-4o", "name": "gpt-4o"}],
         },
     )
     assert updated is not None
-    assert [m.id for m in updated.models] == ["doubao-seed-1-6"]
+    assert [m.id for m in updated.models] == ["gpt-4o"]
     # 重新实例化（模拟重启后从磁盘加载）：模型仍在
     reloaded = ProviderStore(path)
-    assert [m.id for m in reloaded.get_provider("c1").models] == ["doubao-seed-1-6"]
-    assert reloaded.get_provider("c1").name == "火山改名"
+    assert [m.id for m in reloaded.get_provider("openai").models] == ["gpt-4o"]
+    assert reloaded.get_provider("openai").name == "OpenAI 官方"
     # 保存过的密钥与模型不被后续"仅改名称"的更新破坏（空 Key 保留原值）
-    reloaded.update_provider("c1", {"name": "火山改名2"})
-    assert reloaded.get_provider("c1").api_key == ark_key
-    assert [m.id for m in reloaded.get_provider("c1").models] == ["doubao-seed-1-6"]
+    reloaded.update_provider("openai", {"name": "OpenAI 官方2"})
+    assert reloaded.get_provider("openai").api_key == openai_key
+    assert [m.id for m in reloaded.get_provider("openai").models] == ["gpt-4o"]
     # 非法契约字段 -> ValueError（API 层转 400），而非静默吞掉
     with pytest.raises(ValueError):
-        reloaded.update_provider("c1", {"models": [{"unknown_field": 1}]})
+        reloaded.update_provider("openai", {"models": [{"unknown_field": 1}]})
 
 
 def test_factory_choices_include_custom_provider_after_model_update(tmp_path):
@@ -372,9 +410,9 @@ def test_factory_requires_key_for_default_dispatch(tmp_path):
     # 显式指定也要求启用 + 存在
     with pytest.raises(ProviderNotConfiguredError):
         factory.resolve("nope", "m")
-    store.update_provider("zhipu", {"api_key": fake_key("zhipu")})
-    adapter = factory.resolve("zhipu", "glm-4.5-flash")
-    assert adapter.model_id == "glm-4.5-flash"
+    store.update_provider("openai", {"api_key": fake_key("openai")})
+    adapter = factory.resolve("openai", "gpt-4o")
+    assert adapter.model_id == "gpt-4o"
 
 
 def test_request_scoped_model_dispatch(monkeypatch, tmp_path):
@@ -382,7 +420,7 @@ def test_request_scoped_model_dispatch(monkeypatch, tmp_path):
     from providers.context import dispatching_adapter, reset_dispatching_adapter
 
     store = ProviderStore(tmp_path / "providers.json")
-    store.update_provider("zhipu", {"api_key": fake_key("zhipu")})
+    store.update_provider("openai", {"api_key": fake_key("openai")})
     store.create_provider(
         {
             "id": "proxy",
@@ -405,9 +443,9 @@ def test_request_scoped_model_dispatch(monkeypatch, tmp_path):
     monkeypatch.setattr("providers.adapters._http_post", spy)
 
     proxy = dispatching_adapter()
-    # 未绑定请求上下文 -> 默认分派（首位有 Key 的启用供应商 = zhipu）
+    # 未绑定请求上下文 -> 默认分派（首位有 Key 的启用供应商 = openai）
     proxy.chat_text([{"role": "user", "content": "q"}])
-    assert "open.bigmodel.cn" in seen_urls[-1]
+    assert "api.openai.com" in seen_urls[-1]
     # 绑定请求上下文 -> 转发到目标供应商
     set_request_model("proxy", "p-model")
     try:
@@ -506,11 +544,11 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port, "POST", "/api/auth/login", {"username": "admin", "password": "admin123"}
         )
         H = {"Authorization": "Bearer " + login["token"]}
-        # 列表含预置种子
+        # 列表含预置种子（收窄后仅 OpenAI / Anthropic）
         status, body = _req(port, "GET", "/api/settings/providers", headers=H)
-        assert status == 200 and any(p["id"] == "zhipu" for p in body["providers"])
-        # 创建 -> Key 脱敏回显
-        http_api_key = fake_key("http-api")
+        assert status == 200
+        assert {p["id"] for p in body["providers"]} == {"openai", "anthropic"}
+        # 创建自定义供应商 -> 已停用（403：供应商控制仅保留 OpenAI / Anthropic）
         status, body = _req(
             port,
             "POST",
@@ -519,31 +557,28 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
                 "name": "API测试站",
                 "base_url": "https://api.test/v1",
                 "protocol": "openai_chat",
-                "api_key": http_api_key,
+                "api_key": fake_key("http-api"),
                 "models": [{"id": "t-model"}],
             },
             headers=H,
         )
-        assert status == 200
-        created = body["provider"]
-        # 响应不含 api_key（前端不回填脱敏串），仅暴露 has_api_key 布尔位
-        assert "api_key" not in created and created["has_api_key"] is True
-        # 更新（api_key 缺省 -> 保留原 Key）+ 名称变更
+        assert status == 403 and "OpenAI" in body["error"]
+        # 预置 openai 配置 Key 后走更新链路（api_key 缺省 -> 保留原 Key）
+        openai_key = fake_key("openai-http")
+        isolated.update_provider("openai", {"api_key": openai_key})
         status, body = _req(
             port,
             "PUT",
-            f"/api/settings/providers/{created['id']}",
-            {"name": "API测试站2"},
+            "/api/settings/providers/openai",
+            {"name": "OpenAI 官方"},
             headers=H,
         )
-        assert status == 200 and body["provider"]["name"] == "API测试站2"
-        assert isolated.get_provider(created["id"]).api_key == http_api_key
+        assert status == 200 and body["provider"]["name"] == "OpenAI 官方"
+        assert isolated.get_provider("openai").api_key == openai_key
         # 查看密钥（reveal）：认证后返回明文，未认证 401，未知 id 404
-        status, body = _req(
-            port, "POST", f"/api/settings/providers/{created['id']}/reveal", headers=H
-        )
-        assert status == 200 and body["api_key"] == http_api_key
-        status, _ = _req(port, "POST", f"/api/settings/providers/{created['id']}/reveal")
+        status, body = _req(port, "POST", "/api/settings/providers/openai/reveal", headers=H)
+        assert status == 200 and body["api_key"] == openai_key
+        status, _ = _req(port, "POST", "/api/settings/providers/openai/reveal")
         assert status == 401
         status, _ = _req(port, "POST", "/api/settings/providers/p_none/reveal", {"x": 1}, headers=H)
         assert status == 404
@@ -552,7 +587,7 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port,
             "POST",
             "/api/settings/providers/test",
-            {"provider_id": created["id"], "model_id": "t-model"},
+            {"provider_id": "openai", "model_id": "gpt-4o"},
             headers=H,
         )
         assert status == 200 and body["success"] is False and body["error"]
@@ -561,10 +596,8 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port, "POST", "/api/settings/providers/test", {"provider_id": "ghost"}, headers=H
         )
         assert status == 404
-        # 删除自定义 -> ok；删除预置 -> 400
-        status, body = _req(port, "DELETE", f"/api/settings/providers/{created['id']}", headers=H)
-        assert status == 200 and body["ok"] is True
-        status, body = _req(port, "DELETE", "/api/settings/providers/zhipu", headers=H)
+        # 删除预置 -> 400（供应商控制仅保留 OpenAI / Anthropic，不支持删除）
+        status, body = _req(port, "DELETE", "/api/settings/providers/openai", headers=H)
         assert status == 400 and "不可删除" in body["error"]
     finally:
         server.shutdown()

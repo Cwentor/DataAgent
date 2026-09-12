@@ -2,9 +2,9 @@
 
 路由（均需认证，与 /api/query 同一鉴权语义）：
 - GET    /api/settings/providers             -> 全量供应商列表（不含 api_key）+ 模型切换器候选
-- POST   /api/settings/providers             -> 创建自定义供应商
+- POST   /api/settings/providers             -> 已停用（403）：供应商控制仅保留 OpenAI / Anthropic
 - PUT    /api/settings/providers/<id>        -> 更新（id / is_preset 不可变更；空 Key 保留原值）
-- DELETE /api/settings/providers/<id>        -> 删除（预置供应商拒绝，返回 400）
+- DELETE /api/settings/providers/<id>        -> 已停用（400）：供应商控制仅保留 OpenAI / Anthropic
 - POST   /api/settings/providers/test        -> 连通性探测（极小 ping 文本，返回 HTTP 200 + 延时）
 - POST   /api/settings/providers/<id>/reveal -> 查看已保存的真实 API Key（显式动作，记审计日志）
 
@@ -111,18 +111,8 @@ def list_providers() -> tuple[int, dict[str, Any]]:
 
 
 def create_provider(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    """POST /api/settings/providers：创建自定义供应商（is_preset 固定为 False）。"""
-    if not isinstance(body, dict) or not str(body.get("name") or "").strip():
-        return 400, {"error": "供应商名称（name）必填"}
-    try:
-        payload = _normalize_provider_payload(body)
-        payload.setdefault("is_preset", False)
-        provider = _store().create_provider(payload)
-    except ValueError as exc:
-        return 400, {"error": str(exc)}
-    invalidate_provider_caches(provider.id)
-    logger.info("provider_created", extra={"event": "provider_created", "provider_id": provider.id})
-    return 200, {"provider": _store().public_view(provider)}
+    """POST /api/settings/providers：已停用——供应商控制仅保留 OpenAI / Anthropic。"""
+    return 403, {"error": "供应商控制仅支持 OpenAI 与 Anthropic，暂不支持接入自定义供应商"}
 
 
 def update_provider(provider_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -142,16 +132,8 @@ def update_provider(provider_id: str, body: dict[str, Any]) -> tuple[int, dict[s
 
 
 def delete_provider(provider_id: str) -> tuple[int, dict[str, Any]]:
-    """DELETE /api/settings/providers/<id>：预置供应商拒绝删除（400）。"""
-    deleted = _store().delete_provider(provider_id)
-    if not deleted:
-        existing = _store().get_provider(provider_id)
-        if existing is None:
-            return 404, {"error": f"供应商不存在: {provider_id}"}
-        return 400, {"error": "预置供应商不可删除，可禁用或编辑"}
-    invalidate_provider_caches(provider_id)
-    logger.info("provider_deleted", extra={"event": "provider_deleted", "provider_id": provider_id})
-    return 200, {"ok": True}
+    """DELETE /api/settings/providers/<id>：已停用——供应商控制仅保留 OpenAI / Anthropic。"""
+    return 400, {"error": "供应商控制仅支持 OpenAI 与 Anthropic，预置供应商不可删除"}
 
 
 def reveal_provider_key(provider_id: str) -> tuple[int, dict[str, Any]]:
