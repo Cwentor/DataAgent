@@ -209,7 +209,8 @@
   }
 
   // ---------------------------------------------------------------- 模型供应商设置
-  // 供应商控制仅保留 OpenAI / Anthropic 两家预置供应商（不支持自定义接入）。
+  // 预置仅 OpenAI / Anthropic；自定义供应商可自由添加，
+  // 接口协议限白名单（Chat Completions / Responses / Anthropic Messages）。
   var PROTOCOL_LABELS = {
     openai_chat: "Chat Completions",
     openai_responses: "Responses",
@@ -286,7 +287,9 @@
     var box = $("provider-list");
     var html = "";
     providers.forEach(function (p) {
-      var badge = "<span class='p-badge preset'>预置</span>";
+      var badge = p.is_preset
+        ? "<span class='p-badge preset'>预置</span>"
+        : "<span class='p-badge custom'>自定义</span>";
       if (!p.enabled) { badge += "<span class='p-badge off'>已禁用</span>"; }
       html += "<div class='provider-item" + (p.id === currentProviderId ? " active" : "") + "'"
         + " data-id='" + esc(p.id) + "'>"
@@ -304,6 +307,7 @@
     var p = providers.find(function (x) { return x.id === id; });
     $("provider-form").classList.remove("hidden");
     $("provider-empty").classList.add("hidden");
+    $("pf-delete").classList.toggle("hidden", !!(p && p.is_preset));
     $("pf-test-result").classList.add("hidden");
     $("pf-name").value = p ? p.name : "";
     $("pf-enabled").checked = p ? !!p.enabled : true;
@@ -322,6 +326,25 @@
       badge.classList.add("hidden");
     }
     renderModelChips(p ? p.models : []);
+  }
+
+  function openNewProvider() {
+    currentProviderId = "";
+    renderProviderList();
+    $("provider-form").classList.remove("hidden");
+    $("provider-empty").classList.add("hidden");
+    $("pf-delete").classList.add("hidden");
+    $("pf-test-result").classList.add("hidden");
+    $("pf-name").value = "";
+    $("pf-enabled").checked = true;
+    $("pf-protocol").value = "openai_chat";
+    $("pf-base-url").value = "";
+    $("pf-api-key").value = "";
+    $("pf-api-key").placeholder = "输入 API Key";
+    $("pf-api-key").type = "password";
+    $("pf-key-badge").classList.add("hidden");
+    renderModelChips([]);
+    $("pf-name").focus();
   }
 
   function currentFormModels() { return window.__pfModels || []; }
@@ -398,10 +421,12 @@
       toast("请至少添加一个模型（输入模型 ID 后点「＋添加模型」）", "err");
       return;
     }
-    if (!currentProviderId) { return; }
-    var path = "/api/settings/providers/" + encodeURIComponent(currentProviderId);
-    api(path, { method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form) })
+    var body = JSON.stringify(form);
+    var path = currentProviderId
+      ? "/api/settings/providers/" + encodeURIComponent(currentProviderId)
+      : "/api/settings/providers";
+    var method = currentProviderId ? "PUT" : "POST";
+    api(path, { method: method, headers: { "Content-Type": "application/json" }, body: body })
       .then(handleSaved);
   }
 
@@ -414,6 +439,21 @@
       applyChoices(choices);
       openProvider(currentProviderId);
     });
+  }
+
+  function deleteProvider() {
+    if (!currentProviderId) { return; }
+    if (!window.confirm("确认删除该供应商？删除后不可恢复。")) { return; }
+    api("/api/settings/providers/" + encodeURIComponent(currentProviderId), { method: "DELETE" })
+      .then(function (data) {
+        if (!data) { return; }
+        if (data.error) { toast(data.error, "err"); return; }
+        toast("供应商已删除", "ok");
+        currentProviderId = "";
+        $("provider-form").classList.add("hidden");
+        $("provider-empty").classList.remove("hidden");
+        fetchModelChoices(applyChoices);
+      });
   }
 
   function friendlyProviderError(msg) {
@@ -488,6 +528,7 @@
       }
     });
     $("goto-model-settings").addEventListener("click", openSettings);
+    $("provider-add").addEventListener("click", openNewProvider);
     $("pf-model-add").addEventListener("click", function () {
       var input = $("pf-model-input");
       var id = input.value.trim();
@@ -534,6 +575,7 @@
       });
     });
     $("pf-save").addEventListener("click", saveProvider);
+    $("pf-delete").addEventListener("click", deleteProvider);
     $("pf-test").addEventListener("click", function () { testConnection(null); });
     $("settings-btn").addEventListener("click", openSettings);
     $("model-switch").addEventListener("change", function () {

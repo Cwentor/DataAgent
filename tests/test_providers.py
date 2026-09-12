@@ -97,8 +97,8 @@ def test_store_preset_seed_and_keyless_view(tmp_path):
     assert openai_key not in json.dumps(view, ensure_ascii=False)
 
 
-def test_store_prunes_unsupported_entries_with_backup(tmp_path):
-    """收窄迁移：加载时清掉白名单外条目（智谱 / 自定义），原文件留 .bak 备份。"""
+def test_store_prunes_legacy_presets_keeps_custom_with_backup(tmp_path):
+    """预置白名单迁移：只清白名单外的历史预置（智谱），自定义条目保留。"""
     path = tmp_path / "providers.json"
     legacy = json.dumps(
         [
@@ -127,13 +127,14 @@ def test_store_prunes_unsupported_entries_with_backup(tmp_path):
     )
     path.write_text(legacy, encoding="utf-8")
     store = ProviderStore(path)
-    ids = [p.id for p in store.list_providers()]
-    assert set(ids) == {"openai", "anthropic"}  # 清理后回落预置种子
-    # 清理结果立即写回：磁盘文件不再含白名单外条目
+    ids = {p.id for p in store.list_providers()}
+    # 智谱被清理（白名单外预置）；自定义条目保留；预置种子补齐两家
+    assert ids == {"openai", "anthropic", "p_legacy"}
+    # 清理结果立即写回：磁盘文件不再含智谱，自定义仍在
     persisted = {item["id"] for item in json.loads(path.read_text(encoding="utf-8"))}
-    assert persisted == {"openai", "anthropic"}
+    assert persisted == {"openai", "anthropic", "p_legacy"}
     backup = tmp_path / "providers.json.bak"
-    assert backup.exists() and "p_legacy" in backup.read_text(encoding="utf-8")
+    assert backup.exists() and "zhipu" in backup.read_text(encoding="utf-8")
 
 
 def test_store_key_encrypted_at_rest(tmp_path):
@@ -210,28 +211,30 @@ def test_store_update_with_models_list_dict_persists(tmp_path):
     """
     path = tmp_path / "providers.json"
     store = ProviderStore(path)
-    openai_key = fake_key("openai")
-    store.update_provider("openai", {"api_key": openai_key})
+    ark_key = fake_key("ark")
+    store.create_provider(
+        {"id": "c1", "name": "火山", "base_url": "https://ark/v1", "api_key": ark_key}
+    )
     updated = store.update_provider(
-        "openai",
+        "c1",
         {
-            "name": "OpenAI 官方",
-            "models": [{"id": "gpt-4o", "name": "gpt-4o"}],
+            "name": "火山改名",
+            "models": [{"id": "doubao-seed-1-6", "name": "doubao-seed-1-6"}],
         },
     )
     assert updated is not None
-    assert [m.id for m in updated.models] == ["gpt-4o"]
-    # 重新实例化（模拟重启后从磁盘加载）：模型仍在
+    assert [m.id for m in updated.models] == ["doubao-seed-1-6"]
+    # 重新实例化（模拟重启后从磁盘加载）：自定义供应商与模型仍在
     reloaded = ProviderStore(path)
-    assert [m.id for m in reloaded.get_provider("openai").models] == ["gpt-4o"]
-    assert reloaded.get_provider("openai").name == "OpenAI 官方"
+    assert [m.id for m in reloaded.get_provider("c1").models] == ["doubao-seed-1-6"]
+    assert reloaded.get_provider("c1").name == "火山改名"
     # 保存过的密钥与模型不被后续"仅改名称"的更新破坏（空 Key 保留原值）
-    reloaded.update_provider("openai", {"name": "OpenAI 官方2"})
-    assert reloaded.get_provider("openai").api_key == openai_key
-    assert [m.id for m in reloaded.get_provider("openai").models] == ["gpt-4o"]
+    reloaded.update_provider("c1", {"name": "火山改名2"})
+    assert reloaded.get_provider("c1").api_key == ark_key
+    assert [m.id for m in reloaded.get_provider("c1").models] == ["doubao-seed-1-6"]
     # 非法契约字段 -> ValueError（API 层转 400），而非静默吞掉
     with pytest.raises(ValueError):
-        reloaded.update_provider("openai", {"models": [{"unknown_field": 1}]})
+        reloaded.update_provider("c1", {"models": [{"unknown_field": 1}]})
 
 
 def test_factory_choices_include_custom_provider_after_model_update(tmp_path):
@@ -544,11 +547,26 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port, "POST", "/api/auth/login", {"username": "admin", "password": "admin123"}
         )
         H = {"Authorization": "Bearer " + login["token"]}
-        # 列表含预置种子（收窄后仅 OpenAI / Anthropic）
+        # 列表含预置种子（OpenAI / Anthropic 两家系统预置）
         status, body = _req(port, "GET", "/api/settings/providers", headers=H)
         assert status == 200
-        assert {p["id"] for p in body["providers"]} == {"openai", "anthropic"}
-        # 创建自定义供应商 -> 已停用（403：供应商控制仅保留 OpenAI / Anthropic）
+        assert {"openai", "anthropic"} <= {p["id"] for p in body["providers"]}
+        # 创建 gemini 协议 -> 400（控制面协议白名单：chat/responses/anthropic）
+        status, body = _req(
+            port,
+            "POST",
+            "/api/settings/providers",
+            {
+                "name": "Gemini 站",
+                "base_url": "https://gai.googleapis.com",
+                "protocol": "gemini",
+                "models": [{"id": "gemini-1.5-pro"}],
+            },
+            headers=H,
+        )
+        assert status == 400 and "不支持的 API 协议" in body["error"]
+        # 创建自定义供应商（openai_chat 协议）-> 200；响应不含 api_key
+        http_api_key = fake_key("http-api")
         status, body = _req(
             port,
             "POST",
@@ -557,28 +575,30 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
                 "name": "API测试站",
                 "base_url": "https://api.test/v1",
                 "protocol": "openai_chat",
-                "api_key": fake_key("http-api"),
+                "api_key": http_api_key,
                 "models": [{"id": "t-model"}],
             },
             headers=H,
         )
-        assert status == 403 and "OpenAI" in body["error"]
-        # 预置 openai 配置 Key 后走更新链路（api_key 缺省 -> 保留原 Key）
-        openai_key = fake_key("openai-http")
-        isolated.update_provider("openai", {"api_key": openai_key})
+        assert status == 200
+        created = body["provider"]
+        assert "api_key" not in created and created["has_api_key"] is True
+        # 更新（api_key 缺省 -> 保留原 Key）+ 名称变更
         status, body = _req(
             port,
             "PUT",
-            "/api/settings/providers/openai",
-            {"name": "OpenAI 官方"},
+            f"/api/settings/providers/{created['id']}",
+            {"name": "API测试站2"},
             headers=H,
         )
-        assert status == 200 and body["provider"]["name"] == "OpenAI 官方"
-        assert isolated.get_provider("openai").api_key == openai_key
+        assert status == 200 and body["provider"]["name"] == "API测试站2"
+        assert isolated.get_provider(created["id"]).api_key == http_api_key
         # 查看密钥（reveal）：认证后返回明文，未认证 401，未知 id 404
-        status, body = _req(port, "POST", "/api/settings/providers/openai/reveal", headers=H)
-        assert status == 200 and body["api_key"] == openai_key
-        status, _ = _req(port, "POST", "/api/settings/providers/openai/reveal")
+        status, body = _req(
+            port, "POST", f"/api/settings/providers/{created['id']}/reveal", headers=H
+        )
+        assert status == 200 and body["api_key"] == http_api_key
+        status, _ = _req(port, "POST", f"/api/settings/providers/{created['id']}/reveal")
         assert status == 401
         status, _ = _req(port, "POST", "/api/settings/providers/p_none/reveal", {"x": 1}, headers=H)
         assert status == 404
@@ -587,7 +607,7 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port,
             "POST",
             "/api/settings/providers/test",
-            {"provider_id": "openai", "model_id": "gpt-4o"},
+            {"provider_id": created["id"], "model_id": "t-model"},
             headers=H,
         )
         assert status == 200 and body["success"] is False and body["error"]
@@ -596,7 +616,9 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port, "POST", "/api/settings/providers/test", {"provider_id": "ghost"}, headers=H
         )
         assert status == 404
-        # 删除预置 -> 400（供应商控制仅保留 OpenAI / Anthropic，不支持删除）
+        # 删除自定义 -> ok；删除预置 -> 400
+        status, body = _req(port, "DELETE", f"/api/settings/providers/{created['id']}", headers=H)
+        assert status == 200 and body["ok"] is True
         status, body = _req(port, "DELETE", "/api/settings/providers/openai", headers=H)
         assert status == 400 and "不可删除" in body["error"]
     finally:

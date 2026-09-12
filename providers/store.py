@@ -10,9 +10,10 @@
   ``reveal_key``（受认证保护的显式端点，并记审计日志）；
 - 更新时若提交的 Key 为历史脱敏串或空串，保留服务端原 Key（向后兼容旧客户端）；
 - 预置供应商（OpenAI / Anthropic）首次加载自动写入，``is_preset=True``
-  不可删除（可禁用 / 编辑）；供应商控制只开放这两家；
-- 加载时自动清理不在预置清单内的历史条目（智谱 / Gemini / 自定义中转站），
-  清理前把原文件备份为 ``providers.json.bak``；
+  不可删除（可禁用 / 编辑）；自定义供应商可自由添加（接口协议需符合
+  协议白名单，见 web 层校验）；
+- 加载时自动清理「白名单外的历史预置」（智谱 / Gemini），自定义条目
+  保留；清理前把原文件备份为 ``providers.json.bak``；
 - 历史明文文件在加载时自动迁移为加密格式（一次性写回）。
 """
 
@@ -78,7 +79,8 @@ PRESET_PROVIDERS: list[dict[str, Any]] = [
     },
 ]
 
-# 供应商控制白名单：仅保留 OpenAI 与 Anthropic 两家预置供应商。
+# 预置白名单：仅保留 OpenAI 与 Anthropic 两家系统预置供应商；
+# 自定义供应商（is_preset=False）不受此白名单限制，按协议白名单校验。
 SUPPORTED_PRESET_IDS: frozenset[str] = frozenset(p["id"] for p in PRESET_PROVIDERS)
 
 
@@ -132,25 +134,33 @@ class ProviderStore:
                     pass
                 items = []
             if items:
-                supported_items = [item for item in items if item["id"] in SUPPORTED_PRESET_IDS]
-                pruned = len(supported_items) != len(items)
+                legacy_presets = [
+                    item
+                    for item in items
+                    if item.get("is_preset") and item["id"] not in SUPPORTED_PRESET_IDS
+                ]
+                pruned = bool(legacy_presets)
                 if pruned:
-                    # 供应商控制收窄迁移：清掉非白名单条目（智谱 / Gemini /
-                    # 自定义中转站），原文件先备份，避免密文配置不可恢复丢失。
+                    # 预置白名单迁移：清掉白名单外的历史预置（智谱 / Gemini），
+                    # 自定义条目保留；原文件先备份，避免密文配置不可恢复丢失。
                     try:
                         backup = self.path.with_suffix(self.path.suffix + ".bak")
                         backup.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
                     except OSError:
                         pass
-                    items = supported_items
+                    items = [item for item in items if item not in legacy_presets]
                 if not items:
                     return self._seed_presets()  # 清理后为空：回落预置种子
                 self._providers = {
                     item["id"]: ProviderConfig.model_validate(item) for item in items
                 }
+                # 预置保全：白名单预置缺失时自动补齐（不覆盖已配置条目）
+                missing_presets = [p for p in PRESET_PROVIDERS if p["id"] not in self._providers]
+                for p in missing_presets:
+                    self._providers[p["id"]] = ProviderConfig.model_validate(p)
                 migrated = self._decrypt_all()
-                if pruned or migrated:
-                    # 清理 / 明文迁移结果立即写回，避免下次加载重复迁移
+                if pruned or migrated or missing_presets:
+                    # 清理 / 补齐 / 明文迁移结果立即写回，避免下次加载重复迁移
                     self._save()
                 return
         self._seed_presets()

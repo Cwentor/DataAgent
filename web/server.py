@@ -14,8 +14,8 @@
 
 受保护路由:
     POST /api/query     -> 完整链路（需 Bearer JWT 或会话）
-    GET/POST /api/settings/providers        -> 供应商列表 / 创建（创建已停用：仅 OpenAI / Anthropic）
-    PUT/DELETE /api/settings/providers/<id> -> 供应商更新 / 删除（删除已停用：预置不可删）
+    GET/POST /api/settings/providers        -> 供应商列表 / 创建自定义（协议限白名单，响应不含 api_key）
+    PUT/DELETE /api/settings/providers/<id> -> 供应商更新 / 删除（预置供应商拒绝删除）
     POST /api/settings/providers/test       -> 连通性探测（极小 ping 文本，返回延时）
     POST /api/settings/providers/<id>/reveal -> 查看已保存 API Key（显式动作，记审计）
 
