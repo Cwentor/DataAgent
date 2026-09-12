@@ -1,10 +1,10 @@
 /* DataAgent 独立登录页：深蓝氛围 + 玻璃拟态居中卡片 */
 
 :root {
-  --accent: #4f6ef7;
-  --accent-dark: #3b56d4;
-  --text: #1a1d2e;
-  --muted: #6b7280;
+  --accent: #2f6bff;
+  --accent-dark: #1f4fd6;
+  --text: #171c30;
+  --muted: #67718c;
   --danger: #b91c1c;
 }
 
@@ -26,8 +26,8 @@ body.login-page {
   position: fixed; border-radius: 50%; filter: blur(90px); opacity: .35;
   pointer-events: none; z-index: 0;
 }
-.glow-a { width: 420px; height: 420px; left: -120px; top: -120px; background: #4f6ef7; }
-.glow-b { width: 380px; height: 380px; right: -100px; bottom: -120px; background: #12b8cf; }
+.glow-a { width: 420px; height: 420px; left: -120px; top: -120px; background: #2f6bff; }
+.glow-b { width: 380px; height: 380px; right: -100px; bottom: -120px; background: #00b8d9; }
 
 .login-stage {
   position: relative; z-index: 1;
@@ -52,9 +52,9 @@ body.login-page {
 .login-logo {
   display: inline-flex; align-items: center; justify-content: center;
   width: 56px; height: 56px; border-radius: 14px;
-  background: linear-gradient(135deg, var(--accent), #12b8cf);
+  background: linear-gradient(135deg, var(--accent), #00b8d9);
   font-size: 30px; font-weight: 800; color: #fff;
-  box-shadow: 0 10px 30px rgba(79, 110, 247, 0.45);
+  box-shadow: 0 10px 30px rgba(47, 107, 255, 0.45);
   margin-bottom: 14px;
 }
 .login-brand h1 { margin: 0; font-size: 26px; letter-spacing: .5px; }
@@ -101,7 +101,7 @@ body.login-page {
 .control input:focus {
   border-color: var(--accent);
   background: rgba(255, 255, 255, 0.09);
-  box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.25);
+  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.28);
 }
 
 .pw-eye {
@@ -129,7 +129,7 @@ body.login-page {
   border: none; border-radius: 11px; cursor: pointer;
   background: linear-gradient(135deg, var(--accent), var(--accent-dark));
   color: #fff; font-size: 15.5px; font-weight: 700; letter-spacing: 4px;
-  box-shadow: 0 10px 26px rgba(59, 86, 212, 0.45);
+  box-shadow: 0 10px 26px rgba(31, 79, 214, 0.45);
   transition: transform .12s, box-shadow .12s, filter .12s;
 }
 .login-submit:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
