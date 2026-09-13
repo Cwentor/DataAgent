@@ -28,65 +28,14 @@
         </div>
       </div>
 
-      <button type="button" id="new-thread-btn" class="side-new" title="开启新分析线程（重置工作区）">
+      <button type="button" id="new-thread-btn" class="side-new" title="开启新对话（当前对话与产物将保留在会话历史中）">
         <!-- Lucide "plus" -->
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
              stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
         <span class="side-label">新对话</span>
       </button>
 
-      <!-- 视图切换：主区在「对话」与四类产物视图之间切换 -->
-      <nav class="side-nav" aria-label="视图切换">
-        <button type="button" class="side-nav-item active" data-view="chat">
-          <!-- Lucide "message-square" -->
-          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-          </svg>
-          <span class="side-label">对话</span>
-          <span id="nav-chat-dot" class="nav-dot hidden" title="等待你的输入"></span>
-        </button>
-        <button type="button" class="side-nav-item" data-view="report">
-          <!-- Lucide "file-text" -->
-          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>
-            <path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>
-          </svg>
-          <span class="side-label">执行报告</span>
-          <em id="badge-report" class="nav-badge hidden"></em>
-        </button>
-        <button type="button" class="side-nav-item" data-view="charts">
-          <!-- Lucide "chart-column" -->
-          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>
-          </svg>
-          <span class="side-label">图表</span>
-          <em id="badge-charts" class="nav-badge hidden"></em>
-        </button>
-        <button type="button" class="side-nav-item" data-view="code">
-          <!-- Lucide "code" -->
-          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
-          </svg>
-          <span class="side-label">代码沙箱</span>
-          <em id="badge-code" class="nav-badge hidden"></em>
-        </button>
-        <button type="button" class="side-nav-item" data-view="data">
-          <!-- Lucide "table" -->
-          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/>
-            <path d="M3 9h18"/><path d="M3 15h18"/>
-          </svg>
-          <span class="side-label">数据审计</span>
-          <em id="badge-data" class="nav-badge hidden"></em>
-        </button>
-      </nav>
-
-      <!-- 会话历史（本机最近 20 条） -->
+      <!-- 会话历史（本机最近 20 条，每条绑定自己的一套产物） -->
       <div class="side-history">
         <div class="side-section-head">会话历史</div>
         <div id="thread-list" class="thread-list">
@@ -168,6 +117,30 @@
           <button type="button" id="export-html" class="mini-btn" title="导出 HTML 报告">⬇ HTML</button>
         </div>
       </header>
+
+      <!-- 视图切换 Tab（对话上方）：对话与四类产物视图绑定当前会话 -->
+      <nav class="view-tabs" id="view-tabs" aria-label="视图切换">
+        <button type="button" class="view-tab active" data-view="chat">
+          <span class="tab-label">对话</span>
+          <span id="nav-chat-dot" class="nav-dot hidden" title="等待你的输入"></span>
+        </button>
+        <button type="button" class="view-tab" data-view="report">
+          <span class="tab-label">执行报告</span>
+          <em id="badge-report" class="nav-badge hidden"></em>
+        </button>
+        <button type="button" class="view-tab" data-view="charts">
+          <span class="tab-label">图表</span>
+          <em id="badge-charts" class="nav-badge hidden"></em>
+        </button>
+        <button type="button" class="view-tab" data-view="code">
+          <span class="tab-label">代码沙箱</span>
+          <em id="badge-code" class="nav-badge hidden"></em>
+        </button>
+        <button type="button" class="view-tab" data-view="data">
+          <span class="tab-label">数据审计</span>
+          <em id="badge-data" class="nav-badge hidden"></em>
+        </button>
+      </nav>
 
       <!-- 未配置可用模型时的轻量引导横幅 -->
       <section id="model-banner" class="model-banner hidden">
