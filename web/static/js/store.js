@@ -20,6 +20,9 @@
     agentStatus: "idle",
     /** 当前轮次（turn_id）。 */
     turnId: "",
+    /** 快照代际号：每次整体替换状态（reset / loadSnapshot）自增，
+     *  供对话流等渲染方感知「会话切换」并强制全量重建。 */
+    generation: 0,
     /** 当前任务 DAG：[{id, title, kind, status}]。 */
     activePlan: [],
     /** 左栏时间线：[{kind, ...}]（kind: user|plan|tool|reflection|hitl|done|error）。 */
@@ -63,7 +66,32 @@
       state.finalReport = "";
       state.hitlState = null;
       state.turnId = "";
+      state.generation++;
       emit("activePlan"); emit("timelineEvents"); emit("currentArtifacts"); emit("hitlState");
+    },
+
+    /** 载入会话快照：整体替换状态并广播（时间线 uid 由快照原样带回）。
+     *  @param {{timelineEvents?:Array, activePlan?:Array,
+     *           currentArtifacts?:Object, finalReport?:string}} snap */
+    loadSnapshot: function (snap) {
+      snap = snap || {};
+      state.timelineEvents = (snap.timelineEvents || []).slice();
+      state.activePlan = (snap.activePlan || []).slice();
+      var arts = snap.currentArtifacts || {};
+      state.currentArtifacts = {
+        reports: (arts.reports || []).slice(),
+        charts: (arts.charts || []).slice(),
+        codes: (arts.codes || []).slice(),
+        tables: (arts.tables || []).slice()
+      };
+      state.finalReport = snap.finalReport || "";
+      state.hitlState = null; // HITL 澄清不跨会话恢复
+      state.turnId = "";
+      state.running = false;
+      state.agentStatus = "idle";
+      state.generation++;
+      emit("activePlan"); emit("timelineEvents"); emit("currentArtifacts");
+      emit("hitlState"); emit("running"); emit("agentStatus");
     },
 
     setRunning: function (v) {

@@ -69,22 +69,31 @@
 /* 通用行内小图标 */
 .ico { width: 17px; height: 17px; flex: 0 0 auto; }
 
-/* 视图切换导航 */
-.side-nav { display: flex; flex-direction: column; gap: 2px; }
-.side-nav-item {
+/* 视图切换 Tab（对话上方，绑定当前会话） */
+.view-tabs {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 2px;
+  padding: 0 18px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.view-tab {
   position: relative;
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 10px; border: none; border-radius: 9px;
-  background: transparent; color: var(--muted);
-  font-size: 13.5px; text-align: left; cursor: pointer; font-family: inherit;
-  transition: background .14s, color .14s;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 10px 12px; border: none; background: transparent;
+  color: var(--muted); font-size: 13.5px; font-weight: 600;
+  cursor: pointer; font-family: inherit; white-space: nowrap;
+  transition: color .14s;
 }
-.side-nav-item .ico { opacity: .8; }
-.side-nav-item:hover { background: #eaedf8; color: var(--text); }
-.side-nav-item.active {
-  background: var(--accent-soft); color: var(--accent-dark); font-weight: 600;
+.view-tab:hover { color: var(--text); }
+.view-tab.active { color: var(--accent-dark); }
+.view-tab.active::after {
+  content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px;
+  height: 2px; border-radius: 2px; background: var(--accent);
 }
-.side-nav-item.active .ico { opacity: 1; color: var(--accent); }
+.view-tab .nav-badge { margin-left: 2px; }
+.view-tab .nav-dot { margin-left: 3px; }
 
 /* 产物计数徽标 / 等待输入圆点 */
 .nav-badge {
@@ -530,10 +539,10 @@ button.act-head:hover .act-label { color: var(--accent-dark); }
   .side-brand { justify-content: center; padding: 2px 0 4px; }
   .side-brand-meta, .side-label, .side-history, .user-meta, .caret { display: none; }
   .side-new { padding: 10px; }
-  .side-nav-item, .side-foot-btn { justify-content: center; padding: 10px; }
-  .nav-badge { position: absolute; top: 2px; right: 2px; margin: 0; transform: scale(.85); }
-  .nav-dot { position: absolute; top: 6px; right: 6px; margin: 0; }
-  .side-nav-item, .side-pop-anchor { width: 100%; display: flex; justify-content: center; }
-  .side-foot-btn, .side-nav { width: 100%; }
+  .side-foot-btn { justify-content: center; padding: 10px; }
+  .side-pop-anchor { width: 100%; display: flex; justify-content: center; }
+  .side-foot-btn { width: 100%; }
   .user-btn { justify-content: center; padding: 6px; }
+  .view-tabs { padding: 0 10px; }
+  .view-tab { padding: 10px 9px; font-size: 13px; }
 }

@@ -35,6 +35,7 @@
   var windowStart = 0;   // 当前窗口起点
   var windowEnd = -1;    // 当前窗口终点（不含）
   var rafPending = false;
+  var lastGen = -1;      // 已渲染的快照代际号（会话切换检测）
 
   function $(id) { return document.getElementById(id); }
 
@@ -368,12 +369,10 @@
 
   /** 总渲染入口：增量扫描 + 虚拟化/简单协调 + 空态与运行指示。 */
   function render(state) {
-    // 计划卡状态就地刷新（避免整卡重排）
-    if (state.activePlan.length) { updatePlanCard(state.activePlan); }
-
-    var events = state.timelineEvents;
-    // 会话重置（事件数收缩）：全量清空重建（含高度缓存与窗口状态）
-    if (events.length < scanIdx) {
+    // 会话切换（reset / loadSnapshot 代际变更）：全量清空重建
+    // （含高度缓存与窗口状态），再按快照事件序列重新协调。
+    if (state.generation !== lastGen) {
+      lastGen = state.generation;
       listBox.innerHTML = "";
       listBox.appendChild(spacerTop);
       listBox.appendChild(spacerBottom);
@@ -383,6 +382,11 @@
       windowStart = 0;
       windowEnd = -1;
     }
+
+    // 计划卡状态就地刷新（避免整卡重排）
+    if (state.activePlan.length) { updatePlanCard(state.activePlan); }
+
+    var events = state.timelineEvents;
     for (var i = scanIdx; i < events.length; i++) { ensureUid(events[i]); }
     scanIdx = events.length;
 

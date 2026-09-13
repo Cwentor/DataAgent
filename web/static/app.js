@@ -9,7 +9,8 @@
  * 主流程（SSE 事件驱动）：
  *   提问 -> GET /api/v1/agent/chat/stream（fetch 流式）-> AgentStreamEvent
  *   -> AgentStore（plan/timeline/artifacts/hitl）
- *   -> 中央对话流 + 右侧执行流程 + 侧边栏切换的产物视图。
+ *   -> 中央对话流 + 顶部 Tab 切换的产物视图（执行报告/图表/代码沙箱/数据审计，
+ *      与会话一一绑定，历史会话可整轮恢复）。
  */
 (function () {
   "use strict";
@@ -637,8 +638,9 @@
 
   function handleAgentEvent(ev) {
     if (ev.event === "__stream_end__") {
-      // 传输层结束：done/error 事件已驱动状态；此处兜底复位
+      // 传输层结束：done/error 事件已驱动状态；此处兜底复位并归档会话
       if (AgentStore.get().running) { AgentStore.setRunning(false); }
+      AgentSidebarUI.archiveThread();
       if (!$("run").disabled) { return; }
       $("run").disabled = false;
       $("run").textContent = "开始分析";
@@ -723,12 +725,13 @@
         AgentStore.setRunning(false);
         $("run").disabled = false;
         $("run").textContent = "开始分析";
+        AgentSidebarUI.archiveThread(); // 澄清挂起时也归档，切走再回可看到澄清卡
         renderHitl(AgentStore.get());
         break;
 
       case "artifact_emit":
         // 主对话页只用于对话：产物入账后不自动跳转视图，
-        // 由侧边栏徽标提示（计数亮起），用户自行切换查看。
+        // 由顶部 Tab 徽标提示（计数亮起），用户自行切换查看。
         if (p.artifact) {
           AgentStore.pushArtifact(p.artifact);
         }
@@ -739,6 +742,7 @@
         AgentStore.setRunning(false);
         $("run").disabled = false;
         $("run").textContent = "开始分析";
+        AgentSidebarUI.archiveThread(); // 会话产物随整轮结果立即持久化
         break;
 
       case "error":
@@ -746,6 +750,7 @@
         AgentStore.setRunning(false);
         $("run").disabled = false;
         $("run").textContent = "开始分析";
+        AgentSidebarUI.archiveThread();
         toast(p.error || "执行出错", "err");
         break;
     }
@@ -759,6 +764,7 @@
         AgentStore.setRunning(false);
         $("run").disabled = false;
         $("run").textContent = "开始分析";
+        AgentSidebarUI.archiveThread();
         showError("Agent 流连接失败，请重试");
       }
     };
@@ -771,6 +777,8 @@
     currentQuery = q;
     hitlResumeToken = "";
     if (activeStream) { activeStream.abort(); }
+    // 会话绑定：上一会话（含其产物）先归档进历史，本次提问登记为新会话
+    AgentSidebarUI.beginThread(q);
     AgentStore.reset();
     AgentStreamUI.resetScroll();
     AgentCanvas.reset();
@@ -789,8 +797,6 @@
     );
     activeStream = stream;
     window.__activeStream = stream; // 供「新对话」中断当前流
-    // 线程历史：提交即记录（含当前事件数，供历史列表展示规模）
-    AgentSidebarUI.recordThread(q, AgentStore.get().timelineEvents.length);
   }
 
   function bindEvents() {
