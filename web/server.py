@@ -8,6 +8,9 @@
     GET  /login         -> 独立登录页（未登录强制落地页）
     GET  /static/*      -> 静态资源
     GET  /api/health    -> 健康检查
+    GET  /api/v1/agent/chat/stream -> SSE 流式编排（run 注册表：后台执行 +
+                                  事件缓冲 + seq 游标重放，支持并行会话/断线重连）
+    GET  /api/v1/agent/runs/<run_id> -> run 状态快照（属主校验 fail-closed）
     POST /api/auth/login   -> 登录：校验用户名/口令，签发 JWT + 会话
     POST /api/auth/logout  -> 登出：吊销会话（需 X-Session-ID 或 session Cookie）
     GET  /api/auth/me      -> 当前身份（需 Bearer JWT 或会话）
@@ -31,11 +34,8 @@ X-Request-ID 请求头（或服务端生成）贯穿请求处理与审计链路�
 from __future__ import annotations
 
 import json
-import queue
 import sys
-import threading
 import time
-import uuid as uuid_mod
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -50,9 +50,9 @@ from auth.tokens import create_token
 from config import settings
 from core.orchestrator.agent import run_agent
 from core.orchestrator.state import AgentState
-from providers.context import pop_request_model, set_request_model
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
 from web import providers_api
+from web.runs import default_run_registry
 from web.service import ensure_db, run_query
 from web.tasks import default_task_manager
 
@@ -72,7 +72,8 @@ MIME = {
 _access_logger = get_logger("web.access")
 _auth_logger = get_logger("web.auth")
 
-# HITL 暂停态（进程内存；属主绑定）：resume_token -> {owner, state}
+# HITL 暂停态：由 web.runs.RunRegistry 按属主管理（run 级缓冲 + 原子领取）；
+# _AGENT_PAUSED_STATES 仅保留给非流式 /api/agent/run 端点（同步编排路径）。
 _AGENT_PAUSED_STATES: dict[str, dict] = {}
 
 
@@ -159,6 +160,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_me()
         if parsed.path.startswith("/api/tasks/"):
             return self._get_task(parsed.path[len("/api/tasks/") :])
+        if parsed.path.startswith("/api/v1/agent/runs/"):
+            return self._get_agent_run_status(parsed.path[len("/api/v1/agent/runs/") :])
         if parsed.path == "/api/v1/agent/chat/stream":
             return self._get_agent_chat_stream()
         if parsed.path == "/api/schema/summary":
@@ -375,6 +378,23 @@ class Handler(BaseHTTPRequestHandler):
         )
         self._send_json({"task_id": task_id, "status": "pending"}, 202)
 
+    def _get_agent_run_status(self, run_id: str) -> None:
+        """GET /api/v1/agent/runs/<run_id>：run 状态快照（轮询驱动会话列表徽标）。
+
+        属主校验 fail-closed：非属主（含未知 run_id）一律 404，不泄露存在性；
+        admin 角色全局可见（与任务快照 / 导出下载口径一致）。
+        """
+        ctx = self._authenticate()
+        if ctx is None:
+            return self._send_json({"error": "unauthorized"}, 401)
+        set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+        owner = None if "admin" in ctx.roles else ctx.username
+        snap = default_run_registry().status(run_id.strip(), owner=owner)
+        if snap is None:
+            return self._send_json({"error": "run not found"}, 404)
+        snap.pop("resume_token", None)  # 恢复句柄仅经事件流下发，轮询快照不暴露
+        return self._send_json(snap)
+
     def _get_task(self, task_id: str) -> None:
         """查询异步任务状态与结果（认证保护；未知 task_id 或非属主返回 404）。
 
@@ -553,16 +573,19 @@ class Handler(BaseHTTPRequestHandler):
     # 受保护：/api/v1/agent/chat/stream（SSE 流式 Data Agent 会话）
     # ------------------------------------------------------------------ #
     def _get_agent_chat_stream(self) -> None:
-        """SSE 流式编排端点（EventSource 语义走 GET，鉴权用 Bearer/会话头）。
+        """SSE 流式编排端点（run 注册表版：执行与连接解耦，支持并行会话）。
 
-        协议：``text/event-stream``，每帧 ``data: <AgentStreamEvent JSON>\\n\\n``；
-        事件类型与前端 ``AgentEventType`` 契约一一对应（plan_created / step_start /
-        tool_start / tool_end / reflection / hitl_request / artifact_emit / done /
-        error）。编排器在后台线程同步执行，事件经有界队列转发到响应流——
-        编排异常 / 客户端断开都不会崩流，异常统一收敛为 error 事件后正常收尾。
+        协议：``text/event-stream``，每帧 ``data: <AgentStreamEvent JSON>\\n\\n``
+        （事件含单调 ``seq`` 游标字段）；空闲时以 ``: ping`` 注释帧心跳。
+        编排由 ``web.runs.RunRegistry`` 在后台线程执行并持续缓冲事件——
+        客户端断开仅退订，run 继续跑完；重连按游标重放，刷新页面可恢复进度。
 
-        查询参数：query（必填）、human_reply / resume_token（HITL 恢复）、
-        provider_id / model_id（请求级模型切换）。
+        三种请求形态（响应头 X-Run-Id 登记本轮 run，前端会话元信息持久化）：
+        - ``?query=...&thread=<会话id>``：启动新 run，从 seq 0 重放并实时续传；
+          会话记忆键 ``webui:<thread>``（owner 强绑定，同会话追问自动继承历史）；
+        - ``?run_id=<id>&after=<seq>``：纯游标订阅（断线重连 / 刷新恢复）；
+        - ``?query=...&resume_token=<t>&human_reply=...``：恢复 HITL 暂停的
+          run（同一 run 续写，seq 连续）；token 无效以 error 事件在流内收敛。
         """
         ctx = self._authenticate()
         if ctx is None:
@@ -578,133 +601,101 @@ class Handler(BaseHTTPRequestHandler):
                 if values:
                     params[key] = values[0]
         query = params.get("query", "").strip()
-        if not query:
-            return self._send_json({"error": "query is required"}, 400)
         human_reply = params.get("human_reply", "").strip() or None
         resume_token = params.get("resume_token", "").strip() or None
         provider_id = params.get("provider_id", "").strip() or None
         model_id = params.get("model_id", "").strip() or None
+        run_id = params.get("run_id", "").strip() or None
+        thread = params.get("thread", "").strip()
+        try:
+            after = max(0, int(params.get("after", "0").strip() or "0"))
+        except ValueError:
+            after = 0
 
         set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
+        registry = default_run_registry()
+        # admin 全局可见（与任务快照 / 导出下载的属主放行口径一致）
+        owner = None if "admin" in ctx.roles else ctx.username
 
-        # SSE 响应头：close-delimited 流（无 Content-Length，写完关闭连接）
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_header("Connection", "close")
-        self.end_headers()
+        # 形态 2：纯游标订阅（重连 / 刷新恢复）——run 未知直接 404
+        if run_id and not resume_token:
+            if registry.get(run_id, owner=owner) is None:
+                return self._send_json({"error": "run not found"}, 404)
+            return self._sse_follow(registry, run_id, after, owner)
 
-        events_q: queue.Queue[dict | None] = queue.Queue(maxsize=256)
-
-        def _observer(event: dict) -> None:
-            """编排事件 -> 队列（有界：队列满时丢弃最旧事件，防止编排线程阻塞）。
-
-            run_agent 内置的 hitl_request（不含 resume_token）在此丢弃——
-            SSE 端点在编排返回后用带 resume_token 的版本统一下发。
-            """
-            if event.get("event") == "hitl_request":
-                return
-            try:
-                events_q.put_nowait(event)
-            except queue.Full:
+        # 形态 3：HITL 恢复（resume_token 定位 run；无效以 error 事件收敛，
+        # 与旧契约一致：HTTP 200 事件流内报错，不抛裸 4xx）。
+        # 属主校验用 ctx.username 严格匹配（不提供 admin 放行——恢复是写操作，
+        # 与只读的订阅/快照不同权）。
+        if resume_token:
+            run = (
+                registry.resume(run_id, human_reply or "", owner=ctx.username)
+                if run_id
+                else registry.resume_by_token(resume_token, human_reply or "", owner=ctx.username)
+            )
+            if run is None:
+                self._sse_open(run_id or "")
                 try:
-                    events_q.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    events_q.put_nowait(event)
-                except queue.Full:
-                    pass
-
-        def _run_orchestration() -> None:
-            """后台执行编排（同线程 contextvar 对观察者可见）。"""
-            pop_request_model()
-            if provider_id or model_id:
-                set_request_model(provider_id or "", model_id or "")
-            try:
-                resume_state: AgentState | None = None
-                if resume_token:
-                    paused = _AGENT_PAUSED_STATES.pop(resume_token, None)
-                    if paused is None or paused.get("owner") != ctx.username:
-                        events_q.put(
-                            {
-                                "turn_id": "",
-                                "event": "error",
-                                "timestamp": int(time.time() * 1000),
-                                "payload": {"error": "resume token 无效或已过期"},
-                            }
-                        )
-                        return
-                    resume_state = AgentState.model_validate(paused["state"])
-                    resume_state = resume_state.model_copy(update={"human_reply": human_reply})
-                result = run_agent(
-                    query,
-                    session_id=ctx.session_id or ctx.username,
-                    human_reply=None if resume_state else human_reply,
-                    resume_state=resume_state,
-                    on_event=_observer,
-                )
-                if isinstance(result, AgentState):
-                    # HITL 中断：登记属主化暂停态，经事件流下发恢复句柄
-                    token = f"hitl-{uuid_mod.uuid4().hex[:16]}"
-                    _AGENT_PAUSED_STATES[token] = {
-                        "owner": ctx.username,
-                        "state": result.model_dump(mode="json"),
-                    }
-                    events_q.put(
+                    self._sse_write(
                         {
-                            "turn_id": result.turn_id,
-                            "event": "hitl_request",
+                            "turn_id": "",
+                            "event": "error",
                             "timestamp": int(time.time() * 1000),
-                            "payload": {
-                                "hitl": {
-                                    "question": result.clarification or "请补充分析需求",
-                                    "resume_token": token,
-                                }
-                            },
+                            "payload": {"error": "resume token 无效或已过期"},
                         }
                     )
-            except Exception as exc:  # 编排异常收敛为 error 事件（不崩流）
-                events_q.put(
-                    {
-                        "turn_id": "",
-                        "event": "error",
-                        "timestamp": int(time.time() * 1000),
-                        "payload": {"error": f"{type(exc).__name__}: {exc}"},
-                    }
-                )
-            finally:
-                pop_request_model()
-                events_q.put(None)  # 哨兵：流结束
+                except OSError:
+                    pass
+                finally:
+                    self.close_connection = True
+                return
+            return self._sse_follow(registry, run.run_id, run.resume_baseline, owner)
 
-        worker = threading.Thread(target=_run_orchestration, daemon=True)
-        worker.start()
+        # 形态 1：新提问启动 run（thread 缺省回退认证会话键——旧客户端兼容）
+        if not query:
+            return self._send_json({"error": "query is required"}, 400)
+        session_key = f"webui:{thread}" if thread else (ctx.session_id or ctx.username)
+        # 幂等保护（重连/重发防护）：同一会话 + 同一提问且 run 仍在执行时复用，
+        # 严禁重复启动编排（重复执行会产出多份同类产物、互相覆盖）
+        existing = registry.find_active(ctx.username, session_key, query)
+        run = existing or registry.start(
+            query,
+            owner=ctx.username,
+            session_key=session_key,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        return self._sse_follow(registry, run.run_id, 0, owner)
 
+    def _sse_follow(self, registry, run_id: str, after: int, owner: str | None) -> None:
+        """打开 SSE 响应并按游标订阅 run 事件流（断开仅退订，run 继续执行）。"""
+        self._sse_open(run_id)
         try:
-            while True:
-                try:
-                    event = events_q.get(timeout=300)
-                except queue.Empty:
-                    event = {
-                        "turn_id": "",
-                        "event": "error",
-                        "timestamp": int(time.time() * 1000),
-                        "payload": {"error": "编排超时（300s 无事件），连接已终止"},
-                    }
-                    self._sse_write(event)
-                    break
-                if event is None:
-                    break
-                self._sse_write(event)
+            registry.subscribe(run_id, after, self._sse_write, owner=owner, on_idle=self._sse_ping)
         except (BrokenPipeError, ConnectionResetError, OSError):
-            return  # 客户端断开：编排线程继续跑完（结果弃置），响应流终止
+            return  # 客户端断开：编排线程继续跑完并入缓冲，可重连重放
         finally:
             try:
                 self.wfile.flush()
                 self.close_connection = True
             except OSError:
                 pass
+
+    def _sse_open(self, run_id: str) -> None:
+        """SSE 响应头（X-Run-Id 登记本轮 run，供游标重放与刷新恢复）。"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        if run_id:
+            self.send_header("X-Run-Id", run_id)
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _sse_ping(self) -> None:
+        """SSE 注释帧心跳（防代理层闲置断连；前端帧解析忽略注释行）。"""
+        self.wfile.write(b": ping\n\n")
+        self.wfile.flush()
 
     def _sse_write(self, event: dict) -> None:
         """写一帧 SSE 事件（``data: <json>\\n\\n``）并立即 flush。"""
