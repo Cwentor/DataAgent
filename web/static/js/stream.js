@@ -28,6 +28,11 @@
    * @property {Promise<void>} done 流结束（含 abort / 正常收尾 / 失败）
    */
 
+  /** 默认停滞阈值：连续 120s 未收到任何字节（含服务端 15s 心跳）判定连接已死。
+   *  服务端心跳由订阅线程独立驱动，慢任务（LLM 最坏 120s）期间照发，
+   *  因此该阈值判定的是"连接是否活着"而非"任务是否慢"。 */
+  var DEFAULT_STALL_MS = 120000;
+
   var agentEventSource = {
     /**
      * 打开一次 SSE 流。
@@ -39,6 +44,9 @@
      * @param {(runId: string) => void} [opts.onOpen] 响应头到达（携 X-Run-Id）
      * @param {(lastSeq: number) => string} [opts.reconnectUrl] 重连 URL 工厂
      *        （游标续订：携 after=lastSeq 重放增量，严禁整轮重发 query）
+     * @param {() => void} [opts.onStall] 连接停滞（stallTimeoutMs 内零字节）回调：
+     *        调用方据此把中断上屏；流自身随即终止且不再重试
+     * @param {number} [opts.stallTimeoutMs] 停滞阈值（默认 120000；0 = 关闭看门狗）
      * @returns {StreamHandle}
      */
     open: function (url, opts) {
@@ -49,6 +57,32 @@
       var lastSeq = 0;
       var resolveDone;
       var done = new Promise(function (res) { resolveDone = res; });
+      // 停滞看门狗：零字节超时 => 连接半死（休眠 / 代理丢包 / TCP 半开），
+      // fetch/read 永不 reject 的静默挂起在此被主动发现
+      var stallMs = opts.stallTimeoutMs == null ? DEFAULT_STALL_MS : opts.stallTimeoutMs;
+      var lastChunkAt = Date.now();
+      var stallTimer = null;
+
+      function stopWatchdog() {
+        if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+      }
+
+      function startWatchdog() {
+        if (!stallMs || stallTimer) { return; }
+        // 检查间隔取阈值 1/8（最短 1s）：既及时又不至于高频空转
+        var tick = Math.max(1000, Math.floor(stallMs / 8));
+        stallTimer = setInterval(function () {
+          if (aborted || Date.now() - lastChunkAt < stallMs) { return; }
+          stopWatchdog();
+          aborted = true; // 复用早退分支：阻止后续重连与事件处理
+          controller.abort();
+          if (opts.onStall) {
+            try { opts.onStall(); } catch (e) { /* 回调异常不阻断收尾 */ }
+          }
+          opts.onEvent({ event: "__stream_end__", payload: {}, turn_id: "", timestamp: 0 });
+          resolveDone();
+        }, tick);
+      }
 
       function headers() {
         var h = { "Accept": "text/event-stream" };
@@ -88,9 +122,14 @@
             function pump() {
               return reader.read().then(function (chunk) {
                 if (chunk.done) {
+                  stopWatchdog();
                   opts.onEvent({ event: "__stream_end__", payload: {}, turn_id: "", timestamp: 0 });
+                  resolveDone(); // 正常收尾：handle.done 在全部终止路径都 resolve
                   return;
                 }
+                // 活动信号取「字节到达」而非业务事件：服务端 : ping 心跳同样续命，
+                // 保证慢任务期间不会被误判为连接中断
+                lastChunkAt = Date.now();
                 buf += decoder.decode(chunk.value, { stream: true });
                 var idx;
                 while ((idx = buf.indexOf("\n\n")) >= 0) {
@@ -116,21 +155,25 @@
           })
           .catch(function (err) {
             if (aborted || (err && err.name === "AbortError")) { return; }
-            if (err && err.message === "unauthorized") { return; }
+            if (err && err.message === "unauthorized") { stopWatchdog(); resolveDone(); return; }
             if (retries < maxRetries) {
               retries++;
               var delay = Math.min(500 * Math.pow(2, retries - 1), 4000);
+              // 重连期间继续监视：断线到重连成功之间也属"零字节"，同样应被察觉
               setTimeout(connect, delay);
               return;
             }
+            stopWatchdog();
             if (opts.onError) { opts.onError(err); }
             opts.onEvent({ event: "__stream_end__", payload: {}, turn_id: "", timestamp: 0 });
+            resolveDone();
           });
       }
 
       connect();
+      startWatchdog();
       return {
-        abort: function () { aborted = true; controller.abort(); resolveDone(); },
+        abort: function () { aborted = true; stopWatchdog(); controller.abort(); resolveDone(); },
         done: done,
         lastSeq: function () { return lastSeq; }
       };

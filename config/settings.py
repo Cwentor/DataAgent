@@ -98,6 +98,10 @@ AGENT_RUN_MAX_RUNS: int = int(os.getenv("AGENT_RUN_MAX_RUNS", "200"))
 AGENT_RUN_MAX_EVENTS: int = int(os.getenv("AGENT_RUN_MAX_EVENTS", "5000"))
 AGENT_RUN_TTL_SECONDS: float = float(os.getenv("AGENT_RUN_TTL_SECONDS", "3600"))
 AGENT_RUN_KEEPALIVE_SECONDS: float = float(os.getenv("AGENT_RUN_KEEPALIVE_SECONDS", "15"))
+# 编排空闲守卫：连接活着但编排长时间无事件（卡死）时终止订阅。阈值不得低于
+# 单次 LLM 调用的合法耗时上界（providers 适配器硬编码 60s × JSON 模式降级重试
+# 1 次 = 120s），否则慢调用会被误判为卡死。
+AGENT_RUN_IDLE_TIMEOUT_SECONDS: float = float(os.getenv("AGENT_RUN_IDLE_TIMEOUT_SECONDS", "300"))
 
 # Multi-Tool Agent 调度上限（Max Steps：3~5 步，杜绝无限工具循环）
 MAX_AGENT_STEPS: int = int(os.getenv("MAX_AGENT_STEPS", "5"))

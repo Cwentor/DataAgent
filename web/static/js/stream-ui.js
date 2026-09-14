@@ -12,12 +12,12 @@
 (function () {
   "use strict";
 
-  var PLAN_STATUS_ICON = { pending: "○", running: "◌", done: "●", failed: "✕" };
-  var PLAN_STATUS_TEXT = { pending: "等待", running: "执行中", done: "完成", failed: "失败" };
+  var PLAN_STATUS_ICON = { pending: "○", running: "◌", done: "●", failed: "✕", interrupted: "⚠" };
+  var PLAN_STATUS_TEXT = { pending: "等待", running: "执行中", done: "完成", failed: "失败", interrupted: "已中断" };
   var TOOL_LABELS = AgentProtocol.TOOL_LABELS;
   var VIRTUALIZE_THRESHOLD = 50; // 超过该条数后启用窗口化（规格：>50 步虚拟化）
   var BUFFER = 6;                // 视口上下各多渲染的条目数
-  var EST_H = { user: 44, plan: 150, tool: 46, reflection: 36, hitl: 150, done: 52, error: 44 };
+  var EST_H = { user: 44, plan: 150, tool: 46, reflection: 36, hitl: 150, done: 52, error: 44, interrupt: 48 };
 
   var TOOL_BADGES = {
     futurebi_dsl_query: { cls: "dsl", text: "DSL" },
@@ -156,12 +156,52 @@
     return div;
   }
 
+  /** 任务中断卡：连接停滞 / 意外结束时的显式告知（旧实现静默消失，用户无从知晓）。 */
+  function elInterrupt(item) {
+    var div = document.createElement("div");
+    div.className = "chat-interrupt";
+    div.innerHTML = '<span class="ci-icon">⚠</span>'
+      + '<span class="ci-text">' + esc(item.error || "任务已中断") + "</span>";
+    return div;
+  }
+
   function elThinking() {
     var div = document.createElement("div");
     div.className = "chat-thinking";
     div.dataset.chatThinking = "1";
-    div.innerHTML = "<span>正在分析</span><span class='dots'></span>";
+    // 旋转圆环（缺口 spinner）+ 文案 + 已执行秒数（持续增长是最直观的"还活着"信号）
+    div.innerHTML = '<span class="spinner" aria-hidden="true"></span>'
+      + "<span>正在分析</span>"
+      + '<span class="elapsed" data-role="elapsed"></span>';
     return div;
+  }
+
+  // ------------------------------------------------------------ 运行耗时计时
+  // render() 每帧重建 thinking 节点，故计时器不持有节点引用：
+  // 每 tick 重新 querySelector 再写入（节点不存在则跳过）。
+  var runStartedAt = 0;
+  var elapsedTimer = null;
+
+  function fmtElapsed(ms) {
+    var s = Math.max(0, Math.floor(ms / 1000));
+    if (s < 60) { return s + "s"; }
+    return Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") + "s";
+  }
+
+  function tickElapsed() {
+    var el = listBox && listBox.querySelector("[data-chat-thinking] .elapsed");
+    if (el && runStartedAt) { el.textContent = fmtElapsed(Date.now() - runStartedAt); }
+  }
+
+  function startElapsed() {
+    runStartedAt = Date.now();
+    if (!elapsedTimer) { elapsedTimer = setInterval(tickElapsed, 1000); }
+    tickElapsed();
+  }
+
+  function stopElapsed() {
+    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+    runStartedAt = 0;
   }
 
   function elEmpty() {
@@ -304,6 +344,7 @@
     if (item.kind === "hitl") { return elHitl(item); }
     if (item.kind === "done") { return elDone(item); }
     if (item.kind === "error") { return elError(item); }
+    if (item.kind === "interrupt") { return elInterrupt(item); }
     return null;
   }
 
@@ -406,10 +447,15 @@
     if (!hasItems && !empty) { listBox.appendChild(elEmpty()); }
     if (hasItems && empty) { empty.remove(); }
 
-    // 运行中指示（时间线末尾）
+    // 运行中指示（时间线末尾）：spinner + 已执行秒数（计时器随 running 启停）
     var oldThinking = listBox.querySelector("[data-chat-thinking]");
     if (oldThinking) { oldThinking.remove(); }
-    if (state.running && hasItems) { listBox.appendChild(elThinking()); }
+    if (state.running && hasItems) {
+      listBox.appendChild(elThinking());
+      if (!runStartedAt) { startElapsed(); } else { tickElapsed(); }
+    } else {
+      stopElapsed();
+    }
 
     autoScroll();
   }
@@ -422,12 +468,13 @@
     if (!target) { return; }
     target.dataset.ended = "1";
     target.classList.remove("node-running");
-    target.classList.add(item.error ? "node-fail" : "node-ok");
+    if (item.interrupted) { target.classList.add("node-interrupted"); }
+    else { target.classList.add(item.error ? "node-fail" : "node-ok"); }
     var stateEl = target.querySelector('[data-role="state"]');
     var durEl = target.querySelector('[data-role="dur"]');
     if (stateEl) {
-      stateEl.textContent = item.error ? "✕ 失败" : "✓ 完成";
-      stateEl.className = "act-meta " + (item.error ? "fail" : "ok");
+      stateEl.textContent = item.interrupted ? "⚠ 已中断" : (item.error ? "✕ 失败" : "✓ 完成");
+      stateEl.className = "act-meta " + (item.interrupted ? "warn" : (item.error ? "fail" : "ok"));
     }
     if (durEl && item.duration_ms != null) { durEl.textContent = fmtDur(item.duration_ms); }
     if (item.output || item.error) {

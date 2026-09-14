@@ -164,9 +164,15 @@ class RunRegistry:
         self,
         max_runs: int | None = None,
         ttl_seconds: float | None = None,
+        idle_timeout_seconds: float | None = None,
     ) -> None:
         self._max_runs = max_runs or settings.AGENT_RUN_MAX_RUNS
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.AGENT_RUN_TTL_SECONDS
+        self._idle_timeout = (
+            idle_timeout_seconds
+            if idle_timeout_seconds is not None
+            else settings.AGENT_RUN_IDLE_TIMEOUT_SECONDS
+        )
         self._runs: dict[str, AgentRun] = {}
         self._lock = threading.Lock()
 
@@ -315,7 +321,9 @@ class RunRegistry:
         - 空洞检测：缓冲溢出丢弃了游标之后的事件时，诚实下发 error 事件收尾，
           严禁静默跳过（用户会误以为事件全部到达）；
         - 空闲心跳：每 AGENT_RUN_KEEPALIVE_SECONDS 无事件调用 on_idle（传输层
-          写 SSE 注释帧），防代理层闲置断连；连续空闲超 300s 下发超时 error。
+          写 SSE 注释帧），防代理层闲置断连；连续空闲超 AGENT_RUN_IDLE_TIMEOUT_SECONDS
+          下发超时 error（该守卫兜底"连接活着但编排卡死"；阈值不可低于单次
+          LLM 合法耗时上界，否则慢调用会被误判）。
         """
         run = self.get(run_id, owner=owner)
         if run is None:
@@ -333,6 +341,7 @@ class RunRegistry:
         if hole_event is not None:
             write_frame(hole_event)
             return
+        idle_limit = self._idle_timeout
         last_activity = time.monotonic()
         while True:
             timed_out = False
@@ -346,8 +355,8 @@ class RunRegistry:
                 write_frame(event)
                 last_activity = time.monotonic()
             if timed_out:
-                if time.monotonic() - last_activity > 300:
-                    write_frame(_error_event("编排超时（300s 无事件），连接已终止"))
+                if time.monotonic() - last_activity > idle_limit:
+                    write_frame(_error_event(f"编排超时（{int(idle_limit)}s 无事件），连接已终止"))
                     return
                 if on_idle is not None:
                     on_idle()
