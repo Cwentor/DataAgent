@@ -473,7 +473,32 @@ button.act-head:hover .act-label { color: var(--accent-dark); }
 .report-content th { background: var(--card-soft); }
 
 /* 图表容器 */
-.charts-content { display: flex; flex-direction: column; gap: 18px; max-width: 960px; margin: 0 auto; }
+.charts-content { display: flex; flex-direction: column; gap: 22px; max-width: 960px; margin: 0 auto; }
+
+/* 轮次分组（产物按「哪一轮对话产出」分块呈现，互不覆盖） */
+.turn-group { display: flex; flex-direction: column; gap: 12px; }
+.turn-group-head {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+  border-left: 3px solid var(--accent); background: var(--accent-soft);
+  border-radius: 0 8px 8px 0; font-size: 12.5px; min-width: 0;
+}
+.turn-group-head .tg-badge {
+  flex: 0 0 auto; font-size: 10.5px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; background: var(--accent); color: #fff; font-family: var(--mono);
+}
+.turn-group-head .tg-q {
+  min-width: 0; color: var(--accent-dark); font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.charts-grid { display: flex; flex-direction: column; gap: 14px; }
+.code-group-body, .data-group-body { display: flex; flex-direction: column; gap: 12px; }
+
+/* 报告视图：每轮报告独立成块 */
+.report-block { margin-bottom: 26px; }
+.report-block:last-child { margin-bottom: 0; }
+.report-block .turn-group-head { margin-bottom: 12px; }
+.report-body h1:first-child, .report-body h2:first-child { margin-top: 0; }
+
 .chart-block {
   border: 1px solid var(--border); border-radius: 12px; padding: 12px;
   box-shadow: var(--shadow-card); background: var(--card);

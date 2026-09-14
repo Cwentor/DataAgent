@@ -114,6 +114,12 @@ button { font-family: inherit; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .thread-item .t-time { flex: 0 0 auto; font-size: 10.5px; color: var(--faint); }
+.thread-item .t-status {
+  flex: 0 0 auto; font-size: 10px; line-height: 1; padding: 3px 6px;
+  border-radius: 999px; background: var(--accent-soft); color: var(--accent-dark);
+  white-space: nowrap;
+}
+.thread-item .t-status[data-status="失败"] { background: var(--danger-soft); color: var(--danger); }
 .thread-item .t-del {
   flex: 0 0 auto; border: none; background: none; color: var(--faint);
   cursor: pointer; font-size: 12px; padding: 2px 6px; border-radius: 6px;

@@ -186,6 +186,8 @@ def clarify_node(state: AgentState) -> AgentState:
     """歧义检测：HITL 门（需求 §2.A ClarificationNode）。
 
     确定性规则：问题过短/无指标词/无时间锚且是多轮首问 => 请求澄清。
+    多轮首问判定：history_digest 非空 = 同会话追问轮，省略指代短句（如
+    「那华南呢」）的语境由 Planner 结合会话历史补全，不再触发澄清门。
     用户已答复（human_reply）时把答复并入 user_query 并继续。
     """
     query = state.user_query.strip()
@@ -193,6 +195,9 @@ def clarify_node(state: AgentState) -> AgentState:
         merged = f"{query}（用户补充：{state.human_reply.strip()}）"
         return state.apply(user_query=merged, human_reply=None, phase="plan", clarification=None)
 
+    if state.history_digest:
+        # 追问轮：有会话历史兜底语境，直接放行给 Planner 消解省略指代
+        return state.apply(phase="plan")
     metric_words = ("gmv", "销量", "金额", "订单", "退款", "率", "数", "额")
     has_metric = any(w in query.lower() for w in metric_words)
     if len(query) >= 12 and has_metric:
@@ -326,6 +331,7 @@ def planner_node(state: AgentState) -> AgentState:
                 state.user_query,
                 schema_digest(profile_enum_values()),
                 error_context=error_context,
+                history_context=state.history_digest or None,
             ),
         )
         if payload:

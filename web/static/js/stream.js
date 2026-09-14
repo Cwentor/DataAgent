@@ -24,8 +24,8 @@
 
   /**
    * @typedef {Object} StreamHandle
-   * @property {() => void} abort   终止流
-   * @property {Promise<void>} done 流结束（含 abort / 正常收尾）
+   * @property {() => void} abort   终止本地读取（服务端 run 不受影响，可重连重放）
+   * @property {Promise<void>} done 流结束（含 abort / 正常收尾 / 失败）
    */
 
   var agentEventSource = {
@@ -36,6 +36,9 @@
      * @param {(ev: AgentStreamEvent) => void} opts.onEvent 结构化事件回调
      * @param {(err: Error) => void} [opts.onError] 传输层错误（区别于 error 事件）
      * @param {boolean} [opts.reconnect] 断线自动重连（默认 true，最多 3 次）
+     * @param {(runId: string) => void} [opts.onOpen] 响应头到达（携 X-Run-Id）
+     * @param {(lastSeq: number) => string} [opts.reconnectUrl] 重连 URL 工厂
+     *        （游标续订：携 after=lastSeq 重放增量，严禁整轮重发 query）
      * @returns {StreamHandle}
      */
     open: function (url, opts) {
@@ -43,6 +46,9 @@
       var aborted = false;
       var retries = 0;
       var maxRetries = (opts.reconnect === false) ? 0 : 3;
+      var lastSeq = 0;
+      var resolveDone;
+      var done = new Promise(function (res) { resolveDone = res; });
 
       function headers() {
         var h = { "Accept": "text/event-stream" };
@@ -54,17 +60,24 @@
       }
 
       function connect() {
-        fetch(url, { method: "GET", headers: headers(), signal: controller.signal })
+        // 重连优先走游标续订 URL（run_id + after）：服务端只重放增量，
+        // 不重复执行编排；工厂返回空时退回原 URL（如 runId 尚未登记的极早断线）
+        var target = url;
+        if (retries > 0 && opts.reconnectUrl) {
+          target = opts.reconnectUrl(lastSeq) || url;
+        }
+        fetch(target, { method: "GET", headers: headers(), signal: controller.signal })
           .then(function (resp) {
             if (resp.status === 401) {
               if (window.App && App.onAuthExpired) { App.onAuthExpired("会话已过期，请重新登录"); }
               throw new Error("unauthorized");
             }
+            if (opts.onOpen) { opts.onOpen(resp.headers.get("X-Run-Id") || ""); }
             if (!resp.ok || !resp.body) {
               if (resp.status === 404) {
-                // 404 = 路由不存在：前端是新代码但服务端进程是旧版本
-                //（静态文件实时读盘，浏览器总是拿到新前端 -> 撞旧端点表）
-                throw new Error("后端服务缺少流式端点（服务进程版本过旧）。请重启 DataAgent Web 服务（python -m web.server）后刷新页面重试");
+                // 404 = 路由不存在（旧服务进程）或 run 缓冲已过期（游标重放失败，
+                // 调用方 onError 后回退本地快照）
+                throw new Error("stream HTTP 404");
               }
               throw new Error("stream HTTP " + resp.status);
             }
@@ -88,7 +101,11 @@
                     var line = lines[i];
                     if (line.indexOf("data: ") === 0) {
                       var ev = AgentProtocol.parseEvent(line.slice(6));
-                      if (ev) { opts.onEvent(ev); }
+                      if (ev) {
+                        // 游标推进：帧带 run 注册表分配的单调 seq
+                        if (typeof ev.seq === "number" && ev.seq > lastSeq) { lastSeq = ev.seq; }
+                        opts.onEvent(ev);
+                      }
                     }
                   }
                 }
@@ -113,7 +130,9 @@
 
       connect();
       return {
-        abort: function () { aborted = true; controller.abort(); }
+        abort: function () { aborted = true; controller.abort(); resolveDone(); },
+        done: done,
+        lastSeq: function () { return lastSeq; }
       };
     }
   };
