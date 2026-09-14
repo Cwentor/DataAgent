@@ -653,14 +653,48 @@
 
   // ---------------------------------------------------------------- 主流程（SSE 事件驱动）
   /**
+   * 任务中断收尾：把停留态条目标记为中断，并追加中断卡上屏。
+   *
+   * 触发场景（两类都表现为"流没了但任务没正常收尾"）：
+   * - 连接停滞：stallTimeoutMs 内零字节（连接半死，服务端 run 可能仍在跑）；
+   * - 意外结束：重试耗尽后传输层收尾，但末条不是 done/error。
+   * 停留态对象：未结束的工具块（永久"执行中"）与 plan 中 pending 步骤（永久"等待"）。
+   */
+  function markInterrupted(threadId, message) {
+    if (AgentSidebarUI.activeThreadId() !== threadId) { return; } // 后台流静默
+    var st = AgentStore.get();
+    // 未结束的工具块：补中断标记（updateToolBlock 就地改写为中断态）
+    st.timelineEvents.forEach(function (e) {
+      if (e.kind === "tool" && !e.ended) {
+        AgentStore.markToolInterrupted(e);
+      }
+    });
+    // plan 中仍 pending 的步骤：置为中断（避免永久显示"等待"）
+    AgentStore.markPlanInterrupted();
+    AgentStore.pushTimeline({ kind: "interrupt", error: message });
+    AgentStore.setRunning(false);
+    AgentStore.setHitl(null);
+    AgentSidebarUI.archiveThread();
+    toast(message, "err");
+  }
+
+  /**
    * 会话事件处理：所有流式事件闭包绑定 threadId（防后台流重连串台），
    * 仅活跃会话写 AgentStore 渲染；后台会话事件只推进其轮询快照（侧栏徽标）。
    */
   function handleAgentEvent(threadId, ev) {
     if (ev.event === "__stream_end__") {
-      // 传输层结束：done/error 事件已驱动状态；此处兜底复位
+      // 传输层结束：done/error 事件已驱动状态；此处兜底复位。
+      // 若仍处于 running 且末条不是 done/error，说明是意外结束（重试耗尽 /
+      // 服务端断开），必须显式告知用户——旧实现只静默复位，任务凭空消失。
       var rt = AgentStore.getRuntime(threadId);
-      if (rt && AgentStore.get().running && AgentSidebarUI.activeThreadId() === threadId) {
+      var st = AgentStore.get();
+      var last = st.timelineEvents[st.timelineEvents.length - 1];
+      var settled = last && (last.kind === "done" || last.kind === "error"
+        || last.kind === "interrupt");
+      if (st.running && !settled) {
+        markInterrupted(threadId, "任务已中断（连接意外结束），可重新提问");
+      } else if (rt && st.running && AgentSidebarUI.activeThreadId() === threadId) {
         AgentStore.setRunning(false);
       }
       if (rt) { rt.handle = null; }
@@ -809,6 +843,15 @@
         return AgentProtocol.buildStreamUrl({ run_id: rt.runId, after: lastSeq || 0 });
       },
       onEvent: function (ev) { handleAgentEvent(threadId, ev); },
+      // 连接停滞（默认 120s 零字节，含服务端 15s 心跳）：连接半死时 fetch/read
+      // 永不 reject，必须主动判定并上屏，否则任务静默消失、UI 永久停在"正在分析"
+      onStall: function () {
+        markInterrupted(
+          threadId,
+          "任务已中断（120 秒无响应）。任务可能仍在服务端执行，可重新进入该会话恢复"
+        );
+        showError("Agent 流连接中断，请重试");
+      },
       onError: function (err) {
         if (AgentSidebarUI.activeThreadId() !== threadId) { return; } // 后台流静默
         var msg = (err && err.message) || String(err || "连接中断");

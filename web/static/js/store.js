@@ -188,6 +188,26 @@
       if (hit) { emit("activePlan"); }
     },
 
+    /** 任务中断收尾：未完成步骤置 interrupted（避免永久停在"等待/执行中"）。 */
+    markPlanInterrupted: function () {
+      var hit = false;
+      state.activePlan.forEach(function (s) {
+        if (s.status === "pending" || s.status === "running") {
+          s.status = "interrupted";
+          hit = true;
+        }
+      });
+      if (hit) { emit("activePlan"); }
+    },
+
+    /** 单个工具块中断收尾：置 ended + interrupted，驱动就地改写为中断态。 */
+    markToolInterrupted: function (toolEvent) {
+      if (!toolEvent || toolEvent.ended) { return; }
+      toolEvent.ended = true;
+      toolEvent.interrupted = true;
+      emitItem("toolUpdate", toolEvent);
+    },
+
     /** 时间线追加（plan 卡片只保留最新一张）。 */
     pushTimeline: function (item) {
       if (item.kind === "plan") {

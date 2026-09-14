@@ -242,6 +242,51 @@ def test_find_active_idempotent_reuse(registry):
     assert registry.find_active("alice", "webui:t1", "2024年5月北京的GMV是多少") is None
 
 
+def test_subscribe_idle_timeout_configurable():
+    """空闲守卫阈值可配置（RunRegistry 注入），文案随阈值渲染。
+
+    连接活着但编排长时间无事件时，订阅应下发超时 error 并终止——
+    阈值经构造参数注入，避免测试等 300s。
+    """
+    reg = RunRegistry(max_runs=5, ttl_seconds=3600, idle_timeout_seconds=0.05)
+    try:
+        # 手工构造 run：保持 running 且不追加任何事件（模拟编排卡死）
+        run = AgentRun("run-idle", "alice", "webui:t1")
+        with reg._lock:
+            reg._runs[run.run_id] = run
+        frames: list[dict] = []
+        reg.subscribe(run.run_id, 0, frames.append, owner="alice")
+        assert frames, "空闲超时应下发事件"
+        assert frames[-1]["event"] == "error"
+        assert "编排超时" in frames[-1]["payload"]["error"]
+        # 文案中的秒数由配置渲染（0.05s -> int() = 0）
+        assert "无事件" in frames[-1]["payload"]["error"]
+    finally:
+        reg.clear_all()
+
+
+def test_subscribe_heartbeat_keeps_alive():
+    """空闲未达阈值时只发心跳（on_idle），不下发终止 error。"""
+    reg = RunRegistry(max_runs=5, ttl_seconds=3600, idle_timeout_seconds=30.0)
+    try:
+        run = AgentRun("run-hb", "alice", "webui:t1")
+        with reg._lock:
+            reg._runs[run.run_id] = run
+        frames: list[dict] = []
+        pings: list[int] = []
+
+        # 收到首次心跳后让 run 收尾，订阅循环随即正常返回
+        def _on_idle():
+            pings.append(1)
+            run.close("done")
+
+        reg.subscribe(run.run_id, 0, frames.append, owner="alice", on_idle=_on_idle)
+        assert pings, "空闲未超阈值应发心跳"
+        assert not [f for f in frames if f["event"] == "error"], "不应误报超时"
+    finally:
+        reg.clear_all()
+
+
 def test_concurrent_append_thread_safe():
     """多线程并发 append：seq 严格单调无重复（订阅唤醒不丢）。"""
     run = AgentRun("run-c", "alice", "webui:t1")
