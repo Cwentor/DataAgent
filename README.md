@@ -275,9 +275,33 @@ DataAgent/
 ├── web/          # Web UI / HTTP 服务 / 异步查询 / 编排端点
 ├── eval/         # Golden 评测（25 用例，含多轮对话序列，双模式）
 ├── mock/         # 确定性 DuckDB 数仓
-├── tests/        # 39 个测试文件（622 用例，含执行前审计 / 结果断言 / 日志可见性回归）
+├── tests/        # 40 个测试文件（678 用例，含执行前审计 / 结果断言 / 日志可见性回归）
 └── docs/         # 详细文档 + 评审归档
 ```
+
+## 🧩 关键技术选型
+
+贯穿全项目的选型哲学：**生产运行时零框架依赖**（核心依赖仅 pydantic / duckdb / python-dotenv / sqlglot 四个）、**确定性优先**（安全裁决与质检交给可单测的确定性代码而非 LLM）、**自研克制**（按需求规模决策，接口语义对齐主流框架、留迁移路径）。
+
+| 部分 | 关键选型 | 选型理由 |
+| --- | --- | --- |
+| 运行时与依赖 | Python 3.11+（锁定 3.12）+ Miniconda；生产运行时仅 4 个依赖 | 依赖面即攻击面与升级成本面；numpy / pandas / pyarrow 仅作开发依赖（沙箱与技能包数值栈），生产检索链路不经过 |
+| 语义层 `semantic/` | Pydantic V2 强契约（`extra="forbid"`）+ `catalog.py` 字段白名单 SSOT | 契约即约束：LLM 只能产出已登记的字段 / 操作符 / 聚合，未声明字段在编译前即被拒绝 |
+| 智能层 `agent/` | LLM / 启发式双路径 + 意图路由 + 多轮槽位回填；RAG 用字符 bigram + TF-IDF 余弦 | 离线无 Key 时确定性兜底、LLM 故障安全降级；检索零分词 / 零向量库 / 零外部模型，任意机器结果一致可复现 |
+| 编排层 `core/orchestrator/` | 自研轻量 StateGraph（节点 + 条件边 + HITL 中断恢复 + 迭代护栏），范式对齐 LangGraph，接口保留迁移路径 | 图需求克制（6 节点 / 2 条件边 / 1 中断点），框架的抽象成本超过收益；`AgentState` 同样 `extra="forbid"`，事件总线直接对接 SSE 九类事件 |
+| 编译层 `compiler/` | 确定性 SQL 编译器（Pydantic 契约驱动生成） | SQL 只由编译器产出、LLM 永不提交裸 SQL——可复现、可单测、零注入 |
+| 执行层 `exec/` | sqlglot AST 静态审计 + 线程看门狗 `conn.interrupt()` 超时取消 + `EXPLAIN ANALYZE` 扫描预检熔断 + LIMIT 硬上限 | 审计与资源治理全部确定性实现；编译 / 引擎报错喂回 LLM 重写 DSL 自愈（受控重试上限） |
+| 检索门面 `core/retrieval/` | typed Tool（`execute_dsl_query -> ParquetRef`）+ PII 脱敏（列名启发式 + 值形态正则 + 确定性哈希掩码）+ sha256 Parquet 物化 + DataQA 四类结果断言 | 沙箱零网络零 DB socket、数据交换全程可审计；质检发现不否决执行，全链路留痕、不误杀不吞错 |
+| 沙箱 `core/sandbox/` | Python `ast` 静态守卫 + 限权 runner（模块白名单 import + workspace 受限 open）+ 可插拔后端（Docker `--net=none --cap-drop=ALL` / 子进程兜底） | 纵深防御：单层被绕过仍安全；Docker 不可用时功能降级而非安全降级 |
+| 归因技能 `core/skills/` | 熵下钻 / 指标分解树 / DTW / Holt-Winters / Shapley，仅依赖 numpy + 标准库 | 零重型科学计算栈；全部与已知解析解对拍保证正确性 |
+| 权限与认证 `security/` `auth/` | 表 / 列 / 行级 RLS（配置驱动）+ 自研 JWT（HMAC-SHA256 签名 + 恒定时间比较）+ PBKDF2 密码哈希 | 全部标准库实现（零 pyjwt / cryptography 依赖）；生成前作用域收窄 + 生成后策略校验构成双防线 |
+| 模型网关 `providers/` | 四协议适配（OpenAI Chat / Responses、Anthropic、Gemini）+ JSON Mode 抹平 + 自研 Key 加密（HMAC-SHA256 密钥派生 + 流加密 + 篡改校验标签） | 一套契约抹平供应商差异；Key 落盘加密、列表零回传，SSE 编排支持请求级模型切换免重启 |
+| Web 层 `web/` | 标准库 `http.server`（`ThreadingHTTPServer`）+ 原生 JS 零前端框架 + vendored ECharts / PrismJS + SSE 流式 | 零 Web 框架、零前端构建链；>50 步窗口化虚拟渲染保证长会话流畅 |
+| 数仓 `mock/` | DuckDB 确定性数仓（`AS_OF_DATE=2024-06-30`、随机种子 42） | 嵌入式零部署；评测与演示完全可复现 |
+| 评测 `eval/` | Golden Dataset（25 用例，oracle / agent 双模式）+ 确定性锚点 | 同一份数据同时考核编译器上限（oracle）与端到端正确率（agent） |
+| 质量保障 `tests/` | pytest（678 用例）+ black + ruff + CI | 契约 / 编译 / 审计 / 自愈 / 可观测全路径回归覆盖 |
+
+---
 
 ## 📚 文档
 
