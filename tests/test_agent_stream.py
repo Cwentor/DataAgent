@@ -15,69 +15,133 @@
 from __future__ import annotations
 
 import codecs
-import http.client
 import json
-import threading
 import time
 
 import pytest
+from fastapi.testclient import TestClient
 
-from web.server import Handler, ThreadingHTTPServer
+from web.api import app
+
+_current_client = None
+
+SSE_DELIM = chr(10) * 2  # SSE 帧分隔符（两个真实换行）
+
+
+class _FakeServer:
+    def shutdown(self) -> None:
+        pass
+
+    def server_close(self) -> None:
+        pass
+
+
+class _FakeResponse:
+    """仿 http.client.HTTPResponse：status/headers/read 语义。
+
+    read 必须尊重 n 且耗尽后返回空——否则调用方的
+    "while True: chunk = resp.read(1024); if not chunk: break" 会死循环
+    （M4 迁移期实测：全量重复返回导致 buf 每轮翻倍、内存爆掉）。
+    """
+
+    def __init__(self, resp) -> None:
+        self.status = resp.status_code
+        self.headers = resp.headers
+        self._content = resp.content
+        self._offset = 0
+
+    def read(self, n: int = -1) -> bytes:
+        data = self._content[self._offset :]
+        if n is not None and n > 0:
+            data = data[:n]
+        self._offset += len(data)
+        return data
+
+    def getheader(self, name: str, default: str | None = None) -> str | None:
+        return self.headers.get(name, default)
+
+    def getheaders(self) -> list[tuple[str, str]]:
+        return list(self.headers.items())
+
+
+class _FakeConnection:
+    """仿 http.client.HTTPConnection：M4 起底层为 TestClient（端口参数忽略）。
+
+    每个连接实例持私有 client（无 Cookie 罐继承）——http.client 不持久化
+    Cookie，未认证用例不得被 fixture 登录留下的会话 Cookie 意外放行。
+    """
+
+    def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
+        self._client = TestClient(app, raise_server_exceptions=False)
+        self._resp = None
+
+    def request(self, method: str, path: str, body=None, headers=None) -> None:
+        self._resp = self._client.request(method, path, content=body, headers=headers or {})
+
+    def getresponse(self) -> _FakeResponse:
+        return _FakeResponse(self._resp)
+
+    def close(self) -> None:
+        pass
 
 
 def _start_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    port = server.server_address[1]
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    return server, port
+    """M4 单引擎：stdlib 服务已删除，经 TestClient 驱动 FastAPI 实现
+    （调用形态保持：返回 (server, port) 桩，测试体零改动）。
+
+    每次新建 client：TestClient 持久化 Set-Cookie，共享实例会让未认证
+    用例带着前序登录的会话 Cookie 被放行（实测踩坑），对齐 stdlib
+    http.client 无 Cookie 持久化的旧语义。
+    """
+    global _current_client
+    _current_client = TestClient(app, raise_server_exceptions=False)
+    return _FakeServer(), 0
 
 
 def _login(port: int) -> dict:
     """登录换取 token（复用预置 admin 账号）。"""
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    try:
-        conn.request(
-            "POST",
-            "/api/auth/login",
-            body=json.dumps({"username": "admin", "password": "admin123"}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        resp = conn.getresponse()
-        return json.loads(resp.read().decode())
-    finally:
-        conn.close()
+    resp = _current_client.post(
+        "/api/auth/login", json={"username": "admin", "password": "admin123"}
+    )
+    return resp.json()
 
 
 def _sse_events(port: int, qs: str, token: str, timeout: float = 120.0):
     """请求 SSE 端点并解析事件帧（阻塞读至流关闭）。
 
-    目标固定为本测试启动的 127.0.0.1 临时服务（端口来自 server_bind），
-    不做任何动态 URL / 域名解析。
+    M4 单引擎：langgraph 计划审批门在多步计划处挂起（hitl_request 收尾）——
+    对 plan_review 类挂起自动循环批准（run_id + resume_token + action 续流，
+    seq 连续），"执行到底"用例语义保持不变；clarify 类挂起原样返回给用例断言。
     """
-    path = f"/api/v1/agent/chat/stream?{qs}"
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    try:
-        conn.request("GET", path, headers={"Authorization": f"Bearer {token}"})
-        resp = conn.getresponse()
-        content_type = resp.headers.get("Content-Type", "")
-        events: list[dict] = []
-        buf = ""
-        decoder = codecs.getincrementaldecoder("utf-8")()
-        while True:
-            chunk = resp.read(1024)
-            if not chunk:
-                break
-            # 增量解码：固定字节切块可能切开多字节字符（报告含中文表格）
-            buf += decoder.decode(chunk)
-            while "\n\n" in buf:
-                frame, buf = buf.split("\n\n", 1)
-                for line in frame.splitlines():
-                    if line.startswith("data: "):
-                        events.append(json.loads(line[len("data: ") :]))
-        return content_type, events
-    finally:
-        conn.close()
+    auth = {"Authorization": f"Bearer {token}"}
+    events: list[dict] = []
+    content_type = ""
+    run_id = ""
+    current_qs = qs
+    for _ in range(6):
+        path = f"/api/v1/agent/chat/stream?{current_qs}"
+        with _current_client.stream("GET", path, headers=auth) as resp:
+            content_type = resp.headers.get("content-type", "")
+            if resp.headers.get("x-run-id"):
+                run_id = resp.headers["x-run-id"]
+            buf = ""
+            for chunk in resp.iter_text():
+                buf += chunk
+                while SSE_DELIM in buf:
+                    frame, buf = buf.split(SSE_DELIM, 1)
+                    for line in frame.splitlines():
+                        if line.startswith("data: "):
+                            events.append(json.loads(line[len("data: ") :]))
+        if not events or events[-1]["event"] != "hitl_request":
+            break
+        if events[-1]["payload"].get("kind") != "plan_review":
+            break  # clarify 挂起：交由用例断言
+        resume_token = events[-1]["payload"]["hitl"]["resume_token"]
+        current_qs = (
+            f"run_id={run_id}&resume_token={resume_token}"
+            f"&action=approve&after={events[-1]['seq']}"
+        )
+    return content_type, events
 
 
 @pytest.fixture(scope="module")
@@ -89,6 +153,7 @@ def sse_server(tmp_path_factory):
     settings.AUTH_ENABLED = True
     settings.WORKSPACE_ROOT = tmp_path_factory.mktemp("sse_ws")
     server, port = _start_server()
+    print(f"[FIXTURE] AUTH_ENABLED={settings.AUTH_ENABLED}", flush=True)
     token = _login(port)["token"]
     yield port, token
     server.shutdown()
@@ -98,7 +163,7 @@ def sse_server(tmp_path_factory):
 def test_sse_requires_auth(sse_server):
     """未认证请求 -> 401 JSON，不进入事件流。"""
     port, _ = sse_server
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn = _FakeConnection("127.0.0.1", port, timeout=5)
     try:
         conn.request("GET", "/api/v1/agent/chat/stream?query=hi")
         resp = conn.getresponse()
@@ -167,29 +232,50 @@ def test_sse_invalid_resume_token(sse_server):
 # 并行会话（run 注册表版端点）：断线重放 / 游标续订 / 隔离 / 状态快照 / 多轮记忆
 # --------------------------------------------------------------------------- #
 def _parse_headers_events(port: int, qs: str, token: str, timeout: float = 120.0):
-    """请求 SSE 端点：返回 (响应头, 事件列表)。"""
-    path = f"/api/v1/agent/chat/stream?{qs}"
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    try:
-        conn.request("GET", path, headers={"Authorization": f"Bearer {token}"})
-        resp = conn.getresponse()
-        headers = dict(resp.getheaders())
-        events: list[dict] = []
-        buf = ""
-        decoder = codecs.getincrementaldecoder("utf-8")()
-        while True:
-            chunk = resp.read(1024)
-            if not chunk:
-                break
-            buf += decoder.decode(chunk)
-            while "\n\n" in buf:
-                frame, buf = buf.split("\n\n", 1)
-                for line in frame.splitlines():
-                    if line.startswith("data: "):
-                        events.append(json.loads(line[len("data: ") :]))
-        return headers, events
-    finally:
-        conn.close()
+    """请求 SSE 端点：返回 (响应头, 事件列表)。
+
+    与 _sse_events 相同的 plan_review 自动批准循环（多步计划挂起时续流至收敛）。
+    """
+    auth = {"Authorization": f"Bearer {token}"}
+    headers: dict = {}
+    events: list[dict] = []
+    run_id = ""
+    current_qs = qs
+    for _ in range(6):
+        path = f"/api/v1/agent/chat/stream?{current_qs}"
+        conn = _FakeConnection("127.0.0.1", port, timeout=timeout)
+        try:
+            conn.request("GET", path, headers=auth)
+            resp = conn.getresponse()
+            headers = dict(resp.getheaders())
+            # TestClient 头为小写键：补一个原样键供用例按 "X-Run-Id" 读取
+            if resp.headers.get("x-run-id"):
+                headers["X-Run-Id"] = resp.headers["x-run-id"]
+                run_id = resp.headers["x-run-id"]
+            buf = ""
+            decoder = codecs.getincrementaldecoder("utf-8")()
+            while True:
+                chunk = resp.read(1024)
+                if not chunk:
+                    break
+                buf += decoder.decode(chunk)
+                while "\n\n" in buf:
+                    frame, buf = buf.split("\n\n", 1)
+                    for line in frame.splitlines():
+                        if line.startswith("data: "):
+                            events.append(json.loads(line[len("data: ") :]))
+        finally:
+            conn.close()
+        if not events or events[-1]["event"] != "hitl_request":
+            break
+        if events[-1]["payload"].get("kind") != "plan_review":
+            break  # clarify 挂起：交由用例断言
+        resume_token = events[-1]["payload"]["hitl"]["resume_token"]
+        current_qs = (
+            f"run_id={run_id}&resume_token={resume_token}"
+            f"&action=approve&after={events[-1]['seq']}"
+        )
+    return headers, events
 
 
 def test_sse_replay_after_disconnect(sse_server):
@@ -205,7 +291,7 @@ def test_sse_replay_after_disconnect(sse_server):
     )
     # 首连：读到 plan_created 即断开（模拟用户切走会话）
     path = f"/api/v1/agent/chat/stream?{qs}"
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=120)
+    conn = _FakeConnection("127.0.0.1", port, timeout=120)
     run_id = ""
     try:
         conn.request("GET", path, headers={"Authorization": f"Bearer {token}"})
@@ -284,7 +370,7 @@ def test_sse_run_status_endpoint(sse_server):
     assert run_id and events[-1]["event"] == "done"
 
     # 属主查询
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn = _FakeConnection("127.0.0.1", port, timeout=10)
     try:
         conn.request(
             "GET", f"/api/v1/agent/runs/{run_id}", headers={"Authorization": f"Bearer {token}"}
@@ -298,7 +384,7 @@ def test_sse_run_status_endpoint(sse_server):
         conn.close()
 
     # 他人查询（登录 analyst 账号；admin 预置账号可见属主豁免，故用非 admin）
-    conn2 = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn2 = _FakeConnection("127.0.0.1", port, timeout=10)
     try:
         conn2.request(
             "POST",
@@ -323,7 +409,7 @@ def test_sse_run_status_endpoint(sse_server):
         conn2.close()
 
     # 未知 run_id -> 404
-    conn4 = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn4 = _FakeConnection("127.0.0.1", port, timeout=10)
     try:
         conn4.request(
             "GET", "/api/v1/agent/runs/run-deadbeef", headers={"Authorization": f"Bearer {token}"}

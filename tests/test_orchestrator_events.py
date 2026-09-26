@@ -167,10 +167,10 @@ def test_event_error_on_graph_crash(tmp_path, monkeypatch):
 
     import core.orchestrator.agent as agent_mod
 
-    def boom(**kwargs):
+    def boom(*args, **kwargs):
         raise ValueError("graph exploded")
 
-    monkeypatch.setattr(agent_mod, "build_graph", boom)
+    monkeypatch.setattr(agent_mod, "_run_agent_langgraph_path", boom)
     with pytest.raises(ValueError):
         run_agent("任何问题", session_id="crash", on_event=events.append)
     err = [e for e in events if e["event"] == EVENT_ERROR]

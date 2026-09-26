@@ -96,12 +96,37 @@ def test_agent_run_sync_endpoint_contract(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    resp = client.post(
-        "/api/agent/run",
-        json={"query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
+    # M4 单引擎（langgraph）：多步计划触发 plan_review 审批门——循环批准直至收敛
+    body = None
+    for _ in range(6):
+        resp = client.post(
+            "/api/agent/run",
+            json={"query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        if body.get("phase") == "plan_review":
+            resp = client.post(
+                "/api/agent/run",
+                json={
+                    "query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
+                    "resume_token": body["resume_token"],
+                    "action": "approve",
+                },
+            )
+            body = resp.json()
+        elif body.get("phase") == "clarify":
+            resp = client.post(
+                "/api/agent/run",
+                json={
+                    "query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
+                    "resume_token": body["resume_token"],
+                    "human_reply": "按 2024-06 口径",
+                },
+            )
+            body = resp.json()
+        else:
+            break
     assert body["phase"] == "done"
     assert {"report", "steps", "artifacts", "self_heal_count"} <= set(body)
 
@@ -123,23 +148,38 @@ def test_agent_stream_frame_format_and_x_run_id(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    with client.stream(
-        "GET",
-        "/api/v1/agent/chat/stream",
-        # 明确问题（含指标词+时间锚）直通 done；歧义问题会以 hitl_request 挂起收尾
-        params={
+
+    def _collect(params):
+        got = []
+        with client.stream("GET", "/api/v1/agent/chat/stream", params=params) as r:
+            assert r.status_code == 200
+            rid = r.headers.get("x-run-id")
+            assert rid and rid.startswith("run-")
+            assert r.headers["content-type"].startswith("text/event-stream")
+            for line in r.iter_lines():
+                if line.startswith("data: "):
+                    got.append(jsonlib.loads(line[6:]))
+        return rid, got
+
+    # M4 单引擎：多步计划触发 plan_review——循环批准直至 done
+    run_id, frames = _collect(
+        {
             "query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
             "thread": "t-sse",
-        },
-    ) as resp:
-        assert resp.status_code == 200
-        run_id = resp.headers.get("x-run-id")
-        assert run_id and run_id.startswith("run-")
-        assert resp.headers["content-type"].startswith("text/event-stream")
-        frames = []
-        for line in resp.iter_lines():
-            if line.startswith("data: "):
-                frames.append(jsonlib.loads(line[6:]))
+        }
+    )
+    all_frames = list(frames)
+    for _ in range(6):
+        if all_frames and all_frames[-1]["event"] == "done":
+            break
+        hitl = [f for f in all_frames if f["event"] == "hitl_request"][-1]
+        token = hitl["payload"]["hitl"]["resume_token"]
+        action = "approve"
+        run_id, seg = _collect(
+            {"resume_token": token, "action": action, "run_id": run_id, "after": hitl["seq"]}
+        )
+        all_frames.extend(seg)
+    frames = all_frames
     assert frames, "expected SSE data frames"
     assert all(isinstance(f.get("seq"), int) for f in frames), "帧须带单调 seq 游标"
     assert frames[-1]["event"] == "done"
@@ -197,11 +237,10 @@ def test_langgraph_engine_web_resume_roundtrip(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", "langgraph")
     with client.stream(
         "GET",
         "/api/v1/agent/chat/stream",
-        params={"query": "什么是销售额？", "thread": "t-lg"},
+        params={"query": "什么是销售额？", "thread": "t-lg", "autonomy_level": "L2"},
     ) as resp:
         run_id = resp.headers.get("x-run-id", "")
         frames = [jsonlib.loads(ln[6:]) for ln in resp.iter_lines() if ln.startswith("data: ")]
@@ -252,11 +291,10 @@ def test_hitl_payload_kind_clarify(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", "langgraph")
     with client.stream(
         "GET",
         "/api/v1/agent/chat/stream",
-        params={"query": "什么是销售额？", "thread": "t-kind"},
+        params={"query": "什么是销售额？", "thread": "t-kind", "autonomy_level": "L2"},
     ) as resp:
         frames = [jsonlib.loads(ln[6:]) for ln in resp.iter_lines() if ln.startswith("data: ")]
     hitl = [f for f in frames if f["event"] == "hitl_request"][-1]
@@ -273,13 +311,13 @@ def test_plan_review_stream_pause_and_reject(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", "langgraph")
     with client.stream(
         "GET",
         "/api/v1/agent/chat/stream",
         params={
             "query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
             "thread": "t-pr",
+            "autonomy_level": "L2",
         },
     ) as resp:
         frames = [jsonlib.loads(ln[6:]) for ln in resp.iter_lines() if ln.startswith("data: ")]
@@ -308,13 +346,13 @@ def test_plan_review_stream_edit_triggers_replan(client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "AUTH_ENABLED", False)
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", "langgraph")
     with client.stream(
         "GET",
         "/api/v1/agent/chat/stream",
         params={
             "query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
             "thread": "t-pe",
+            "autonomy_level": "L2",
         },
     ) as resp:
         frames = [jsonlib.loads(ln[6:]) for ln in resp.iter_lines() if ln.startswith("data: ")]
@@ -335,14 +373,5 @@ def test_plan_review_stream_edit_triggers_replan(client, monkeypatch, tmp_path):
         frames2 = [jsonlib.loads(ln[6:]) for ln in resp2.iter_lines() if ln.startswith("data: ")]
     kinds = [f["event"] for f in frames2]
     assert kinds.count("plan_created") >= 1  # 重规划发生
-    # 新计划需再次审批（L2 语义：每次 plan 产出审批一次）
-    assert frames2[-1]["event"] == "hitl_request"
-    assert frames2[-1]["payload"]["kind"] == "plan_review"
-    token2 = frames2[-1]["payload"]["hitl"]["resume_token"]
-    with client.stream(
-        "GET",
-        "/api/v1/agent/chat/stream",
-        params={"resume_token": token2, "action": "approve", "run_id": run_id},
-    ) as resp3:
-        frames3 = [jsonlib.loads(ln[6:]) for ln in resp3.iter_lines() if ln.startswith("data: ")]
-    assert frames3[-1]["event"] == "done"
+    # L2 一次性审批：edit 后重规划执行自动，不再二次审批，直接跑到 done
+    assert frames2[-1]["event"] == "done"

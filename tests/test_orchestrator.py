@@ -13,70 +13,10 @@ import pytest
 from pydantic import ValidationError
 
 from core.orchestrator.agent import run_agent
-from core.orchestrator.graph import GraphError, StateGraph
-from core.orchestrator.state import MAX_RETRIES, AgentState, ToolRecord
+from core.orchestrator.nodes import MAX_RETRIES
+from core.orchestrator.state import AgentState, ToolRecord
 
 
-# --------------------------------------------------------------------------- #
-# 图引擎
-# --------------------------------------------------------------------------- #
-def test_graph_conditional_routing_and_end():
-    graph = StateGraph()
-    graph.add_node("a", lambda s: s.apply(phase="analyze"))
-    graph.add_node("b", lambda s: s.apply(phase="done", report="ok"))
-    graph.set_entry("a")
-    graph.add_conditional_edges(
-        "a", lambda s: "go_b" if s.phase == "analyze" else "stop", {"go_b": "b", "stop": "END"}
-    )
-    graph.add_edge("b", "END")
-    final = graph.run(AgentState(user_query="x"))
-    assert final.report == "ok" and final.iteration == 2
-
-
-def test_graph_hitl_interrupt_and_resume():
-    graph = StateGraph()
-    graph.add_node("ask", lambda s: s.apply(phase="clarify", clarification="请补充时间范围"))
-    graph.add_node("plan", lambda s: s.apply(phase="done", report=f"计划基于: {s.user_query}"))
-    graph.set_entry("ask")
-    graph.add_edge("ask", "plan")
-    graph.add_edge("plan", "END")
-
-    paused = graph.run(AgentState(user_query="GMV 为什么下滑"))
-    assert paused.phase == "clarify" and paused.clarification
-
-    resumed = graph.resume(paused.apply(human_reply="2024 年 5 月上旬"))
-    assert resumed.phase == "done"
-    assert "2024 年 5 月上旬" in resumed.report
-
-
-def test_graph_resume_requires_clarify_phase():
-    graph = StateGraph()
-    graph.add_node("a", lambda s: s)
-    with pytest.raises(GraphError):
-        graph.resume(AgentState(phase="plan"))
-
-
-def test_graph_max_iteration_guard():
-    loop_state = lambda s: s.apply(phase="plan")  # noqa: E731
-    graph = StateGraph(max_iterations=5)
-    graph.add_node("a", loop_state)
-    graph.set_entry("a")
-    graph.add_conditional_edges("a", lambda s: "self", {"self": "a"})
-    final = graph.run(AgentState(user_query="x"))
-    assert "强制终止" in final.report
-
-
-def test_graph_missing_edge_raises():
-    graph = StateGraph()
-    graph.add_node("a", lambda s: s.apply(phase="done"))
-    graph.set_entry("a")
-    with pytest.raises(GraphError):
-        graph.run(AgentState(user_query="x"))
-
-
-# --------------------------------------------------------------------------- #
-# 状态契约
-# --------------------------------------------------------------------------- #
 def test_agent_state_forbids_extra_fields():
     with pytest.raises(ValidationError):
         AgentState(user_query="x", rogue_field=1)

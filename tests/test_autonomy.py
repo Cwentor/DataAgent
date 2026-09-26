@@ -23,8 +23,10 @@ def test_levels_are_the_documented_four():
 
 
 def test_l2_default_in_state_contract():
-    """日常交互默认档：AgentState.autonomy_level 缺省 L2。"""
-    assert AgentState(user_query="q").autonomy_level == "L2"
+    """默认档随 settings（生产 L2 计划确认；测试环境经 conftest 置 L4）。"""
+    from config import settings
+
+    assert AgentState(user_query="q").autonomy_level == settings.AGENT_DEFAULT_AUTONOMY
 
 
 def test_state_rejects_unknown_level():

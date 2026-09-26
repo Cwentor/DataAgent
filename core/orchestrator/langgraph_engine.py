@@ -112,6 +112,8 @@ def _plan_gate(state: AgentState) -> AgentState:
     forced = state.autonomy_level == "L1"
     # planner 产出计划后会把 phase 直接置为首个待执行步骤（query/analyze/critique），
     # 不能以 phase=="plan" 判定——以"有计划且非终态/挂起相位"为触发前提
+    if state.plan_reviewed:
+        return state  # L2：本轮已审批，自愈重规划不再打断（规格 §5.2）
     if not state.plan_steps or state.phase in {"done", "clarify", "plan_review"}:
         return state
     if not (multi_step or forced):
@@ -133,8 +135,14 @@ def _plan_gate(state: AgentState) -> AgentState:
             report="用户拒绝了分析计划，本次未执行任何查询、未产出任何结论。",
         )
     if resume.get("action") == "edit":
-        return state.apply(plan_edit_instruction=resume.get("instruction"), phase="plan")
-    return state  # approve：保持 phase，交 route_from_plan 分流
+        # 用户已审批本轮（L2 审批一次）；指令交 planner 消费（planner 清除之）
+        return state.apply(
+            plan_reviewed=True,
+            plan_edit_instruction=resume.get("instruction"),
+            phase="plan",
+        )
+    # approve / edit 均置审批标记（edit 的重规划执行自动，不再审批）
+    return state.apply(plan_reviewed=True)
 
 
 def route_from_plan_gate(state: AgentState) -> Any:

@@ -138,11 +138,15 @@ async def auth_login(request: Request) -> Response:
     try:
         limiter.check(rate_key)
     except LoginRateLimitError as exc:
-        raise HTTPException(
+        # stdlib 契约：429 体含 retry_after 键（HTTPException 渲染器只产 error 键）
+        return Response(
+            content=json.dumps(
+                {"error": str(exc), "retry_after": exc.retry_after}, ensure_ascii=False
+            ),
             status_code=429,
-            detail=str(exc),
+            media_type="application/json; charset=utf-8",
             headers={"Retry-After": str(exc.retry_after)},
-        ) from exc
+        )
 
     store = default_identity_store()
     try:
@@ -534,12 +538,18 @@ async def post_agent_run(request: Request) -> Response:
             "owner": ctx.username,
             "state": result.model_dump(mode="json"),
         }
+        # M2/M4：挂起相位按真实值返回（clarify | plan_review），
+        # plan_review 附带步骤 DAG 供审批卡渲染
         payload = {
-            "phase": "clarify",
-            "clarification": result.clarification,
+            "phase": result.phase,
             "resume_token": token,
             "session_id": result.session_id,
         }
+        if result.phase == "plan_review":
+            payload["plan_steps"] = [step.model_dump(mode="json") for step in result.plan_steps]
+            payload["summary"] = result.plan_steps[0].goal if result.plan_steps else ""
+        else:
+            payload["clarification"] = result.clarification
         return Response(
             content=json.dumps(payload, ensure_ascii=False),
             media_type="application/json; charset=utf-8",

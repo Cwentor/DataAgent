@@ -538,29 +538,44 @@ def test_llm_pipeline_via_adapter_produces_valid_dsl(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 # HTTP API（真实 Handler 冒烟）
 # --------------------------------------------------------------------------- #
-def _start_server():
-    from web.server import Handler, ThreadingHTTPServer
+class _FakeSrv:
+    def shutdown(self):
+        pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    return server, server.server_address[1]
+    def server_close(self):
+        pass
+
+
+def _start_test_client():
+    """M4 单引擎：FastAPI TestClient 替代 ThreadingHTTPServer（无 Cookie 持久化）。"""
+    from fastapi.testclient import TestClient
+
+    from web.api import app as _app
+
+    return _FakeSrv(), TestClient(_app, raise_server_exceptions=False)
+
+
+def _client_req(client, method, path, payload=None, headers=None):
+    resp = client.request(method, path, json=payload, headers=headers or {})
+    return resp.status_code, resp.json()
+
+
+_REQ_CLIENT = None
 
 
 def _req(port, method, path, payload=None, headers=None):
-    """测试 HTTP 客户端：显式回环地址 + http.client，目标仅限本地测试服务。"""
-    import http.client
+    return _client_req(_REQ_CLIENT, method, path, payload, headers)
 
-    data = json.dumps(payload).encode() if payload is not None else None
-    hdrs = {"Content-Type": "application/json"}
-    hdrs.update(headers or {})
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    try:
-        conn.request(method, path, body=data, headers=hdrs)
-        resp = conn.getresponse()
-        return resp.status, json.loads(resp.read().decode())
-    finally:
-        conn.close()
+
+def _fresh_req(method, path, payload=None):
+    """无 Cookie 的独立请求：http.client 旧语义（不持久化会话），
+    未认证用例不得被同用例前序登录的 Set-Cookie 放行。"""
+    from fastapi.testclient import TestClient
+
+    from web.api import app as _app
+
+    fresh = TestClient(_app, raise_server_exceptions=False)
+    return _client_req(fresh, method, path, payload)
 
 
 def test_providers_http_api_flow(tmp_path, monkeypatch):
@@ -570,13 +585,15 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
     # 注入临时存储（测试隔离，绝不读写真实 providers.json）
     isolated = ProviderStore(tmp_path / "providers.json")
     reset_default_provider_store(isolated)
+    global _REQ_CLIENT
+    server, _REQ_CLIENT = _start_test_client()
+    port = 0
     reset_provider_factory(ProviderFactory(isolated))
     import web.providers_api as api_mod
 
     monkeypatch.setattr(api_mod, "_store", lambda: isolated)
     monkeypatch.setattr(api_mod, "_factory", lambda: ProviderFactory(isolated))
 
-    server, port = _start_server()
     try:
         # 未认证 -> 401
         status, _ = _req(port, "GET", "/api/settings/providers")
@@ -635,7 +652,7 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
             port, "POST", f"/api/settings/providers/{created['id']}/reveal", headers=H
         )
         assert status == 200 and body["api_key"] == http_api_key
-        status, _ = _req(port, "POST", f"/api/settings/providers/{created['id']}/reveal")
+        status, _ = _fresh_req("POST", f"/api/settings/providers/{created['id']}/reveal")
         assert status == 401
         status, _ = _req(port, "POST", "/api/settings/providers/p_none/reveal", {"x": 1}, headers=H)
         assert status == 404

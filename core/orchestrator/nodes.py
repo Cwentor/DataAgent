@@ -348,6 +348,10 @@ def planner_node(state: AgentState) -> AgentState:
         planner_used = "heuristic"
     else:
         planner_used = "llm"
+    # plan_review 修改指令已注入提示词，消费即清除——路由以指令存在性判定
+    # "待重规划"，不清除会导致 planner 空转循环
+    if state.plan_edit_instruction:
+        state = state.apply(plan_edit_instruction=None)
     events.emit_plan(steps)
     return state.apply(plan_steps=steps, phase="query", scratchpad=[f"[planner] {planner_used}"])
 

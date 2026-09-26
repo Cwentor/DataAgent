@@ -110,12 +110,11 @@ MAX_AGENT_STEPS: int = int(os.getenv("MAX_AGENT_STEPS", "5"))
 AGENT_REFLECTION_ENABLED: bool = os.getenv("AGENT_REFLECTION_ENABLED", "1") == "1"
 
 # --------------------------------------------------------------------------- #
-# Agent harness evolution (M0)：双引擎开关与 LangGraph 超级步护栏
+# Agent harness evolution：LangGraph 超级步护栏（M4 已单引擎收敛）
 # --------------------------------------------------------------------------- #
-# 编排图引擎：native = 自研 StateGraph（迁移前行为，回退路径）；
-# langgraph = 六节点同构编译（core/orchestrator/langgraph_engine.py）
-ORCHESTRATOR_ENGINE: str = os.getenv("ORCHESTRATOR_ENGINE", "native")
-# LangGraph 超级步护栏（与 native iteration>24 护栏语义校准，见计划 Task 5）
+# 自主性默认档（规格 §5.2）：生产默认 L2 计划确认；测试环境置 L4 全自动
+AGENT_DEFAULT_AUTONOMY: str = os.getenv("AGENT_DEFAULT_AUTONOMY", "L2")
+# 超级步护栏（M0 迁移期与 native iteration>24 校准；M4 起为唯一护栏口径）
 ORCHESTRATOR_RECURSION_LIMIT: int = int(os.getenv("ORCHESTRATOR_RECURSION_LIMIT", "64"))
 # 图执行快照持久化（SqliteSaver）：非空时 clarify/plan_review 挂起可跨进程重启恢复；
 # 与会话记忆（STATE_STORE_DB / SessionStore）各司其职，互不替代（设计 §4.2）
@@ -125,11 +124,6 @@ SUBAGENT_MAX_PARALLEL: int = int(os.getenv("SUBAGENT_MAX_PARALLEL", "4"))
 # critique 充分性不足时的重派上限（规格 §6.4：≤1 轮，不无限重试）
 SUBAGENT_REDISPATCH_MAX: int = int(os.getenv("SUBAGENT_REDISPATCH_MAX", "1"))
 
-# --------------------------------------------------------------------------- #
-# Agent harness evolution (M1)：HTTP 引擎开关
-# --------------------------------------------------------------------------- #
-# stdlib = ThreadingHTTPServer（迁移前行为，回退路径）；fastapi = uvicorn + web.api:app
-WEB_SERVER_ENGINE: str = os.getenv("WEB_SERVER_ENGINE", "stdlib")
 
 # --------------------------------------------------------------------------- #
 # 意图路由与决策中心（Intent Router & Decision Engine）—— 见 agent/router/

@@ -112,7 +112,6 @@ def test_redispatch_once_then_disclose(monkeypatch):
 def test_native_engine_serial_fallback(monkeypatch):
     """native 引擎降级：fan-out 退化为串行 for 循环（新增能力皆可降级）。"""
     monkeypatch.setattr("config.settings.LLM_API_KEY", "")
-    monkeypatch.setattr("config.settings.ORCHESTRATOR_ENGINE", "native")
     from core.orchestrator.langgraph_engine import run_fanout_serial
 
     reports = run_fanout_serial([_task(i) for i in range(2)], thread_id="u1:f6")
@@ -136,7 +135,6 @@ def test_facade_done_event_carries_run_manifest(monkeypatch, tmp_path):
     from config import settings
 
     monkeypatch.setattr("config.settings.LLM_API_KEY", "")
-    monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", "langgraph")
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     import core.orchestrator.langgraph_engine as lge_mod
     from core.orchestrator.state import PlanStep, SubagentReport

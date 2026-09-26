@@ -11,15 +11,23 @@
 
 from __future__ import annotations
 
-import http.client
-import json
-import threading
 import time
 
 import pytest
+from fastapi.testclient import TestClient
 
-from web.server import Handler, ThreadingHTTPServer
+from web.api import app
 from web.service import ensure_db
+
+
+class _FakeServer:
+    """TestClient 桥接桩：保持旧 _start_server/_request 调用形态，测试体零改动。"""
+
+    def shutdown(self) -> None:
+        pass
+
+    def server_close(self) -> None:
+        pass
 
 
 @pytest.fixture(scope="module")
@@ -29,27 +37,26 @@ def warehouse():
     return None
 
 
+_current_client = None
+
+
 def _start_server():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    port = server.server_address[1]
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    return server, port
+    """每个用例独立 TestClient：不继承上一用例的会话 Cookie（对齐
+    stdlib http.client 无 Cookie 持久化的旧行为，未认证用例才不至于被
+    前序登录的 Set-Cookie 意外放行）。"""
+    global _current_client
+    _current_client = TestClient(app, raise_server_exceptions=False)
+    return _FakeServer(), 0
 
 
 def _request(port, method, path, payload=None, headers=None, timeout=10):
-    """测试 HTTP 客户端：显式回环地址 + http.client，目标仅限本地测试服务。"""
-    data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    hdrs = {"Content-Type": "application/json"}
-    hdrs.update(headers or {})
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    """测试 HTTP 客户端（M4 迁移至 TestClient；签名保持，测试体零改动）。"""
+    resp = _current_client.request(method, path, json=payload, headers=headers or {})
     try:
-        conn.request(method, path, body=data, headers=hdrs)
-        resp = conn.getresponse()
-        body = resp.read().decode("utf-8")
-        return resp.status, json.loads(body), resp
-    finally:
-        conn.close()
+        body = resp.json()
+    except ValueError:
+        body = {}
+    return resp.status_code, body, resp
 
 
 def _login(port, username, password):
@@ -174,12 +181,12 @@ def test_login_wrong_password_401():
 def test_login_rate_limited_after_repeated_failures():
     """P0-4：连续失败触发用户名+IP 指数退避限流（429 + Retry-After）。"""
     import auth.ratelimit as ratelimit
-    from web import server as web_server
+    import web.api as web_api
 
     limiter = ratelimit.LoginRateLimiter(max_failures=3, base_seconds=30.0)
-    # 使用独立的 limiter 实例避免污染默认单例
-    original = web_server.default_login_limiter
-    web_server.default_login_limiter = lambda: limiter
+    # 使用独立的 limiter 实例避免污染默认单例（M4 起端点逻辑在 web.api，打桩点随之）
+    original = web_api.default_login_limiter
+    web_api.default_login_limiter = lambda: limiter
     server, port = _start_server()
     try:
         for _ in range(3):
@@ -192,7 +199,7 @@ def test_login_rate_limited_after_repeated_failures():
         status2, _, _ = _login(port, "admin", "admin123")
         assert status2 == 200
     finally:
-        web_server.default_login_limiter = original
+        web_api.default_login_limiter = original
         server.shutdown()
         server.server_close()
 
@@ -474,14 +481,9 @@ def _create_export(port, headers):
 
 
 def _download(port, path, headers, timeout=10):
-    """下载端点返回文件字节（非 JSON），单独封装取状态码与原始响应。"""
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    try:
-        conn.request("GET", path, headers=headers or {})
-        resp = conn.getresponse()
-        return resp.status, resp.read(), resp
-    finally:
-        conn.close()
+    """下载端点返回文件字节（非 JSON），单独封装取状态码与原始响应（M4 迁 TestClient）。"""
+    resp = _current_client.get(path, headers=headers or {})
+    return resp.status_code, resp.content, resp
 
 
 def test_export_owner_can_download(warehouse):

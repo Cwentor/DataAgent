@@ -290,7 +290,7 @@ DataAgent/
 | 运行时与依赖 | Python 3.11+（锁定 3.12）+ Miniconda；生产运行时仅 4 个依赖 | 依赖面即攻击面与升级成本面；numpy / pandas / pyarrow 仅作开发依赖（沙箱与技能包数值栈），生产检索链路不经过 |
 | 语义层 `semantic/` | Pydantic V2 强契约（`extra="forbid"`）+ `catalog.py` 字段白名单 SSOT | 契约即约束：LLM 只能产出已登记的字段 / 操作符 / 聚合，未声明字段在编译前即被拒绝 |
 | 智能层 `agent/` | LLM / 启发式双路径 + 意图路由 + 多轮槽位回填；RAG 用字符 bigram + TF-IDF 余弦 | 离线无 Key 时确定性兜底、LLM 故障安全降级；检索零分词 / 零向量库 / 零外部模型，任意机器结果一致可复现 |
-| 编排层 `core/orchestrator/` | 自研轻量 StateGraph（节点 + 条件边 + HITL 中断恢复 + 迭代护栏），范式对齐 LangGraph，接口保留迁移路径 | 图需求克制（6 节点 / 2 条件边 / 1 中断点），框架的抽象成本超过收益；`AgentState` 同样 `extra="forbid"`，事件总线直接对接 SSE 九类事件 |
+| 编排层 `core/orchestrator/` | LangGraph 单引擎（十七期 M4 收敛）：六节点语义平移 + interrupt 泛化（clarify / plan_review 审批门）+ L1-L4 自主性分级 + Subagent fan-out；checkpointer 支持（ORCHESTRATOR_CHECKPOINT_DB，生产建议落盘） | 长任务 / 多步规划 / 多智能体（fan-out）需要 checkpointing、interrupt、Send 等成熟原语；领域内核 4 依赖不变，编排层依赖精确 pin + 全量回归门；`AgentState` 保持 `extra="forbid"`，事件总线（SSE 九类事件）不动 |
 | 编译层 `compiler/` | 确定性 SQL 编译器（Pydantic 契约驱动生成） | SQL 只由编译器产出、LLM 永不提交裸 SQL——可复现、可单测、零注入 |
 | 执行层 `exec/` | sqlglot AST 静态审计 + 线程看门狗 `conn.interrupt()` 超时取消 + `EXPLAIN ANALYZE` 扫描预检熔断 + LIMIT 硬上限 | 审计与资源治理全部确定性实现；编译 / 引擎报错喂回 LLM 重写 DSL 自愈（受控重试上限） |
 | 检索门面 `core/retrieval/` | typed Tool（`execute_dsl_query -> ParquetRef`）+ PII 脱敏（列名启发式 + 值形态正则 + 确定性哈希掩码）+ sha256 Parquet 物化 + DataQA 四类结果断言 | 沙箱零网络零 DB socket、数据交换全程可审计；质检发现不否决执行，全链路留痕、不误杀不吞错 |

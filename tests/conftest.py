@@ -45,6 +45,34 @@ def _clean_run_registry():
 
 
 @pytest.fixture(autouse=True)
+def _default_autonomy_l4(monkeypatch):
+    """测试默认 L4 全自动（规格 §5.2 降级档）：Plan Mode 之外的既有用例
+    不被审批门打断；Plan Mode 专属用例显式传 autonomy_level 覆盖。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "AGENT_DEFAULT_AUTONOMY", "L4")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_langgraph_singletons():
+    """每个测试结束后丢弃 LangGraph 进程级单例（M4 内存护栏）。
+
+    MemorySaver 的 checkpoint 只增不减：每个超级步存一份完整 AgentState
+    （含 datasets 预览行 / artifacts 报告 / 工具轨迹），多步诊断流一次可产生
+    数十份快照。单例跨测试累积会让重 SSE 套件内存无界增长（实测
+    test_agent_stream 因此内存耗尽）；每测试重建同时消除跨测试的
+    checkpoint 串染（thread_id 冲突隐患）。生产长驻进程应配置
+    ORCHESTRATOR_CHECKPOINT_DB 落盘（SqliteSaver）。
+    """
+    yield
+    import core.orchestrator.langgraph_engine as lge
+
+    lge._app = None
+    lge._checkpointer = None
+
+
+@pytest.fixture(autouse=True)
 def _offline_llm(monkeypatch, tmp_path):
     """测试默认离线（确定性可复现铁律）：屏蔽本地 .env / providers.json 中的
     真实 LLM Key，重置 Model Provider 网关单例，杜绝用例发起真实网络调用。

@@ -103,8 +103,10 @@ core/retrieval/     检索门面：DSL 管道 typed Tool 化（execute_dsl_query
                     动态 profiling（低基数字段枚举值注入规划上下文）、
                     DataQA 结果断言（空结果 / NULL 率 / 负值 / 维度唯一性，
                     发现随 ParquetRef.audit 输出，编排与 web 双链路同源）
-core/orchestrator/  图式编排：StateGraph（六节点 + 条件边 + HITL 中断恢复 +
-                    反思重规划 ≤3 次自愈 + 自愈错误上下文注入 Planner）；
+core/orchestrator/  图式编排（LangGraph 单引擎，M4 收敛）：六节点 + interrupt 泛化
+                    （clarify/plan_review 审批门）+ L1-L4 自主性分级 +
+                    Subagent fan-out（受限任务卡 + 四节点子图 + 预算硬顶）+
+                    反思重规划 ≤3 次自愈 + 自愈错误上下文注入 Planner；
                     Planner/Coder/Reflector 提示词与 Few-Shot
 core/sandbox/       沙箱代码解释器：AST 静态守卫 + 限权 runner（模块白名单 import +
                     workspace 受限 open）+ 可插拔后端（Docker 强隔离 / 子进程兜底）

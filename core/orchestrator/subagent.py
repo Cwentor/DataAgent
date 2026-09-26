@@ -17,57 +17,20 @@ from __future__ import annotations
 import operator
 import threading
 from collections.abc import Callable
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END
 from langgraph.graph import StateGraph as LGStateGraph
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
-import core.orchestrator.state as _state_mod
-from core.orchestrator.state import AgentState, Artifact
-from tools.registry import default_registry
-
-
-class SubagentBudget(BaseModel):
-    """子任务预算硬顶（extra="forbid"）。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    max_steps: int = 6
-    timeout_seconds: float = 120.0
-
-
-class SubagentTask(BaseModel):
-    """受限任务卡：上下文切片 + 工具子集白名单 + 预算（规格 §6.1）。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    task_id: str
-    goal: str
-    # 上下文切片：schema digest 片段 / 相关过滤条件 / 上轮 DSL 引用
-    context_slice: dict[str, Any] = Field(default_factory=dict)
-    allowed_tools: list[str] = Field(default_factory=list)
-    budget: SubagentBudget = SubagentBudget()
-
-    def model_post_init(self, __context: Any) -> None:
-        unknown = set(self.allowed_tools) - set(default_registry().tool_names())
-        if unknown:
-            raise ValueError(f"allowed_tools 越过注册中心白名单: {sorted(unknown)}")
-
-
-class SubagentReport(BaseModel):
-    """结构化报告（父图唯一消费物）；audit 与 ParquetRef.audit 同源同格式。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    task_id: str
-    status: Literal["done", "failed", "timeout"] = "done"
-    findings: list[str] = Field(default_factory=list)
-    artifacts: list[Artifact] = Field(default_factory=list)
-    audit: dict[str, Any] = {}
-    metrics: dict[str, Any] = {}
+from core.orchestrator.state import (
+    AgentState,
+    SubagentBudget,
+    SubagentReport,
+    SubagentTask,
+)
 
 
 class SubagentState(AgentState):
@@ -227,9 +190,3 @@ __all__ = [
     "SubagentTask",
     "run_subagent",
 ]
-
-
-# AgentState 的 "SubagentReport" 前向引用在此解析（subagent -> state 单向依赖，
-# 反向仅以字符串前向引用存在）；缺省 list[SubagentReport] 契约由本 rebuild 落地
-_state_mod.SubagentReport = SubagentReport
-_state_mod.AgentState.model_rebuild()

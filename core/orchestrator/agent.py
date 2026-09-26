@@ -24,15 +24,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from audit.logging import get_logger
 from config import settings
 from core.orchestrator import events
-from core.orchestrator.graph import StateGraph
-from core.orchestrator.nodes import (
-    clarify_node,
-    code_exec_node,
-    critic_node,
-    dsl_query_node,
-    planner_node,
-    synthesize_node,
-)
 from core.orchestrator.state import AgentState
 
 logger = get_logger("core.orchestrator.agent")
@@ -75,32 +66,6 @@ def route_from_plan(state: AgentState) -> str:
 
 def route_from_critic(state: AgentState) -> str:
     return state.phase  # plan(重规划) | synthesize
-
-
-def build_graph(*, max_iterations: int = 24) -> StateGraph:
-    """装配六节点图：clarify -> plan -> query -> analyze -> critique -> synthesize。"""
-    graph = StateGraph(max_iterations=max_iterations)
-    graph.add_node("clarify", clarify_node)
-    graph.add_node("plan", planner_node)
-    graph.add_node("query", dsl_query_node)
-    graph.add_node("analyze", code_exec_node)
-    graph.add_node("critique", critic_node)
-    graph.add_node("synthesize", synthesize_node)
-    graph.set_entry("clarify")
-
-    graph.add_edge("clarify", "plan")
-    graph.add_conditional_edges(
-        "plan",
-        route_from_plan,
-        {"query": "query", "analyze": "analyze", "critique": "critique"},
-    )
-    graph.add_edge("query", "analyze")
-    graph.add_edge("analyze", "critique")
-    graph.add_conditional_edges(
-        "critique", route_from_critic, {"plan": "plan", "synthesize": "synthesize"}
-    )
-    graph.add_edge("synthesize", "END")
-    return graph
 
 
 def run_agent(
@@ -243,33 +208,22 @@ def _run_agent_inner(
     principal: str | None = None,
     autonomy_level: str | None = None,
 ) -> AgentState:
-    """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。"""
-    if settings.ORCHESTRATOR_ENGINE == "langgraph":
-        return _run_agent_langgraph_path(
-            question,
-            session_id=session_id,
-            turn_id=turn_id,
-            trace_id=trace_id,
-            human_reply=human_reply,
-            resume_state=resume_state,
-            principal=principal,
-            autonomy_level=autonomy_level,
-        )
-    if resume_state is not None:
-        graph = build_graph()
-        return graph.resume(resume_state)
-    state = AgentState(
+    """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。
+
+    M4 单引擎收敛：旧自研 StateGraph 与 ORCHESTRATOR_ENGINE 开关已删除，
+    本函数恒走 LangGraph 路径（签名保持，调用方零改动）。
+    """
+    return _run_agent_langgraph_path(
+        question,
         session_id=session_id,
         turn_id=turn_id,
         trace_id=trace_id,
-        user_query=question,
-        history_digest=history_digest or "",
         human_reply=human_reply,
-        phase="clarify" if human_reply is None else "plan",
-        **({"autonomy_level": autonomy_level} if autonomy_level else {}),
+        resume_state=resume_state,
+        history_digest=history_digest,
+        principal=principal,
+        autonomy_level=autonomy_level,
     )
-    graph = build_graph()
-    return graph.run(state)
 
 
 def _run_agent_langgraph_path(
@@ -280,6 +234,7 @@ def _run_agent_langgraph_path(
     trace_id: str,
     human_reply: str | None,
     resume_state: AgentState | None,
+    history_digest: str | None = None,
     principal: str | None = None,
     autonomy_level: str | None = None,
 ) -> AgentState:
@@ -324,6 +279,7 @@ def _run_agent_langgraph_path(
         turn_id=turn_id,
         trace_id=trace_id,
         user_query=question,
+        history_digest=history_digest or "",
         human_reply=human_reply,
         phase="clarify" if human_reply is None else "plan",
         **({"autonomy_level": autonomy_level} if autonomy_level else {}),
@@ -333,6 +289,10 @@ def _run_agent_langgraph_path(
             state, thread_id=_checkpoint_thread_id(principal, session_id)
         )
     except GraphRecursionError:
+        logger.error(
+            "图迭代步数超限，强制终止",
+            extra={"error": f"recursion_limit={settings.ORCHESTRATOR_RECURSION_LIMIT}"},
+        )
         return state.apply(phase="done", report=(state.report or "") + _guard_report)
     if pending and pending.get("kind") == "plan_review":
         # plan_review 挂起：与 clarify 共用 AgentState pause 契约
@@ -340,7 +300,7 @@ def _run_agent_langgraph_path(
     return final
 
 
-__all__ = ["AgentTrace", "build_graph", "run_agent"]
+__all__ = ["AgentTrace", "run_agent"]
 
 
 def _checkpoint_thread_id(principal: str | None, session_id: str) -> str:
