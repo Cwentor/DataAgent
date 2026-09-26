@@ -122,6 +122,14 @@
     }
   }
 
+  /** 读当前会话自主性档位（localStorage 会话级持久化；缺省 L2 计划确认）。 */
+  function autonomyLevel() {
+    try {
+      var v = localStorage.getItem("agent.autonomy." + (activeThreadId || "_blank"));
+      return v || "L2";
+    } catch (e) { return "L2"; }
+  }
+
   function setActiveThread(id) {
     var next = id || "";
     // 连接预算治理（SSE 断连根因）：浏览器对同主机 HTTP/1.1 仅允许 6 条并发
@@ -540,6 +548,16 @@
 
     document.getElementById("new-thread-btn").addEventListener("click", newThread);
 
+    // 自主性分级（M2）：按会话持久化（agent.autonomy.<threadId>），随 run 请求上送
+    var autonomySelect = document.getElementById("autonomy-select");
+    if (autonomySelect) {
+      autonomySelect.value = autonomyLevel();
+      autonomySelect.addEventListener("change", function () {
+        var tid = activeThreadId || "_blank";
+        try { localStorage.setItem("agent.autonomy." + tid, autonomySelect.value); } catch (e) { /* 隐私模式忽略 */ }
+      });
+    }
+
     restoreActiveThread();
     renderThreads();
   }
@@ -552,6 +570,8 @@
     newThread: newThread,
     /** 当前活跃会话 id（事件路由判定用）。 */
     activeThreadId: function () { return activeThreadId; },
+    /** 当前会话的自主性档位（M2）：随 run 请求上送，缺省 L2。 */
+    autonomyLevel: function () { return autonomyLevel(); },
     /** 登记会话的服务端 runId（重放清单 + 状态轮询）。 */
     attachRun: attachRun,
     /** 轮询快照入缓存（app.js 轮询回调也可驱动）。 */

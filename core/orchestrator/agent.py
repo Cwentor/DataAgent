@@ -114,6 +114,7 @@ def run_agent(
     history_digest: str | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     principal: str | None = None,
+    autonomy_level: str | None = None,
 ) -> AgentTrace | AgentState:
     """运行一次编排（同步简化版；HITL 恢复经 resume_state 传入）。
 
@@ -149,6 +150,7 @@ def run_agent(
             resume_state=resume_state,
             history_digest=history_digest,
             principal=principal,
+            autonomy_level=autonomy_level,
         )
         if on_event is not None:
             # 终态收尾事件（复位观察者前发射，否则为 no-op）
@@ -227,6 +229,7 @@ def _run_agent_inner(
     resume_state: AgentState | None,
     history_digest: str | None,
     principal: str | None = None,
+    autonomy_level: str | None = None,
 ) -> AgentState:
     """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。"""
     if settings.ORCHESTRATOR_ENGINE == "langgraph":
@@ -238,6 +241,7 @@ def _run_agent_inner(
             human_reply=human_reply,
             resume_state=resume_state,
             principal=principal,
+            autonomy_level=autonomy_level,
         )
     if resume_state is not None:
         graph = build_graph()
@@ -250,6 +254,7 @@ def _run_agent_inner(
         history_digest=history_digest or "",
         human_reply=human_reply,
         phase="clarify" if human_reply is None else "plan",
+        **({"autonomy_level": autonomy_level} if autonomy_level else {}),
     )
     graph = build_graph()
     return graph.run(state)
@@ -264,6 +269,7 @@ def _run_agent_langgraph_path(
     human_reply: str | None,
     resume_state: AgentState | None,
     principal: str | None = None,
+    autonomy_level: str | None = None,
 ) -> AgentState:
     """LangGraph 引擎路径：对外挂起契约与 native 逐字段一致（phase=clarify 中间态）。
 
@@ -308,6 +314,7 @@ def _run_agent_langgraph_path(
         user_query=question,
         human_reply=human_reply,
         phase="clarify" if human_reply is None else "plan",
+        **({"autonomy_level": autonomy_level} if autonomy_level else {}),
     )
     try:
         final, pending = invoke_langgraph(

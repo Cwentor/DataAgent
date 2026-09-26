@@ -592,6 +592,7 @@ async def agent_chat_stream(request: Request):
     resume_token = params.get("resume_token", "").strip() or None
     provider_id = params.get("provider_id", "").strip() or None
     model_id = params.get("model_id", "").strip() or None
+    autonomy_level = params.get("autonomy_level", "").strip() or None
     run_id = params.get("run_id", "").strip() or None
     # M2 Plan Mode：审批动作三选一（approve/edit/reject）编码进 human_reply 通道，
     # 引擎侧解码后注入对应 gate（clarify 的纯文本答复不受影响）
@@ -649,6 +650,7 @@ async def agent_chat_stream(request: Request):
         session_key=session_key,
         provider_id=provider_id,
         model_id=model_id,
+        autonomy_level=autonomy_level,
     )
     return _sse_follow(registry, run.run_id, 0, owner)
 

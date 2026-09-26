@@ -201,6 +201,7 @@ class RunRegistry:
         history_digest: str | None = None,
         provider_id: str | None = None,
         model_id: str | None = None,
+        autonomy_level: str | None = None,
     ) -> AgentRun:
         """启动一次后台编排并立即返回 run（订阅者随后按游标接入）。
 
@@ -216,7 +217,7 @@ class RunRegistry:
             self._evict_overflow_locked()
         threading.Thread(
             target=self._execute,
-            args=(run, query, history_digest, provider_id, model_id),
+            args=(run, query, history_digest, provider_id, model_id, autonomy_level),
             daemon=True,
             name=f"agent-run-{run.run_id}",
         ).start()
@@ -240,6 +241,7 @@ class RunRegistry:
         history_digest: str | None,
         provider_id: str | None,
         model_id: str | None,
+        autonomy_level: str | None = None,
     ) -> None:
         """编排执行体：事件入缓冲，HITL 暂停登记恢复态，终态回写会话记忆。"""
         from providers.context import pop_request_model, set_request_model
@@ -254,6 +256,7 @@ class RunRegistry:
                 history_digest=history_digest,
                 on_event=self._observer(run),
                 principal=run.owner,
+                autonomy_level=autonomy_level,
             )
             self._finish_result(run, query, result)
         except Exception as exc:  # 编排异常收敛为 error 事件（不崩进程）

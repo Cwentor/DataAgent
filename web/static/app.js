@@ -598,6 +598,23 @@
    *  只在当前活跃会话的卡上绑定 pill/输入行为；答复后卡片打「已答复」标记，
    *  严禁对历史快照里的旧卡重复绑定（stale resume_token 误提交防护）。 */
   function bindHitlCard() {
+    var planCard = document.querySelector("#chat-stream .plan-review-card:not([data-answered])");
+    if (planCard) {
+      planCard.querySelectorAll("[data-plan-action]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var action = btn.dataset.planAction;
+          if (action === "edit") {
+            var input = planCard.querySelector(".plan-edit-input");
+            var instruction = (input && input.value.trim()) || "";
+            if (!instruction) { input && input.focus(); return; }
+            submitPlanAction("edit", planCard, instruction);
+          } else {
+            submitPlanAction(action, planCard);
+          }
+        });
+      });
+      return;
+    }
     var card = document.querySelector("#chat-stream .hitl-card:not([data-answered])");
     if (!card) { return; }
     card.querySelectorAll(".hitl-pill:not(.hitl-send)").forEach(function (pill) {
@@ -619,6 +636,37 @@
         }
       });
     }
+  }
+
+  /** 分析计划审批动作提交（M2）：approve/reject 直接续流；edit 弹出修改指令。
+   *  复用 resume_token 恢复通道，动作经 action/instruction 参数上送。 */
+  function submitPlanAction(action, cardEl, instruction) {
+    var threadId = AgentSidebarUI.activeThreadId();
+    var rt = AgentStore.getRuntime(threadId);
+    if (cardEl) {
+      cardEl.dataset.answered = "1";
+      var done = document.createElement("div");
+      done.className = "hitl-answered";
+      var label = { approve: "已批准", reject: "已拒绝", edit: "已提交修改" }[action] || action;
+      done.textContent = instruction ? label + "：" + instruction : label;
+      cardEl.appendChild(done);
+    }
+    var sel = selectedProviderModel();
+    AgentStore.setRunning(true);
+    var handle = AgentEventSource.open(
+      AgentProtocol.buildStreamUrl({
+        resume_token: rt.resumeToken,
+        action: action,
+        instruction: instruction || "",
+        run_id: rt.runId || "",
+        after: rt.lastSeq || "",
+        provider_id: sel.provider_id,
+        model_id: sel.model_id,
+        thread: threadId
+      }),
+      streamHandlers(threadId)
+    );
+    rt.handle = handle;
   }
 
   function submitHitlReply(reply, cardEl) {
@@ -793,15 +841,26 @@
         break;
 
       case "hitl_request":
-        AgentStore.setHitl({
-          question: (p.hitl && p.hitl.question) || "请补充分析需求",
-          options: (p.hitl && p.hitl.options) || []
-        });
-        AgentStore.pushTimeline({
-          kind: "hitl",
-          question: (p.hitl && p.hitl.question) || "",
-          options: (p.hitl && p.hitl.options) || []
-        });
+        if (p.kind === "plan_review") {
+          // M2 Plan Mode：分析计划审批卡（步骤 DAG + 批准/修改/拒绝）
+          AgentStore.setHitl({ planReview: true, planSteps: (p.hitl && p.hitl.plan_steps) || [], summary: (p.hitl && p.hitl.summary) || "" });
+          AgentStore.pushTimeline({
+            kind: "plan_review",
+            planSteps: (p.hitl && p.hitl.plan_steps) || [],
+            summary: (p.hitl && p.hitl.summary) || ""
+          });
+        } else {
+          // kind 缺省回退 clarify 卡（旧服务端兼容）
+          AgentStore.setHitl({
+            question: (p.hitl && p.hitl.question) || "请补充分析需求",
+            options: (p.hitl && p.hitl.options) || []
+          });
+          AgentStore.pushTimeline({
+            kind: "hitl",
+            question: (p.hitl && p.hitl.question) || "",
+            options: (p.hitl && p.hitl.options) || []
+          });
+        }
         AgentStore.setRunning(false);
         AgentSidebarUI.noteRunStatus(
           (AgentStore.getRuntime(threadId) || {}).runId, "paused");
@@ -926,7 +985,8 @@
         query: q,
         thread: threadId,
         provider_id: sel.provider_id,
-        model_id: sel.model_id
+        model_id: sel.model_id,
+        autonomy_level: AgentSidebarUI.autonomyLevel()
       }),
       streamHandlers(threadId)
     );

@@ -95,6 +95,9 @@
     if (extra.thread) { params.set("thread", extra.thread); }
     if (extra.human_reply) { params.set("human_reply", extra.human_reply); }
     if (extra.resume_token) { params.set("resume_token", extra.resume_token); }
+    if (extra.action) { params.set("action", extra.action); }
+    if (extra.instruction) { params.set("instruction", extra.instruction); }
+    if (extra.autonomy_level) { params.set("autonomy_level", extra.autonomy_level); }
     if (extra.provider_id) { params.set("provider_id", extra.provider_id); }
     if (extra.model_id) { params.set("model_id", extra.model_id); }
     if (extra.run_id) { params.set("run_id", extra.run_id); }
