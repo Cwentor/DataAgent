@@ -189,3 +189,56 @@ def test_event_reflection_on_replan(tmp_path, monkeypatch):
     )
     # 最终应有一次 proceed（转入综合）
     assert any(r["payload"]["reflection"]["decision"] == "proceed" for r in reflections)
+
+
+# ---------------------------------------------------------------------------
+# M0 前置审计（docs/plans/2026-09-26-agent-harness-evolution-m0-m4.md Task 2）：
+# 事件总线在多线程调用方下的隔离性与异常契约，作为 LangGraph 迁移的设计依据。
+# ---------------------------------------------------------------------------
+
+
+def test_emit_event_observers_are_contextvar_isolated():
+    """两个线程各自 set_observer 并发发射：观察者不得串话（A 线程的事件不得进 B 的收集器）。
+
+    contextvar 天然线程隔离——本测试把该性质固化为回归锚点；
+    LangGraph 池线程中观察者是否可达由 langgraph_engine 的节点包装器保证（Task 4）。
+    """
+    import threading
+
+    from core.orchestrator import events as ev
+
+    box_a: list[str] = []
+    box_b: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker(box: list[str], name: str) -> None:
+        token = ev.set_observer(lambda e: box.append(f"{name}:{e['event']}"))
+        try:
+            barrier.wait()
+            for _ in range(50):
+                ev.emit_event(ev.EVENT_STEP_START, {"who": name})
+        finally:
+            ev.reset_observer(token)
+
+    t1 = threading.Thread(target=worker, args=(box_a, "a"))
+    t2 = threading.Thread(target=worker, args=(box_b, "b"))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert box_a == ["a:step_start"] * 50
+    assert box_b == ["b:step_start"] * 50
+
+
+def test_emit_event_swallows_observer_exception():
+    """观察者抛异常不得打断编排节点（emit_event 契约：异常吞并并告警）。"""
+    from core.orchestrator import events as ev
+
+    def _boom(_event: dict) -> None:
+        raise RuntimeError("boom")
+
+    token = ev.set_observer(_boom)
+    try:
+        ev.emit_event(ev.EVENT_STEP_START, {})  # 不应抛出
+    finally:
+        ev.reset_observer(token)
