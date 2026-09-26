@@ -174,7 +174,19 @@ def run_agent(
                     },
                 )
             else:
-                events.emit_event(events.EVENT_DONE, {"report": final.report})
+                manifest = [
+                    {
+                        "task_id": r.task_id,
+                        "status": r.status,
+                        "steps": len(r.findings),
+                    }
+                    for r in (getattr(final, "subagent_reports", None) or [])
+                ]
+                done_payload = {"report": final.report}
+                if manifest:
+                    # B 线（M3）：run manifest 随 done 事件构成完整审计轨迹
+                    done_payload["manifest"] = manifest
+                events.emit_event(events.EVENT_DONE, done_payload)
     except Exception as exc:
         logger.exception(
             "编排执行失败",

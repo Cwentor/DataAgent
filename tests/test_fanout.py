@@ -90,7 +90,6 @@ def test_redispatch_once_then_disclose(monkeypatch):
     import core.orchestrator.langgraph_engine as lge
 
     attempts = {"n": 0}
-    real = lge.run_subagent
 
     def always_fail(task, **kwargs):
         attempts["n"] += 1
@@ -118,3 +117,72 @@ def test_native_engine_serial_fallback(monkeypatch):
 
     reports = run_fanout_serial([_task(i) for i in range(2)], thread_id="u1:f6")
     assert [r.task_id for r in reports] == ["t0", "t1"]
+
+
+def test_task_id_tagged_observer():
+    """Task 15：子任务事件标签器——payload 统一补 task_id 后转发（汇流契约）。"""
+    from core.orchestrator.subagent import _task_id_tagged
+
+    seen = []
+    tagged = _task_id_tagged(seen.append, "t9")
+    tagged({"event": "tool_start", "payload": {"step_id": "s1"}})
+    assert seen[0]["payload"]["task_id"] == "t9"
+    assert seen[0]["event"] == "tool_start"
+    assert _task_id_tagged(None, "t9") is None
+
+
+def test_facade_done_event_carries_run_manifest(monkeypatch, tmp_path):
+    """Task 15：fan-out 完成后 done 事件 payload 携带 run manifest（审计轨迹）。"""
+    from config import settings
+
+    monkeypatch.setattr("config.settings.LLM_API_KEY", "")
+    monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", "langgraph")
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    import core.orchestrator.langgraph_engine as lge_mod
+    from core.orchestrator.state import PlanStep, SubagentReport
+
+    def fake_run_subagent(task, *, thread_id, observer=None):
+        return SubagentReport(
+            task_id=task.task_id,
+            status="done",
+            findings=[f"结论 {task.task_id}"],
+            audit={"guard": "ok", "qa": []},
+        )
+
+    monkeypatch.setattr(lge_mod, "run_subagent", fake_run_subagent)
+
+    def fake_planner(state):
+        step = PlanStep(
+            id="s1",
+            goal="区域归因",
+            kind="query",
+            fanout_tasks=[
+                {"task_id": "t0", "goal": "区域0 归因", "context_slice": {}, "allowed_tools": []},
+                {"task_id": "t1", "goal": "区域1 归因", "context_slice": {}, "allowed_tools": []},
+            ],
+        )
+        return state.apply(plan_steps=[step], phase="query")
+
+    def fake_critic(state):
+        return state.apply(phase="synthesize")
+
+    def fake_synth(state):
+        return state.apply(phase="done", report="综合报告")
+
+    monkeypatch.setattr(lge_mod, "planner_node", fake_planner)
+    monkeypatch.setattr(lge_mod, "critic_node", fake_critic)
+    monkeypatch.setattr(lge_mod, "synthesize_node", fake_synth)
+    monkeypatch.setattr(lge_mod, "_app", None)  # 强制重编译（节点编译期捕获）
+
+    from core.orchestrator.agent import run_agent
+
+    seen = []
+    out = run_agent(
+        "分析 2024 年各区域的 GMV 归因差异情况", session_id="s-manifest", on_event=seen.append
+    )
+    assert out.phase == "done"
+    done_events = [e for e in seen if e["event"] == "done"]
+    assert done_events and "manifest" in done_events[-1]["payload"]
+    manifest = done_events[-1]["payload"]["manifest"]
+    assert {m["task_id"] for m in manifest} == {"t0", "t1"}
+    assert all(m["status"] == "done" for m in manifest)

@@ -814,7 +814,8 @@
         // store.upsertToolEvent 向上匹配最近一个未结束的同名块完成增量合并
         AgentStore.upsertToolEvent({
           kind: "tool",
-          toolId: (p.step_id || "s") + ":" + (tool2.name || "t"),
+          toolId: (p.step_id || "s") + ":" + (tool2.name || "t") + (p.task_id ? ":" + p.task_id : ""),
+          taskId: p.task_id || null,
           ended: true,
           name: tool2.name || "",
           output: tool2.output || null,
@@ -877,6 +878,7 @@
         break;
 
       case "done":
+        if (p.manifest) { AgentStore.pushTimeline({ kind: "manifest", manifest: p.manifest }); }
         AgentStore.pushTimeline({ kind: "done" });
         AgentStore.setRunning(false);
         AgentStore.setHitl(null);

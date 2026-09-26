@@ -27,7 +27,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END
 from langgraph.graph import StateGraph as LGStateGraph
-from langgraph.types import Command, Send, interrupt
+from langgraph.types import Command, interrupt
 
 from config import settings
 from core.orchestrator import events
@@ -139,16 +139,14 @@ def _plan_gate(state: AgentState) -> AgentState:
 
 def route_from_plan_gate(state: AgentState) -> Any:
     """plan_gate 条件边路由：approve 交原 route_from_plan；edit 回 plan；
-    reject 收敛；plan 携带 fanout_tasks 时返回 Send 列表（B 线并行编排）。"""
+    reject 收敛；plan 携带 fanout_tasks 时转 fanout_orchestrator 汇聚节点。"""
     if state.phase == "plan" and state.plan_edit_instruction:
         return "plan"
     if state.phase == "done":
         return "plan_gate_end"
     for step in state.plan_steps:
         if step.fanout_tasks:
-            return [
-                Send("subagent_worker", SubagentTask.model_validate(t)) for t in step.fanout_tasks
-            ]
+            return "fanout_orchestrator"
     return route_from_plan(state)
 
 
@@ -167,16 +165,25 @@ def _get_worker_gate() -> threading.BoundedSemaphore:
         return _worker_gate
 
 
-def _subagent_worker(task: SubagentTask, config: dict) -> dict:
-    """Send worker：并发闸 + task_id 事件标签，报告经 append reducer 汇入主图。"""
+def _fanout_orchestrator(state: SubagentState, config: RunnableConfig) -> SubagentState:
+    """fan-out 汇聚节点：收集 plan 携带的任务卡，直驱 run_fanout（并发闸在线程内），
+    报告经 append reducer 通道并入状态后转 critique（充分性检查在 run_fanout 内完成）。
+
+    不用 Send 多分支：多 worker 汇合后临界节点的执行次数语义不可控，
+    单汇聚节点 + 线程并发语义等价且确定性可测（台账 Task 15 Ruling）。
+    """
     observer = ((config or {}).get("configurable") or {}).get("observer")
-    with _get_worker_gate():  # 并发上限护栏（审计结论：DuckDB 池容量安全边界）
-        report = run_subagent(
-            task,
-            thread_id=f"{config['configurable']['thread_id']}:sub:{task.task_id}",
-            observer=_task_id_tagged(observer, task.task_id),
-        )
-    return {"subagent_reports": [report]}
+    tasks = [
+        SubagentTask.model_validate(t)
+        for step in state.plan_steps
+        for t in (step.fanout_tasks or [])
+    ]
+    if not tasks:
+        return state.apply(phase="critique")
+    reports = run_fanout(
+        tasks, thread_id=str(config["configurable"]["thread_id"]), observer=observer
+    )
+    return state.apply(subagent_reports=state.subagent_reports + reports, phase="critique")
 
 
 def _execute_wave(tasks: list, *, thread_id: str, observer) -> list:
@@ -288,7 +295,8 @@ def _compile(checkpointer: Any) -> Any:
     g.add_conditional_edges("clarify_gate", route_from_clarify, {"plan": "plan"})
     g.add_node("plan_gate", _plan_gate)
     g.add_node("plan_gate_end", lambda s: s)
-    g.add_node("subagent_worker", _subagent_worker)
+    g.add_node("fanout_orchestrator", _fanout_orchestrator)
+    g.add_edge("fanout_orchestrator", "critique")
     g.add_edge("plan", "plan_gate")
     g.add_conditional_edges(
         "plan_gate",
@@ -299,6 +307,7 @@ def _compile(checkpointer: Any) -> Any:
             "critique": "critique",
             "plan": "plan",
             "plan_gate_end": "plan_gate_end",
+            "fanout_orchestrator": "fanout_orchestrator",
         },
     )
     g.add_edge("plan_gate_end", END)
