@@ -838,7 +838,11 @@ def _startup_security_issues(host: str) -> list[str]:
 
 
 def main() -> None:
-    """启动入口：安全预检 -> 建库 -> ThreadingHTTPServer 常驻服务。"""
+    """启动入口：安全预检 -> 建库 -> HTTP 引擎常驻服务。
+
+    WEB_SERVER_ENGINE=fastapi 时走 uvicorn（web.api:app），否则 stdlib
+    ThreadingHTTPServer（回退路径，M4 收敛时删除）。
+    """
     setup_logging(_level_from_str(settings.LOG_LEVEL))
     host = settings.WEB_HOST
     issues = _startup_security_issues(host)
@@ -848,6 +852,11 @@ def main() -> None:
         raise SystemExit(1)
     ensure_db()
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
+    if settings.WEB_SERVER_ENGINE == "fastapi":
+        import uvicorn
+
+        uvicorn.run("web.api:app", host=host, port=port, log_level="warning")
+        return
     server = ThreadingHTTPServer((host, port), Handler)
     auth_state = (
         "enabled"

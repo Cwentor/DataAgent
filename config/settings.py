@@ -108,6 +108,12 @@ ORCHESTRATOR_ENGINE: str = os.getenv("ORCHESTRATOR_ENGINE", "native")
 ORCHESTRATOR_RECURSION_LIMIT: int = int(os.getenv("ORCHESTRATOR_RECURSION_LIMIT", "64"))
 
 # --------------------------------------------------------------------------- #
+# Agent harness evolution (M1)：HTTP 引擎开关
+# --------------------------------------------------------------------------- #
+# stdlib = ThreadingHTTPServer（迁移前行为，回退路径）；fastapi = uvicorn + web.api:app
+WEB_SERVER_ENGINE: str = os.getenv("WEB_SERVER_ENGINE", "stdlib")
+
+# --------------------------------------------------------------------------- #
 # 意图路由与决策中心（Intent Router & Decision Engine）—— 见 agent/router/
 # --------------------------------------------------------------------------- #
 # LLM 语义分类器判决置信度阈值：低于该值拒绝采纳，优雅降级到规则兜底
