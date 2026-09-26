@@ -97,17 +97,30 @@ class AgentRun:
             self.resume_token = token
             self.paused_state = state.model_dump(mode="json")
             self.status = "paused"
+            if state.phase == "plan_review":
+                # M2 Plan Mode：审批卡需要步骤 DAG（kind 向后兼容，旧前端忽略）
+                payload = {
+                    "kind": "plan_review",
+                    "hitl": {
+                        "plan_steps": [s.model_dump(mode="json") for s in state.plan_steps],
+                        "summary": state.plan_steps[0].goal if state.plan_steps else "",
+                        "resume_token": token,
+                    },
+                }
+            else:
+                payload = {
+                    "kind": "clarify",
+                    "hitl": {
+                        "question": state.clarification or "请补充分析需求",
+                        "resume_token": token,
+                    },
+                }
             self._append_locked(
                 {
                     "turn_id": state.turn_id,
                     "event": "hitl_request",
                     "timestamp": int(time.time() * 1000),
-                    "payload": {
-                        "hitl": {
-                            "question": state.clarification or "请补充分析需求",
-                            "resume_token": token,
-                        }
-                    },
+                    "payload": payload,
                 }
             )
 

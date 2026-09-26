@@ -104,7 +104,11 @@ def _plan_gate(state: AgentState) -> AgentState:
     """
     multi_step = len(state.plan_steps) > 1 or any(s.kind == "analyze" for s in state.plan_steps)
     forced = state.autonomy_level == "L1"
-    if state.phase != "plan" or not (multi_step or forced):
+    # planner 产出计划后会把 phase 直接置为首个待执行步骤（query/analyze/critique），
+    # 不能以 phase=="plan" 判定——以"有计划且非终态/挂起相位"为触发前提
+    if not state.plan_steps or state.phase in {"done", "clarify", "plan_review"}:
+        return state
+    if not (multi_step or forced):
         return state
     resume = maybe_interrupt(
         state,
@@ -116,7 +120,12 @@ def _plan_gate(state: AgentState) -> AgentState:
         trigger="plan_review",
     )
     if resume.get("action") == "reject":
-        return state.apply(phase="done", no_data_reason="用户拒绝了分析计划，未执行任何查询")
+        # 规格 §5.1 ③：终止并如实报告，不产出
+        return state.apply(
+            phase="done",
+            no_data_reason="用户拒绝了分析计划，未执行任何查询",
+            report="用户拒绝了分析计划，本次未执行任何查询、未产出任何结论。",
+        )
     if resume.get("action") == "edit":
         return state.apply(plan_edit_instruction=resume.get("instruction"), phase="plan")
     return state  # approve：保持 phase，交 route_from_plan 分流

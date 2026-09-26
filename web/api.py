@@ -503,6 +503,15 @@ async def post_agent_run(request: Request) -> Response:
 
     set_request_context(request_id=request.headers.get("X-Request-ID"), user=ctx.username)
 
+    resume_action = str(body.get("action") or "").strip() or None
+    if resume_action:
+        human_reply = json.dumps(
+            {
+                "kind": "plan_review",
+                "action": resume_action,
+                "instruction": str(body.get("instruction") or "").strip() or None,
+            }
+        )
     resume_state: AgentState | None = None
     if resume_token:
         paused = _AGENT_PAUSED_STATES.pop(resume_token, None)
@@ -584,6 +593,17 @@ async def agent_chat_stream(request: Request):
     provider_id = params.get("provider_id", "").strip() or None
     model_id = params.get("model_id", "").strip() or None
     run_id = params.get("run_id", "").strip() or None
+    # M2 Plan Mode：审批动作三选一（approve/edit/reject）编码进 human_reply 通道，
+    # 引擎侧解码后注入对应 gate（clarify 的纯文本答复不受影响）
+    resume_action = params.get("action", "").strip() or None
+    if resume_action:
+        human_reply = json.dumps(
+            {
+                "kind": "plan_review",
+                "action": resume_action,
+                "instruction": params.get("instruction", "").strip() or None,
+            }
+        )
     thread = params.get("thread", "").strip()
     try:
         after = max(0, int(params.get("after", "0").strip() or "0"))

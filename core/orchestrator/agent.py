@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -275,8 +276,17 @@ def _run_agent_langgraph_path(
 
     _guard_report = "\n[编排器] 迭代步数超限，强制终止。"
     if resume_state is not None:
-        # 恢复路径：human_reply 由 web 层写回 resume_state（native graph.resume 同源）
+        # 恢复路径：human_reply 由 web 层写回 resume_state（native graph.resume 同源）。
+        # M2 Plan Mode：web 层把审批动作编码为 JSON 字符串经 human_reply 通道传入，
+        # 此处还原为 dict（plain 文本 = clarify 答复，原样传递）
         reply = resume_state.human_reply or ""
+        if reply.startswith("{"):
+            try:
+                parsed = json.loads(reply)
+                if isinstance(parsed, dict) and "action" in parsed:
+                    reply = parsed
+            except json.JSONDecodeError:
+                pass  # 非 JSON 文本：clarify 纯文本答复
         try:
             final, pending = resume_langgraph(
                 resume_state,

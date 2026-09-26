@@ -531,6 +531,16 @@ class Handler(BaseHTTPRequestHandler):
         human_reply = body.get("human_reply")
         human_reply = str(human_reply).strip() if isinstance(human_reply, str) else None
         resume_token = str(body.get("resume_token") or "").strip() or None
+        # M2 Plan Mode：审批动作三选一编码进 human_reply 通道（与 FastAPI 实现一致）
+        resume_action = str(body.get("action") or "").strip() or None
+        if resume_action:
+            human_reply = json.dumps(
+                {
+                    "kind": "plan_review",
+                    "action": resume_action,
+                    "instruction": str(body.get("instruction") or "").strip() or None,
+                }
+            )
 
         set_request_context(request_id=self.headers.get("X-Request-ID"), user=ctx.username)
 
