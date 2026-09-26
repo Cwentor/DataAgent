@@ -123,7 +123,16 @@
   }
 
   function setActiveThread(id) {
-    activeThreadId = id || "";
+    var next = id || "";
+    // 连接预算治理（SSE 断连根因）：浏览器对同主机 HTTP/1.1 仅允许 6 条并发
+    // 连接，后台会话的 SSE 长流若不释放，并行会话一多就会把活跃流排队饿死
+    // （前端表现为 120s 零字节误报"任务已中断"）。本地断读不影响服务端 run
+    // （事件持续入缓冲），切回该会话时按游标重放续传，不丢失任何事件。
+    if (next !== activeThreadId && activeThreadId) {
+      var leaving = AgentStore.getRuntime(activeThreadId);
+      if (leaving && leaving.handle) { leaving.handle.abort(); leaving.handle = null; }
+    }
+    activeThreadId = next;
     try {
       if (activeThreadId) { localStorage.setItem(ACTIVE_KEY, activeThreadId); }
       else { localStorage.removeItem(ACTIVE_KEY); }
@@ -293,6 +302,11 @@
               onError: function () { resolve(false); }
             }
           );
+          // 最后一轮若仍在执行，其实时跟随流登记进运行时：切走会话时由
+          // setActiveThread 统一释放（连接预算治理），切回再次重放续传
+          if (i === turns.length - 1) {
+            AgentStore.getRuntime(t.id).handle = handle;
+          }
           handle.done.then(function () { resolve(true); });
         });
       });

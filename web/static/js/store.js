@@ -93,7 +93,17 @@
     /** 会话流式运行时（不存在则初始化空壳；app.js / sidebar-ui 共享）。 */
     getRuntime: function (threadId) { return runtimeOf(threadId); },
 
-    dropRuntime: function (threadId) { delete runtimes[threadId || "_blank"]; },
+    /** 删除会话运行时：先断开本地流读取（服务端 run 不受影响）再删除，
+     *  防止删除会话时 SSE 长连接泄漏占用浏览器同主机 6 连接预算。 */
+    dropRuntime: function (threadId) {
+      var key = threadId || "_blank";
+      var rt = runtimes[key];
+      if (rt && rt.handle) {
+        try { rt.handle.abort(); } catch (e) { /* 已断开则忽略 */ }
+        rt.handle = null;
+      }
+      delete runtimes[key];
+    },
 
     reset: function () {
       state.activePlan = [];
