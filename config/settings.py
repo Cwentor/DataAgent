@@ -99,6 +99,15 @@ MAX_AGENT_STEPS: int = int(os.getenv("MAX_AGENT_STEPS", "5"))
 AGENT_REFLECTION_ENABLED: bool = os.getenv("AGENT_REFLECTION_ENABLED", "1") == "1"
 
 # --------------------------------------------------------------------------- #
+# Agent harness evolution (M0)：双引擎开关与 LangGraph 超级步护栏
+# --------------------------------------------------------------------------- #
+# 编排图引擎：native = 自研 StateGraph（迁移前行为，回退路径）；
+# langgraph = 六节点同构编译（core/orchestrator/langgraph_engine.py）
+ORCHESTRATOR_ENGINE: str = os.getenv("ORCHESTRATOR_ENGINE", "native")
+# LangGraph 超级步护栏（与 native iteration>24 护栏语义校准，见计划 Task 5）
+ORCHESTRATOR_RECURSION_LIMIT: int = int(os.getenv("ORCHESTRATOR_RECURSION_LIMIT", "64"))
+
+# --------------------------------------------------------------------------- #
 # 意图路由与决策中心（Intent Router & Decision Engine）—— 见 agent/router/
 # --------------------------------------------------------------------------- #
 # LLM 语义分类器判决置信度阈值：低于该值拒绝采纳，优雅降级到规则兜底

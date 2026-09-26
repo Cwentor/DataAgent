@@ -41,3 +41,54 @@ def test_agentstate_extra_forbid_unchanged():
 
     with pytest.raises(pydantic.ValidationError):
         _minimal_state(nonexistent_field="x")
+
+
+# ---------------------------------------------------------------------------
+# Task 4：六节点图 LangGraph 同构编译 + interrupt 泛化（clarify 门）
+# ---------------------------------------------------------------------------
+
+
+def test_clarify_interrupt_and_resume_roundtrip():
+    """clarify 中断 -> Command(resume) 恢复：同一原语，gate 节点无副作用。
+
+    触发语料用确定性规则可命中澄清的问题（<12 字符且含指标词，见 clarify_node）。
+    """
+    from core.orchestrator.langgraph_engine import invoke_langgraph, resume_langgraph
+
+    events_seen: list[dict] = []
+    state = _minimal_state(user_query="什么是销售额？")
+    state2, pending = invoke_langgraph(
+        state, thread_id="u1:s1", observer=events_seen.append
+    )
+    assert pending is not None and pending["kind"] == "clarify"
+    assert state2.phase == "clarify"
+
+    resumed, pending2 = resume_langgraph(
+        state2,
+        {"kind": "clarify", "resume_value": "按 2024-06 口径"},
+        thread_id="u1:s1",
+        observer=events_seen.append,
+    )
+    assert pending2 is None
+    assert resumed.phase in {"plan", "query", "analyze", "critique", "synthesize", "done"}
+
+
+def test_observer_reaches_nodes_inside_langgraph_threads():
+    """M0 前置审计结论回归：观察者经 config.configurable 显式传递，
+    节点在 LangGraph 执行线程内发射的 step_start 等事件必须可达，SSE 不许静默。"""
+    from core.orchestrator.langgraph_engine import invoke_langgraph
+
+    events_seen: list[dict] = []
+    invoke_langgraph(
+        _minimal_state(
+            user_query="分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位"
+        ),
+        thread_id="u1:s2",
+        observer=events_seen.append,
+    )
+    assert events_seen, "observer lost inside langgraph executor threads"
+    kinds = [e["event"] for e in events_seen]
+    assert "step_start" in kinds
+    # done/error 收尾事件由 run_agent 门面在引擎返回后补发（与 native 对齐），
+    # 引擎层最后一个事件是业务事件（artifact_emit / reflection 等）
+    assert "plan_created" in kinds

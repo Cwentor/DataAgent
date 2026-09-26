@@ -57,6 +57,24 @@ class AgentTrace(BaseModel):
         return self.model_dump(mode="json")
 
 
+def route_from_clarify(state: AgentState) -> str:
+    """clarify 后固定进入规划（HITL 中断时图在 clarify 暂停，不走此处）。"""
+    return "plan"
+
+
+def route_from_plan(state: AgentState) -> str:
+    """规划产出 query 步骤则取数；纯分析计划（无数据需求）直接进沙箱。"""
+    if any(s.kind == "query" and s.status == "pending" for s in state.plan_steps):
+        return "query"
+    if any(s.kind == "analyze" and s.status == "pending" for s in state.plan_steps):
+        return "analyze"
+    return "critique"
+
+
+def route_from_critic(state: AgentState) -> str:
+    return state.phase  # plan(重规划) | synthesize
+
+
 def build_graph(*, max_iterations: int = 24) -> StateGraph:
     """装配六节点图：clarify -> plan -> query -> analyze -> critique -> synthesize。"""
     graph = StateGraph(max_iterations=max_iterations)
@@ -67,21 +85,6 @@ def build_graph(*, max_iterations: int = 24) -> StateGraph:
     graph.add_node("critique", critic_node)
     graph.add_node("synthesize", synthesize_node)
     graph.set_entry("clarify")
-
-    def route_from_clarify(state: AgentState) -> str:
-        # clarify 后固定进入规划（HITL 中断时图在 clarify 暂停，不走此处）
-        return "plan"
-
-    def route_from_plan(state: AgentState) -> str:
-        # 规划产出 query 步骤则取数；纯分析计划（无数据需求）直接进沙箱
-        if any(s.kind == "query" and s.status == "pending" for s in state.plan_steps):
-            return "query"
-        if any(s.kind == "analyze" and s.status == "pending" for s in state.plan_steps):
-            return "analyze"
-        return "critique"
-
-    def route_from_critic(state: AgentState) -> str:
-        return state.phase  # plan(重规划) | synthesize
 
     graph.add_edge("clarify", "plan")
     graph.add_conditional_edges(
