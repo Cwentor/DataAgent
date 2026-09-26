@@ -29,6 +29,7 @@ from auth.ratelimit import LoginRateLimitError, default_login_limiter
 from auth.session import default_session_store
 from auth.tokens import create_token
 from config import settings
+from core.orchestrator.agent import run_agent
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
 from web import providers_api
 from web.server import (
@@ -469,6 +470,235 @@ async def login_page() -> Response:
 @app.get("/static/{rel:path}")
 async def static_file(rel: str) -> Response:
     return _serve_file(rel)
+
+
+# --------------------------------------------------------------------------- #
+# 受保护：/api/agent/run（Data Agent 编排：多步分析 + 沙箱 + 归因）
+# 照抄 stdlib _post_agent_run / _get_agent_run_status / _get_agent_chat_stream
+# （RunRegistry 版：执行与连接解耦，游标重放，X-Run-Id 契约）
+# --------------------------------------------------------------------------- #
+import queue as _queue  # noqa: E402
+import threading as _threading  # noqa: E402
+import time  # noqa: E402
+import uuid as _uuid  # noqa: E402
+
+from fastapi.responses import StreamingResponse  # noqa: E402
+
+from core.orchestrator.state import AgentState  # noqa: E402
+from web.runs import default_run_registry  # noqa: E402
+from web.server import _AGENT_PAUSED_STATES  # noqa: E402
+
+
+@app.post("/api/agent/run")
+async def post_agent_run(request: Request) -> Response:
+    """编排器同步执行（多步分析可能较慢）。照抄 stdlib _post_agent_run。"""
+    ctx = _require_auth(request)
+    body = await _read_json_body(request)
+    query = str(body.get("query", "")).strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    human_reply = body.get("human_reply")
+    human_reply = str(human_reply).strip() if isinstance(human_reply, str) else None
+    resume_token = str(body.get("resume_token") or "").strip() or None
+
+    set_request_context(request_id=request.headers.get("X-Request-ID"), user=ctx.username)
+
+    resume_state: AgentState | None = None
+    if resume_token:
+        paused = _AGENT_PAUSED_STATES.pop(resume_token, None)
+        if paused is None or paused.get("owner") != ctx.username:
+            raise HTTPException(status_code=404, detail="resume token 无效或已过期")
+        resume_state = AgentState.model_validate(paused["state"])
+        resume_state = resume_state.model_copy(update={"human_reply": human_reply})
+
+    result = await run_in_threadpool(
+        run_agent,
+        query,
+        session_id=ctx.session_id or ctx.username,
+        human_reply=None if resume_state else human_reply,
+        resume_state=resume_state,
+    )
+    if isinstance(result, AgentState):
+        # HITL 中断：登记属主化的暂停态，返回恢复句柄
+        token = f"hitl-{_uuid.uuid4().hex[:16]}"
+        _AGENT_PAUSED_STATES[token] = {
+            "owner": ctx.username,
+            "state": result.model_dump(mode="json"),
+        }
+        payload = {
+            "phase": "clarify",
+            "clarification": result.clarification,
+            "resume_token": token,
+            "session_id": result.session_id,
+        }
+        return Response(
+            content=json.dumps(payload, ensure_ascii=False),
+            media_type="application/json; charset=utf-8",
+        )
+    result_dict = result.to_dict()
+    result_dict["auth"] = ctx.to_dict()
+    return Response(
+        content=json.dumps(result_dict, ensure_ascii=False),
+        media_type="application/json; charset=utf-8",
+    )
+
+
+@app.get("/api/v1/agent/runs/{run_id}")
+async def get_agent_run_status(run_id: str, request: Request) -> Response:
+    """run 状态快照（属主 fail-closed；照抄 stdlib _get_agent_run_status）。"""
+    ctx = _require_auth(request)
+    set_request_context(request_id=request.headers.get("X-Request-ID"), user=ctx.username)
+    owner = None if "admin" in ctx.roles else ctx.username
+    snap = await run_in_threadpool(default_run_registry().status, run_id.strip(), owner=owner)
+    if snap is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    snap.pop("resume_token", None)  # 恢复句柄仅经事件流下发，轮询快照不暴露
+    return Response(
+        content=json.dumps(snap, ensure_ascii=False),
+        media_type="application/json; charset=utf-8",
+    )
+
+
+def _sse_frame_bytes(event: dict) -> bytes:
+    """SSE 帧构造：与 stdlib _sse_write 逐字节同源（json.dumps ensure_ascii=False）。"""
+    frame = json.dumps(event, ensure_ascii=False)
+    return f"data: {frame}\n\n".encode()
+
+
+@app.get("/api/v1/agent/chat/stream")
+async def agent_chat_stream(request: Request):
+    """SSE 流式编排端点（RunRegistry 版，照抄 stdlib _get_agent_chat_stream 三形态）。
+
+    订阅循环在 worker 线程执行（subscribe 阻塞语义），帧经无界队列桥接为
+    StreamingResponse；客户端断开经 closed 事件向 write_frame 抛 OSError，
+    与 stdlib"断开仅退订、run 继续执行"的语义逐字对齐。
+    """
+    ctx = _require_auth(request)
+    params: dict[str, str] = {}
+    for key, values in request.query_params.multi_items():
+        if key not in params:
+            params[key] = values
+    query = params.get("query", "").strip()
+    human_reply = params.get("human_reply", "").strip() or None
+    resume_token = params.get("resume_token", "").strip() or None
+    provider_id = params.get("provider_id", "").strip() or None
+    model_id = params.get("model_id", "").strip() or None
+    run_id = params.get("run_id", "").strip() or None
+    thread = params.get("thread", "").strip()
+    try:
+        after = max(0, int(params.get("after", "0").strip() or "0"))
+    except ValueError:
+        after = 0
+
+    set_request_context(request_id=request.headers.get("X-Request-ID"), user=ctx.username)
+    registry = default_run_registry()
+    # admin 全局可见（与任务快照 / 导出下载的属主放行口径一致）
+    owner = None if "admin" in ctx.roles else ctx.username
+
+    # 形态 2：纯游标订阅（重连 / 刷新恢复）——run 未知直接 404
+    if run_id and not resume_token:
+        found = await run_in_threadpool(registry.get, run_id, owner=owner)
+        if found is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return _sse_follow(registry, run_id, after, owner)
+
+    # 形态 3：HITL 恢复（属主严格匹配；token 无效以 error 事件在流内收敛）
+    if resume_token:
+        if run_id:
+            run = await run_in_threadpool(
+                registry.resume, run_id, human_reply or "", owner=ctx.username
+            )
+        else:
+            run = await run_in_threadpool(
+                registry.resume_by_token, resume_token, human_reply or "", owner=ctx.username
+            )
+        if run is None:
+            return _sse_error_stream("resume token 无效或已过期", run_id or "")
+        return _sse_follow(registry, run.run_id, run.resume_baseline, owner)
+
+    # 形态 1：新提问启动 run（thread 缺省回退认证会话键——旧客户端兼容）
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    session_key = f"webui:{thread}" if thread else (ctx.session_id or ctx.username)
+    # 幂等保护：同一会话 + 同一提问且 run 仍在执行时复用，严禁重复启动编排
+    existing = await run_in_threadpool(registry.find_active, ctx.username, session_key, query)
+    run = existing or await run_in_threadpool(
+        registry.start,
+        query,
+        owner=ctx.username,
+        session_key=session_key,
+        provider_id=provider_id,
+        model_id=model_id,
+    )
+    return _sse_follow(registry, run.run_id, 0, owner)
+
+
+def _sse_follow(registry, run_id: str, after: int, owner: str | None) -> StreamingResponse:
+    """打开 SSE 响应并按游标订阅 run 事件流（照抄 stdlib _sse_follow 语义）。"""
+    frames: _queue.SimpleQueue = _queue.SimpleQueue()
+    closed = _threading.Event()
+
+    def write_frame(event: dict) -> None:
+        if closed.is_set():
+            # 与 stdlib 一致：断开向订阅循环抛 OSError，run 继续执行并入缓冲
+            raise OSError("client disconnected")
+        frames.put(_sse_frame_bytes(event))
+
+    def on_idle() -> None:
+        if closed.is_set():
+            raise OSError("client disconnected")
+        frames.put(b": ping\n\n")
+
+    def _pump() -> None:
+        try:
+            registry.subscribe(run_id, after, write_frame, owner=owner, on_idle=on_idle)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # 客户端断开：编排线程继续跑完并入缓冲，可重连重放
+        finally:
+            frames.put(None)
+
+    _threading.Thread(target=_pump, daemon=True, name=f"sse-{run_id}").start()
+
+    def gen():
+        try:
+            while True:
+                item = frames.get()
+                if item is None:
+                    break
+                yield item
+        finally:
+            closed.set()  # 生成器被丢弃（客户端断开）=> 订阅循环随之收敛
+
+    headers: dict[str, str] = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "close",
+    }
+    if run_id:
+        headers["X-Run-Id"] = run_id
+    return StreamingResponse(gen(), media_type="text/event-stream; charset=utf-8", headers=headers)
+
+
+def _sse_error_stream(message: str, run_id: str) -> StreamingResponse:
+    """token 无效等场景：HTTP 200 事件流内报错（与 stdlib 契约一致，不抛裸 4xx）。"""
+    event = {
+        "turn_id": "",
+        "event": "error",
+        "timestamp": int(time.time() * 1000),
+        "payload": {"error": message},
+    }
+    headers: dict[str, str] = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "close",
+    }
+    if run_id:
+        headers["X-Run-Id"] = run_id
+    return StreamingResponse(
+        iter([_sse_frame_bytes(event)]),
+        media_type="text/event-stream; charset=utf-8",
+        headers=headers,
+    )
 
 
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
