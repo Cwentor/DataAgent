@@ -27,7 +27,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END
 from langgraph.graph import StateGraph as LGStateGraph
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, Send, interrupt
 
 from config import settings
 from core.orchestrator import events
@@ -46,6 +46,12 @@ from core.orchestrator.nodes import (
     synthesize_node,
 )
 from core.orchestrator.state import AgentState
+from core.orchestrator.subagent import (
+    SubagentState,
+    SubagentTask,
+    _task_id_tagged,
+    run_subagent,
+)
 
 ObserverFn = Callable[[dict[str, Any]], None]
 
@@ -131,18 +137,145 @@ def _plan_gate(state: AgentState) -> AgentState:
     return state  # approve：保持 phase，交 route_from_plan 分流
 
 
-def route_from_plan_gate(state: AgentState) -> str:
-    """plan_gate 条件边路由：approve 交原 route_from_plan；edit 回 plan；reject 收敛。"""
+def route_from_plan_gate(state: AgentState) -> Any:
+    """plan_gate 条件边路由：approve 交原 route_from_plan；edit 回 plan；
+    reject 收敛；plan 携带 fanout_tasks 时返回 Send 列表（B 线并行编排）。"""
     if state.phase == "plan" and state.plan_edit_instruction:
         return "plan"
     if state.phase == "done":
         return "plan_gate_end"
+    for step in state.plan_steps:
+        if step.fanout_tasks:
+            return [
+                Send("subagent_worker", SubagentTask.model_validate(t)) for t in step.fanout_tasks
+            ]
     return route_from_plan(state)
+
+
+# 主图 Send 并行的进程级并发闸：每 worker 各建信号量等于无闸——必须共享。
+# 首次使用时按 settings 实例化（进程生命周期内固定；测试经 run_fanout 直驱路径
+# 使用每次新建的闸以响应配置 monkeypatch）
+_worker_gate: threading.BoundedSemaphore | None = None
+_worker_gate_lock = threading.Lock()
+
+
+def _get_worker_gate() -> threading.BoundedSemaphore:
+    global _worker_gate
+    with _worker_gate_lock:
+        if _worker_gate is None:
+            _worker_gate = threading.BoundedSemaphore(settings.SUBAGENT_MAX_PARALLEL)
+        return _worker_gate
+
+
+def _subagent_worker(task: SubagentTask, config: dict) -> dict:
+    """Send worker：并发闸 + task_id 事件标签，报告经 append reducer 汇入主图。"""
+    observer = ((config or {}).get("configurable") or {}).get("observer")
+    with _get_worker_gate():  # 并发上限护栏（审计结论：DuckDB 池容量安全边界）
+        report = run_subagent(
+            task,
+            thread_id=f"{config['configurable']['thread_id']}:sub:{task.task_id}",
+            observer=_task_id_tagged(observer, task.task_id),
+        )
+    return {"subagent_reports": [report]}
+
+
+def _execute_wave(tasks: list, *, thread_id: str, observer) -> list:
+    """并发执行一批子任务（Send 语义的直驱等价实现，供 run_fanout 复用）。"""
+    parallel_gate = threading.BoundedSemaphore(settings.SUBAGENT_MAX_PARALLEL)
+    reports: list = []
+    lock = threading.Lock()
+
+    def _one(task: SubagentTask) -> None:
+        with parallel_gate:
+            report = run_subagent(
+                task,
+                thread_id=f"{thread_id}:sub:{task.task_id}",
+                observer=_task_id_tagged(observer, task.task_id),
+            )
+        with lock:
+            reports.append(report)
+
+    threads = [
+        threading.Thread(target=_one, args=(t,), daemon=True, name=f"fanout-{t.task_id}")
+        for t in tasks
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return sorted(reports, key=lambda r: r.task_id)
+
+
+def run_fanout(tasks: list, *, thread_id: str, observer=None) -> list:
+    """并行 fan-out（规格 §6.3/§6.4）：并发上限 + 失败重派 ≤1 轮 + 缺口如实披露。
+
+    失败/超时报告按 SUBAGENT_REDISPATCH_MAX 重派（task_id 加 :rd<n> 后缀）；
+    重派仍失败则在 findings 如实披露缺口（诚实守卫延续），返回按 task_id 排序。
+    """
+    observer = observer if observer is not None else events.get_observer()
+    by_id = {t.task_id: t for t in tasks}
+    reports = _execute_wave(tasks, thread_id=thread_id, observer=observer)
+    for round_no in range(settings.SUBAGENT_REDISPATCH_MAX):
+        failed = [r for r in reports if r.status != "done"]
+        if not failed:
+            break
+        redispatch = []
+        for r in failed:
+            origin = by_id.get(r.task_id.split(":rd")[0])
+            if origin is not None:
+                redispatch.append(
+                    origin.model_copy(update={"task_id": f"{origin.task_id}:rd{round_no + 1}"})
+                )
+        if not redispatch:
+            break
+        redone = _execute_wave(redispatch, thread_id=thread_id, observer=observer)
+        # 重派结果按源任务归并：源 id（剥 :rd 后缀）相同的失败报告被最新尝试替换
+        latest = {}
+        for r in reports:
+            latest.setdefault(r.task_id.split(":rd")[0], r)
+        for r in redone:
+            latest[r.task_id.split(":rd")[0]] = r  # 最新尝试覆盖
+        reports = list(latest.values())
+    final = sorted(reports, key=lambda r: r.task_id)
+    disclosed = []
+    for r in final:
+        source_id = r.task_id.split(":rd")[0]
+        if r.status != "done":
+            disclosed.append(
+                r.model_copy(
+                    update={
+                        # 父图按源任务 id 消费；重派轮次信息留在 findings 里
+                        "task_id": source_id,
+                        "findings": [
+                            *r.findings,
+                            f"缺口披露：子任务 {source_id} 重派后仍 {r.status}，未取得该维度结论",
+                        ],
+                    }
+                )
+            )
+        else:
+            disclosed.append(r.model_copy(update={"task_id": source_id}))
+    return disclosed
+
+
+def run_fanout_serial(tasks: list, *, thread_id: str, observer=None) -> list:
+    """native 引擎降级路径：串行 for 循环执行（新增能力皆可降级）。"""
+    observer = observer if observer is not None else events.get_observer()
+    reports = []
+    for t in tasks:
+        reports.append(
+            run_subagent(
+                t,
+                thread_id=f"{thread_id}:sub:{t.task_id}",
+                observer=_task_id_tagged(observer, t.task_id),
+            )
+        )
+    return sorted(reports, key=lambda r: r.task_id)
 
 
 def _compile(checkpointer: Any) -> Any:
     """装配六节点图 + clarify_gate：边结构与 native build_graph 同构。"""
-    g = LGStateGraph(AgentState)
+    g = LGStateGraph(SubagentState)
     g.add_node("clarify", _observed("clarify", clarify_node))
     g.add_node("clarify_gate", _clarify_gate)
     g.add_node("plan", _observed("plan", planner_node))
@@ -155,6 +288,7 @@ def _compile(checkpointer: Any) -> Any:
     g.add_conditional_edges("clarify_gate", route_from_clarify, {"plan": "plan"})
     g.add_node("plan_gate", _plan_gate)
     g.add_node("plan_gate_end", lambda s: s)
+    g.add_node("subagent_worker", _subagent_worker)
     g.add_edge("plan", "plan_gate")
     g.add_conditional_edges(
         "plan_gate",
@@ -229,7 +363,7 @@ def _extract(result: Any) -> tuple[AgentState, dict | None]:
         if interrupts:
             value = getattr(interrupts[0], "value", None)
             pending = dict(value) if isinstance(value, dict) else {"kind": "unknown", "raw": value}
-    state = AgentState.model_validate(
+    state = SubagentState.model_validate(
         {k: v for k, v in result.items() if k not in {"__interrupt__", "__prev__"}}
     )
     return state, pending

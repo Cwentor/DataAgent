@@ -120,6 +120,10 @@ ORCHESTRATOR_RECURSION_LIMIT: int = int(os.getenv("ORCHESTRATOR_RECURSION_LIMIT"
 # 图执行快照持久化（SqliteSaver）：非空时 clarify/plan_review 挂起可跨进程重启恢复；
 # 与会话记忆（STATE_STORE_DB / SessionStore）各司其职，互不替代（设计 §4.2）
 ORCHESTRATOR_CHECKPOINT_DB: str | None = os.getenv("ORCHESTRATOR_CHECKPOINT_DB") or None
+# B 线（M3）subagent 并发控制：默认 4 兼顾 LLM 限流与 DuckDB 连接池容量（DB_POOL_SIZE）
+SUBAGENT_MAX_PARALLEL: int = int(os.getenv("SUBAGENT_MAX_PARALLEL", "4"))
+# critique 充分性不足时的重派上限（规格 §6.4：≤1 轮，不无限重试）
+SUBAGENT_REDISPATCH_MAX: int = int(os.getenv("SUBAGENT_REDISPATCH_MAX", "1"))
 
 # --------------------------------------------------------------------------- #
 # Agent harness evolution (M1)：HTTP 引擎开关

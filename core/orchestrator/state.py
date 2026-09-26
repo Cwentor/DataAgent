@@ -54,6 +54,9 @@ class PlanStep(BaseModel):
     # 分析步骤的代码草稿 / 技能调用（analyze 类型时给出）
     code: str | None = None
     status: Literal["pending", "running", "done", "failed"] = "pending"
+    # B 线（M3）fan-out 任务卡（规格 §6.3）：planner 产出时携带（三模式共用通道，
+    # 由任务卡 mode 字段区分 attribution/hypothesis/comparison）；缺省 None=普通步骤
+    fanout_tasks: list[dict[str, Any]] | None = None
 
 
 class ToolRecord(BaseModel):
