@@ -686,12 +686,26 @@
     if (ev.event === "__stream_end__") {
       // 传输层结束：done/error 事件已驱动状态；此处兜底复位。
       // 若仍处于 running 且末条不是 done/error，说明是意外结束（重试耗尽 /
-      // 服务端断开），必须显式告知用户——旧实现只静默复位，任务凭空消失。
+      // 服务端断开），先按游标静默自救（服务端 run 仍在执行，after=lastSeq
+      // 增量续传不重跑编排），额度耗尽才上屏中断——网络抖动不再直接杀任务。
       var rt = AgentStore.getRuntime(threadId);
       var st = AgentStore.get();
       var last = st.timelineEvents[st.timelineEvents.length - 1];
       var settled = last && (last.kind === "done" || last.kind === "error"
         || last.kind === "interrupt");
+      var endReason = (ev.payload && ev.payload.reason) || "";
+      // 仅"网络类"意外结束自救：stall 已在流内自救耗尽（终判），gone 为 404 终态
+      var healable = endReason === "network" || endReason === "closed";
+      if (st.running && !settled && healable && rt && rt.runId
+        && (rt.resumeTries || 0) < 2) {
+        rt.resumeTries = (rt.resumeTries || 0) + 1;
+        var handle = AgentEventSource.open(
+          AgentProtocol.buildStreamUrl({ run_id: rt.runId, after: rt.lastSeq || 0 }),
+          streamHandlers(threadId)
+        );
+        rt.handle = handle;
+        return; // 自救中：不复位状态，等游标续传把事件补齐
+      }
       if (st.running && !settled) {
         markInterrupted(threadId, "任务已中断（连接意外结束），可重新提问");
       } else if (rt && st.running && AgentSidebarUI.activeThreadId() === threadId) {
@@ -705,7 +719,10 @@
     if (rt2) {
       if (ev.seq && ev.seq > (rt2.lastSeq || 0)) { rt2.lastSeq = ev.seq; }
       if (ev.event === "hitl_request") { rt2.resumeToken = (p.hitl && p.hitl.resume_token) || ""; }
-      if (ev.event === "done" || ev.event === "error") { rt2.resumeToken = ""; }
+      if (ev.event === "done" || ev.event === "error") {
+        rt2.resumeToken = "";
+        rt2.resumeTries = 0; // 终态抵达：下轮意外结束的自救额度重置
+      }
     }
 
     // 非活跃会话：事件不进当前工作区（侧栏轮询负责徽标），只记录游标
@@ -844,11 +861,12 @@
       },
       onEvent: function (ev) { handleAgentEvent(threadId, ev); },
       // 连接停滞（默认 120s 零字节，含服务端 15s 心跳）：连接半死时 fetch/read
-      // 永不 reject，必须主动判定并上屏，否则任务静默消失、UI 永久停在"正在分析"
+      // 永不 reject，必须主动判定并上屏，否则任务静默消失、UI 永久停在"正在分析"。
+      // 触发即代表游标自救已在流内耗尽（3+ 次续订均未恢复），属最终判定
       onStall: function () {
         markInterrupted(
           threadId,
-          "任务已中断（120 秒无响应）。任务可能仍在服务端执行，可重新进入该会话恢复"
+          "任务已中断（连接多次自动恢复失败）。任务可能仍在服务端执行，可重新进入该会话恢复"
         );
         showError("Agent 流连接中断，请重试");
       },
@@ -901,6 +919,7 @@
     var rt = AgentStore.getRuntime(threadId);
     rt.query = q;
     rt.lastSeq = 0; // 新一轮从游标 0 起（重连按 after 续订，不重发 query）
+    rt.resumeTries = 0; // 新一轮自救额度重置
     // 客户端不提交 principal：主体由服务端从身份映射（P0）
     var handle = AgentEventSource.open(
       AgentProtocol.buildStreamUrl({
