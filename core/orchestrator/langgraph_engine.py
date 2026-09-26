@@ -16,22 +16,24 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph import END, StateGraph as LGStateGraph
-from langgraph.types import Command, interrupt
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END
+from langgraph.graph import StateGraph as LGStateGraph
+from langgraph.types import Command, interrupt
 
 from config import settings
 from core.orchestrator import events
-from core.orchestrator.agent import route_from_clarify, route_from_plan, route_from_critic
+from core.orchestrator.agent import route_from_clarify, route_from_critic, route_from_plan
 from core.orchestrator.nodes import (
     clarify_node,
-    planner_node,
-    dsl_query_node,
     code_exec_node,
     critic_node,
+    dsl_query_node,
+    planner_node,
     synthesize_node,
 )
 from core.orchestrator.state import AgentState

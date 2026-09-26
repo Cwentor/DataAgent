@@ -10,7 +10,8 @@ M0 阶段职责：
 
 from __future__ import annotations
 
-from langgraph.graph import END, StateGraph as LGStateGraph
+from langgraph.graph import END
+from langgraph.graph import StateGraph as LGStateGraph
 
 from core.orchestrator.state import AgentState
 
@@ -36,7 +37,6 @@ def test_agentstate_compiles_as_langgraph_schema():
 def test_agentstate_extra_forbid_unchanged():
     """迁移红线：extra="forbid" 契约在 LangGraph 平移前后都不得放松。"""
     import pydantic
-
     import pytest
 
     with pytest.raises(pydantic.ValidationError):
@@ -57,9 +57,7 @@ def test_clarify_interrupt_and_resume_roundtrip():
 
     events_seen: list[dict] = []
     state = _minimal_state(user_query="什么是销售额？")
-    state2, pending = invoke_langgraph(
-        state, thread_id="u1:s1", observer=events_seen.append
-    )
+    state2, pending = invoke_langgraph(state, thread_id="u1:s1", observer=events_seen.append)
     assert pending is not None and pending["kind"] == "clarify"
     assert state2.phase == "clarify"
 
@@ -80,9 +78,7 @@ def test_observer_reaches_nodes_inside_langgraph_threads():
 
     events_seen: list[dict] = []
     invoke_langgraph(
-        _minimal_state(
-            user_query="分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位"
-        ),
+        _minimal_state(user_query="分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位"),
         thread_id="u1:s2",
         observer=events_seen.append,
     )
@@ -92,3 +88,50 @@ def test_observer_reaches_nodes_inside_langgraph_threads():
     # done/error 收尾事件由 run_agent 门面在引擎返回后补发（与 native 对齐），
     # 引擎层最后一个事件是业务事件（artifact_emit / reflection 等）
     assert "plan_created" in kinds
+
+
+# ---------------------------------------------------------------------------
+# Task 5：ORCHESTRATOR_ENGINE 双引擎开关 + 等价性验收
+# ---------------------------------------------------------------------------
+
+
+def test_native_and_langgraph_event_classes_equal(monkeypatch):
+    """同一确定性兜底输入：双引擎事件类序列一致、终态 phase 一致（M0 验收门）。"""
+    from config import settings
+    from core.orchestrator.agent import run_agent
+
+    def collect(engine: str):
+        monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", engine)
+        seq: list[str] = []
+        out = run_agent(
+            "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
+            session_id="s-parity",
+            on_event=lambda e: seq.append(e["event"]),
+        )
+        return seq, getattr(out, "phase", None)
+
+    seq_native, phase_native = collect("native")
+    seq_lg, phase_lg = collect("langgraph")
+    assert seq_native == seq_lg, f"event classes diverged:\n{seq_native}\n{seq_lg}"
+    assert phase_native == phase_lg
+
+
+def test_recursion_limit_anchors_termination(monkeypatch):
+    """护栏校准（Review Focus #3）：LangGraph 超级步护栏触发时与 native
+    iteration>24 护栏同语义收敛——phase=done 且报告留痕"迭代步数超限"。
+
+    limit=3 确定性触发：clarify -> clarify_gate -> plan 之后必然超限，
+    不依赖兜底规划是否产生重规划（后者会使命题随启发式漂移）。
+    """
+    from config import settings
+    from core.orchestrator.agent import run_agent
+
+    monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", "langgraph")
+    monkeypatch.setattr(settings, "ORCHESTRATOR_RECURSION_LIMIT", 3)
+    out = run_agent(
+        "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
+        session_id="s-limit",
+        on_event=lambda e: None,
+    )
+    assert out.phase == "done"
+    assert "迭代步数超限" in out.report

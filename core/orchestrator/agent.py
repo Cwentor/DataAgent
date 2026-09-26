@@ -21,6 +21,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from audit.logging import get_logger
+from config import settings
 from core.orchestrator import events
 from core.orchestrator.graph import StateGraph
 from core.orchestrator.nodes import (
@@ -202,6 +203,15 @@ def _run_agent_inner(
     resume_state: AgentState | None,
 ) -> AgentState:
     """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。"""
+    if settings.ORCHESTRATOR_ENGINE == "langgraph":
+        return _run_agent_langgraph_path(
+            question,
+            session_id=session_id,
+            turn_id=turn_id,
+            trace_id=trace_id,
+            human_reply=human_reply,
+            resume_state=resume_state,
+        )
     if resume_state is not None:
         graph = build_graph()
         return graph.resume(resume_state)
@@ -215,6 +225,55 @@ def _run_agent_inner(
     )
     graph = build_graph()
     return graph.run(state)
+
+
+def _run_agent_langgraph_path(
+    question: str,
+    *,
+    session_id: str,
+    turn_id: str,
+    trace_id: str,
+    human_reply: str | None,
+    resume_state: AgentState | None,
+) -> AgentState:
+    """LangGraph 引擎路径：对外挂起契约与 native 逐字段一致（phase=clarify 中间态）。
+
+    护栏语义校准（计划 Task 5）：native iteration>24 置 phase=done 并在报告留痕；
+    LangGraph 侧 GraphRecursionError 捕获后转换为同样的 done 收敛，报告文本逐字对齐。
+    """
+    from langgraph.errors import GraphRecursionError
+
+    from core.orchestrator.langgraph_engine import invoke_langgraph, resume_langgraph
+
+    _guard_report = "\n[编排器] 迭代步数超限，强制终止。"
+    if resume_state is not None:
+        # 恢复路径：human_reply 由 web 层写回 resume_state（native graph.resume 同源）
+        reply = resume_state.human_reply or ""
+        try:
+            final, _pending = resume_langgraph(
+                resume_state,
+                {"kind": "clarify", "resume_value": reply},
+                thread_id=session_id,
+            )
+        except GraphRecursionError:
+            return resume_state.apply(
+                phase="done", report=(resume_state.report or "") + _guard_report
+            )
+        return final
+
+    state = AgentState(
+        session_id=session_id,
+        turn_id=turn_id,
+        trace_id=trace_id,
+        user_query=question,
+        human_reply=human_reply,
+        phase="clarify" if human_reply is None else "plan",
+    )
+    try:
+        final, _pending = invoke_langgraph(state, thread_id=session_id)
+    except GraphRecursionError:
+        return state.apply(phase="done", report=(state.report or "") + _guard_report)
+    return final
 
 
 __all__ = ["AgentTrace", "build_graph", "run_agent"]
