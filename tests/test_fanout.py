@@ -66,13 +66,14 @@ def test_concurrency_cap_enforced(monkeypatch):
 
     counter = {"active": 0, "peak": 0}
     lock = threading.Lock()
+    real = lge.run_subagent  # 先取真函数再替换：wrapper 内经 real 调用，避免自引用递归
 
     def counted(task, **kwargs):
         with lock:
             counter["active"] += 1
             counter["peak"] = max(counter["peak"], counter["active"])
         try:
-            return lge.run_subagent(task, **kwargs)
+            return real(task, **kwargs)
         finally:
             with lock:
                 counter["active"] -= 1
