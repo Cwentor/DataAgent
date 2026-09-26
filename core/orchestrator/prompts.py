@@ -175,17 +175,33 @@ s3 由信息增益裁决主因维度并在结论中写明入选依据——**严
 """
 
 
-def planner_prompt(user_query: str, schema_digest: str, error_context: str | None = None) -> str:
-    """组装 Planner 的用户消息（问题 + 语义目录摘要 + 自愈错误上下文 + Few-Shot）。
+def planner_prompt(
+    user_query: str,
+    schema_digest: str,
+    error_context: str | None = None,
+    history_context: str | None = None,
+) -> str:
+    """组装 Planner 的用户消息（问题 + 语义目录摘要 + 会话历史 + 自愈错误上下文 + Few-Shot）。
 
     ``error_context``：重规划自愈时注入的最近失败摘要（容错链路断裂点修复）——
     此前编排层 query/analyze 失败回到 plan 后 LLM 看不到失败原因，重规划退化为
     盲重试；注入后 LLM 必须针对性修正计划。
+
+    ``history_context``：同会话最近几轮对话摘要（多轮上下文）——供 LLM 理解
+    追问与省略指代（如「那华南呢」「再来一份按季度的」）；None 时不注入该
+    小节，提示词与单轮契约逐字一致。
     """
     parts = [
         f"# 用户问题\n{user_query}",
         f"# 语义目录（可用字段）\n{schema_digest}",
     ]
+    if history_context:
+        parts.append(
+            "# 会话历史（最近对话，供理解追问与省略指代）\n"
+            "以下是本会话最近的对话轮次。若当前问题存在省略指代（如「那华南呢」"
+            "「按季度再来一份」），必须结合历史补全指标、维度与时间范围后再规划，"
+            "历史仅供参考，严禁重复执行历史问题本身：\n" + history_context
+        )
     if error_context:
         parts.append(
             "# 上次失败记录（自愈重规划上下文）\n"

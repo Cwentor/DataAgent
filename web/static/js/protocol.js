@@ -80,14 +80,25 @@
     });
   }
 
-  /** 构建查询流 URL（含鉴权外的明文参数；鉴权走请求头）。 */
-  function buildStreamUrl(query, extra) {
+  /**
+   * 构建查询流 URL（含鉴权外的明文参数；鉴权走请求头）。
+   *
+   * 三种形态（与 web/server.py _get_agent_chat_stream 契约一致）：
+   * - 新提问：query + thread（会话记忆键，同会话追问自动继承历史）；
+   * - 游标重放：run_id + after（断线重连 / 刷新恢复，不重跑编排）；
+   * - HITL 恢复：query + resume_token + human_reply（+ run_id/after 可选）。
+   */
+  function buildStreamUrl(extra) {
+    extra = extra || {};
     var params = new URLSearchParams();
-    params.set("query", query);
-    if (extra && extra.human_reply) { params.set("human_reply", extra.human_reply); }
-    if (extra && extra.resume_token) { params.set("resume_token", extra.resume_token); }
-    if (extra && extra.provider_id) { params.set("provider_id", extra.provider_id); }
-    if (extra && extra.model_id) { params.set("model_id", extra.model_id); }
+    if (extra.query) { params.set("query", extra.query); }
+    if (extra.thread) { params.set("thread", extra.thread); }
+    if (extra.human_reply) { params.set("human_reply", extra.human_reply); }
+    if (extra.resume_token) { params.set("resume_token", extra.resume_token); }
+    if (extra.provider_id) { params.set("provider_id", extra.provider_id); }
+    if (extra.model_id) { params.set("model_id", extra.model_id); }
+    if (extra.run_id) { params.set("run_id", extra.run_id); }
+    if (extra.after != null && extra.after !== "") { params.set("after", String(extra.after)); }
     return "/api/v1/agent/chat/stream?" + params.toString();
   }
 

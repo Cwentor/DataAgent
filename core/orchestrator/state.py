@@ -103,6 +103,9 @@ class AgentState(BaseModel):
     trace_id: str = "tr1"
     # 任务
     user_query: str = ""
+    # 会话历史摘要（多轮上下文：同会话追问时由调用方装载，注入 Planner 提示词；
+    # 空串 = 单轮/无历史，提示词与旧契约逐字一致）
+    history_digest: str = ""
     plan_steps: list[PlanStep] = Field(default_factory=list)
     clarification: str | None = Field(default=None, description="向用户发出的澄清问题")
     human_reply: str | None = Field(default=None, description="HITL 恢复时的用户答复")
