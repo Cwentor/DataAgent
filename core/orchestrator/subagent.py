@@ -23,8 +23,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END
 from langgraph.graph import StateGraph as LGStateGraph
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+import core.orchestrator.state as _state_mod
 from core.orchestrator.state import AgentState, Artifact
 from tools.registry import default_registry
 
@@ -46,8 +47,8 @@ class SubagentTask(BaseModel):
     task_id: str
     goal: str
     # 上下文切片：schema digest 片段 / 相关过滤条件 / 上轮 DSL 引用
-    context_slice: dict[str, Any] = {}
-    allowed_tools: list[str] = []
+    context_slice: dict[str, Any] = Field(default_factory=dict)
+    allowed_tools: list[str] = Field(default_factory=list)
     budget: SubagentBudget = SubagentBudget()
 
     def model_post_init(self, __context: Any) -> None:
@@ -63,8 +64,8 @@ class SubagentReport(BaseModel):
 
     task_id: str
     status: Literal["done", "failed", "timeout"] = "done"
-    findings: list[str] = []
-    artifacts: list[Artifact] = []
+    findings: list[str] = Field(default_factory=list)
+    artifacts: list[Artifact] = Field(default_factory=list)
     audit: dict[str, Any] = {}
     metrics: dict[str, Any] = {}
 
@@ -73,7 +74,7 @@ class SubagentState(AgentState):
     """子图状态：继承 AgentState 契约；subagent_reports 通道用 append reducer
     （规格 §4.2 唯一 reducer 例外），父图侧为普通 list（native 契约）。"""
 
-    subagent_reports: Annotated[list[SubagentReport], operator.add] = []
+    subagent_reports: Annotated[list[SubagentReport], operator.add] = Field(default_factory=list)
 
 
 def _task_id_tagged(observer: Callable[[dict], None] | None, task_id: str):
@@ -230,7 +231,5 @@ __all__ = [
 
 # AgentState 的 "SubagentReport" 前向引用在此解析（subagent -> state 单向依赖，
 # 反向仅以字符串前向引用存在）；缺省 list[SubagentReport] 契约由本 rebuild 落地
-import core.orchestrator.state as _state_mod
-
 _state_mod.SubagentReport = SubagentReport
 _state_mod.AgentState.model_rebuild()
