@@ -303,6 +303,91 @@ def test_planner_node_feeds_error_context_to_llm(monkeypatch):
     assert "nonexistent 不在语义目录" in captured["user"]
 
 
+# --------------------------------------------------------------------------- #
+# 多轮会话上下文（并行会话改造：同会话追问继承历史语境）
+# --------------------------------------------------------------------------- #
+def test_planner_prompt_injects_session_history():
+    """planner_prompt 带 history_context：注入会话历史小节并要求消解省略指代。"""
+    from core.orchestrator.prompts import planner_prompt
+
+    prompt = planner_prompt(
+        "那上海呢",
+        "- gmv (fact_orders.order_amount)",
+        history_context="用户: 2024年5月北京的GMV是多少\n助手: 北京GMV为1.2亿元",
+    )
+    assert "会话历史" in prompt
+    assert "2024年5月北京的GMV是多少" in prompt
+    assert "省略指代" in prompt
+
+
+def test_planner_prompt_without_history_unchanged():
+    """planner_prompt 不带 history_context：不出现会话历史小节，提示词逐字不变。
+
+    回归锚点（AGENTS.md 同款契约）：history=None 时与旧单轮契约逐字一致——
+    以全等断言兜底（不止小节标记缺席）。
+    """
+    from core.orchestrator.prompts import planner_prompt
+
+    legacy = planner_prompt("查 GMV", "- gmv (fact_orders.order_amount)")
+    explicit_none = planner_prompt(
+        "查 GMV", "- gmv (fact_orders.order_amount)", error_context=None, history_context=None
+    )
+    assert legacy == explicit_none  # 逐字一致
+    assert "会话历史" not in legacy
+    # 注入顺序契约：history 小节在 error_context 之前（历史是规划语境，
+    # 失败记录是修正指令，顺序颠倒会改变旧 error_context 用例的提示词）
+    both = planner_prompt(
+        "查 GMV", "- gmv", error_context="CompileError: x", history_context="用户: a"
+    )
+    assert both.index("会话历史") < both.index("上次失败记录")
+
+
+def test_planner_node_feeds_history_to_llm(monkeypatch):
+    """planner_node 把 state.history_digest 注入 LLM 提示词（多轮语境实锤）。"""
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState
+
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+
+    def fake_llm_json(llm, system, user):
+        captured["user"] = user
+        return None
+
+    monkeypatch.setattr(nodes, "_llm_json", fake_llm_json)
+    state = AgentState(user_query="那上海呢", history_digest="用户: 2024年5月北京的GMV是多少")
+    nodes.planner_node(state)
+    assert "会话历史" in captured["user"]
+    assert "2024年5月北京的GMV是多少" in captured["user"]
+
+
+def test_clarify_node_passes_followup_with_history():
+    """省略式追问（短句无指标词）有会话历史时放行规划，不再触发澄清门。"""
+    from core.orchestrator.nodes import clarify_node
+    from core.orchestrator.state import AgentState
+
+    followup = AgentState(user_query="那华南呢", history_digest="用户: 2024年5月北京GMV")
+    assert clarify_node(followup).phase == "plan"
+
+    # 无历史（会话首问）保持旧契约：过短仍澄清
+    first = AgentState(user_query="那华南呢")
+    assert clarify_node(first).phase == "clarify"
+
+
+def test_run_agent_accepts_history_digest(tmp_path, monkeypatch):
+    """run_agent 透传 history_digest 端到端：短句追问带历史可直达 done。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    from core.orchestrator.agent import run_agent
+
+    trace = run_agent(
+        "那上海呢", session_id="s-hist", history_digest="用户: 2024年5月北京GMV是多少"
+    )
+    assert trace.phase == "done"
+    assert trace.report
+
+
 def test_critic_trace_digest_carries_error_history(monkeypatch):
     """LLM 反思的执行轨迹必须包含自愈错误记录（反思层看得见失败历史）。"""
     import core.orchestrator.nodes as nodes

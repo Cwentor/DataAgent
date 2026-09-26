@@ -6,10 +6,14 @@
  * - 未登录一律重定向 /login（保留 redirect_url），业务页面不承载未登录态；
  * - 任意受保护 API 返回 401 => 全局登出（清凭证 + 跳转登录页）。
  *
- * 主流程（SSE 事件驱动）：
- *   提问 -> GET /api/v1/agent/chat/stream（fetch 流式）-> AgentStreamEvent
- *   -> AgentStore（plan/timeline/artifacts/hitl）
- *   -> 中央对话流 + 右侧执行流程 + 侧边栏切换的产物视图。
+ * 主流程（SSE 事件驱动，并行会话）：
+ *   提问 -> GET /api/v1/agent/chat/stream（query+thread 启动服务端 run）
+ *   -> 服务端后台执行并缓冲事件（带 seq 游标），断开仅退订、run 继续跑；
+ *   切回会话 / 刷新页面 -> run_id+after 游标重放恢复进度；
+ *   同会话追问 -> 复用同一 thread（服务端继承历史语境，注入 Planner）。
+ *
+ * 会话状态：AgentStore（活跃工作区）+ AgentSidebarUI（会话元信息/运行时句柄）；
+ * 事件回调闭包绑死 threadId，后台会话事件不进当前工作区（防串台）。
  */
 (function () {
   "use strict";
@@ -22,7 +26,6 @@
   var LOGIN_PATH = "/login";
 
   var authExpiredHandled = false; // 防止并发 401 触发多次跳转
-  var activeStream = null;        // 当前 SSE StreamHandle
 
   function esc(s) {
     return String(s == null ? "" : s)
@@ -87,6 +90,9 @@
   // 全局 401 钩子（stream.js 等低层模块经由 window.App.onAuthExpired 上抛）
   window.App = { onAuthExpired: function (msg) { redirectToLogin(msg); } };
 
+  // 供 sidebar-ui 重放恢复复用的事件入口（与 handleAgentEvent 同源同路由语义）
+  window.AgentApp = { onThreadEvent: function (threadId, ev) { handleAgentEvent(threadId, ev); } };
+
   // ---------------------------------------------------------------- 统一 API 封装
   function api(path, opts) {
     opts = opts || {};
@@ -149,6 +155,13 @@
       el.className = "agent-status " + state.agentStatus;
       $("agent-status-text").textContent = STATUS_TEXT[state.agentStatus] || state.agentStatus;
     });
+    // 提交按钮状态与 running 单一来源（Store）同步：多会话并行下任何
+    // 会话的 done/error/hitl 都经 Store 广播，严禁散落 DOM 直改（旧 6 处串台源）
+    AgentStore.subscribe("running", function (state) {
+      var btn = $("run");
+      btn.disabled = !!state.running;
+      btn.textContent = state.running ? "分析中…" : "开始分析";
+    });
   }
 
   // ---------------------------------------------------------------- 用户中心
@@ -203,7 +216,9 @@
     if (token) { headers.Authorization = "Bearer " + token; }
     var sid = getSid();
     if (sid) { headers["X-Session-ID"] = sid; }
-    if (activeStream) { activeStream.abort(); }
+    // 登出仅断开当前活跃读取：后台 run 由服务端继续缓冲（重新登录可游标恢复）
+    var rt = AgentStore.getRuntime(AgentSidebarUI.activeThreadId());
+    if (rt && rt.handle) { rt.handle.abort(); }
     fetch("/api/auth/logout", { method: "POST", headers: headers })
       .catch(function () { /* 忽略网络错误 */ })
       .finally(function () { redirectToLogin("已安全退出登录"); });
@@ -579,23 +594,22 @@
   }
 
   // ---------------------------------------------------------------- HITL 交互
-  function renderHitl(state) {
-    // HITL 卡片渲染在左栏时间线里（store.pushTimeline('hitl') 驱动），
-    // 这里只负责 pill 按钮与自由输入的提交行为。
-    // 注意：.hitl-send 复用 pill 样式但不是选项，必须排除（否则一次点击双提交）。
-    var hitl = state.hitlState;
-    if (!hitl) { return; }
-    document.querySelectorAll(".hitl-pill:not(.hitl-send)").forEach(function (pill) {
+  /** 时间线内渲染 HITL 交互（澄清卡由 stream-ui 按 hitl 事件绘制）：
+   *  只在当前活跃会话的卡上绑定 pill/输入行为；答复后卡片打「已答复」标记，
+   *  严禁对历史快照里的旧卡重复绑定（stale resume_token 误提交防护）。 */
+  function bindHitlCard() {
+    var card = document.querySelector("#chat-stream .hitl-card:not([data-answered])");
+    if (!card) { return; }
+    card.querySelectorAll(".hitl-pill:not(.hitl-send)").forEach(function (pill) {
       pill.addEventListener("click", function () {
-        submitHitlReply(pill.dataset.value || pill.textContent, pill);
+        submitHitlReply(pill.dataset.value || pill.textContent, card);
       });
     });
-    var form = document.querySelector(".hitl-input-row");
+    var form = card.querySelector(".hitl-input-row");
     if (form) {
       form.querySelector(".hitl-send").addEventListener("click", function () {
-        var input = form.querySelector(".hitl-input");
-        var v = input.value.trim();
-        if (v) { submitHitlReply(v, null); }
+        var v = form.querySelector(".hitl-input").value.trim();
+        if (v) { submitHitlReply(v, card); }
       });
       form.querySelector(".hitl-input").addEventListener("keydown", function (e) {
         if (e.key === "Enter") {
@@ -607,45 +621,114 @@
     }
   }
 
-  function submitHitlReply(reply, pillEl) {
-    document.querySelectorAll(".hitl-pill").forEach(function (p) { p.disabled = true; });
-    var inputRow = document.querySelector(".hitl-input-row");
-    if (inputRow) { inputRow.remove(); }
-    var answered = document.createElement("div");
-    answered.className = "hitl-answered";
-    answered.textContent = "已答复：" + reply;
-    var card = document.querySelector(".hitl-card");
-    if (card) { card.appendChild(answered); }
-    AgentStore.setHitl(null);
-    // 以恢复语义重新发起流（resume_token + human_reply）
+  function submitHitlReply(reply, cardEl) {
+    var threadId = AgentSidebarUI.activeThreadId();
+    var rt = AgentStore.getRuntime(threadId);
+    if (cardEl) {
+      cardEl.dataset.answered = "1";
+      var answered = document.createElement("div");
+      answered.className = "hitl-answered";
+      answered.textContent = "已答复：" + reply;
+      cardEl.appendChild(answered);
+    }
+    // 以恢复语义重新发起流（resume_token + human_reply）：同一 run 续写，
+    // 事件从客户端游标之后增量下发（旧澄清卡不重放）
     var sel = selectedProviderModel();
     AgentStore.setRunning(true);
-    activeStream = AgentEventSource.open(
-      AgentProtocol.buildStreamUrl(currentQuery, {
+    var handle = AgentEventSource.open(
+      AgentProtocol.buildStreamUrl({
+        query: rt.query,
         human_reply: reply,
-        resume_token: hitlResumeToken,
+        resume_token: rt.resumeToken,
+        run_id: rt.runId || "",
+        after: rt.lastSeq || "",
         provider_id: sel.provider_id,
-        model_id: sel.model_id
+        model_id: sel.model_id,
+        thread: threadId
       }),
-      streamHandlers()
+      streamHandlers(threadId)
     );
+    rt.handle = handle;
   }
 
   // ---------------------------------------------------------------- 主流程（SSE 事件驱动）
-  var currentQuery = "";
-  var hitlResumeToken = "";
+  /**
+   * 任务中断收尾：把停留态条目标记为中断，并追加中断卡上屏。
+   *
+   * 触发场景（两类都表现为"流没了但任务没正常收尾"）：
+   * - 连接停滞：stallTimeoutMs 内零字节（连接半死，服务端 run 可能仍在跑）；
+   * - 意外结束：重试耗尽后传输层收尾，但末条不是 done/error。
+   * 停留态对象：未结束的工具块（永久"执行中"）与 plan 中 pending 步骤（永久"等待"）。
+   */
+  function markInterrupted(threadId, message) {
+    if (AgentSidebarUI.activeThreadId() !== threadId) { return; } // 后台流静默
+    var st = AgentStore.get();
+    // 未结束的工具块：补中断标记（updateToolBlock 就地改写为中断态）
+    st.timelineEvents.forEach(function (e) {
+      if (e.kind === "tool" && !e.ended) {
+        AgentStore.markToolInterrupted(e);
+      }
+    });
+    // plan 中仍 pending 的步骤：置为中断（避免永久显示"等待"）
+    AgentStore.markPlanInterrupted();
+    AgentStore.pushTimeline({ kind: "interrupt", error: message });
+    AgentStore.setRunning(false);
+    AgentStore.setHitl(null);
+    AgentSidebarUI.archiveThread();
+    toast(message, "err");
+  }
 
-  function handleAgentEvent(ev) {
+  /**
+   * 会话事件处理：所有流式事件闭包绑定 threadId（防后台流重连串台），
+   * 仅活跃会话写 AgentStore 渲染；后台会话事件只推进其轮询快照（侧栏徽标）。
+   */
+  function handleAgentEvent(threadId, ev) {
     if (ev.event === "__stream_end__") {
-      // 传输层结束：done/error 事件已驱动状态；此处兜底复位
-      if (AgentStore.get().running) { AgentStore.setRunning(false); }
-      if (!$("run").disabled) { return; }
-      $("run").disabled = false;
-      $("run").textContent = "开始分析";
+      // 传输层结束：done/error 事件已驱动状态；此处兜底复位。
+      // 若仍处于 running 且末条不是 done/error，说明是意外结束（重试耗尽 /
+      // 服务端断开），先按游标静默自救（服务端 run 仍在执行，after=lastSeq
+      // 增量续传不重跑编排），额度耗尽才上屏中断——网络抖动不再直接杀任务。
+      var rt = AgentStore.getRuntime(threadId);
+      var st = AgentStore.get();
+      var last = st.timelineEvents[st.timelineEvents.length - 1];
+      var settled = last && (last.kind === "done" || last.kind === "error"
+        || last.kind === "interrupt");
+      var endReason = (ev.payload && ev.payload.reason) || "";
+      // 仅"网络类"意外结束自救：stall 已在流内自救耗尽（终判），gone 为 404 终态
+      var healable = endReason === "network" || endReason === "closed";
+      if (st.running && !settled && healable && rt && rt.runId
+        && (rt.resumeTries || 0) < 2) {
+        rt.resumeTries = (rt.resumeTries || 0) + 1;
+        var handle = AgentEventSource.open(
+          AgentProtocol.buildStreamUrl({ run_id: rt.runId, after: rt.lastSeq || 0 }),
+          streamHandlers(threadId)
+        );
+        rt.handle = handle;
+        return; // 自救中：不复位状态，等游标续传把事件补齐
+      }
+      if (st.running && !settled) {
+        markInterrupted(threadId, "任务已中断（连接意外结束），可重新提问");
+      } else if (rt && st.running && AgentSidebarUI.activeThreadId() === threadId) {
+        AgentStore.setRunning(false);
+      }
+      if (rt) { rt.handle = null; }
       return;
     }
-    if (ev.turn_id) { AgentStore.setTurnId(ev.turn_id); }
     var p = ev.payload || {};
+    var rt2 = AgentStore.getRuntime(threadId);
+    if (rt2) {
+      if (ev.seq && ev.seq > (rt2.lastSeq || 0)) { rt2.lastSeq = ev.seq; }
+      if (ev.event === "hitl_request") { rt2.resumeToken = (p.hitl && p.hitl.resume_token) || ""; }
+      if (ev.event === "done" || ev.event === "error") {
+        rt2.resumeToken = "";
+        rt2.resumeTries = 0; // 终态抵达：下轮意外结束的自救额度重置
+      }
+    }
+
+    // 非活跃会话：事件不进当前工作区（侧栏轮询负责徽标），只记录游标
+    if (AgentSidebarUI.activeThreadId() !== threadId) { return; }
+
+    if (ev.turn_id) { AgentStore.setTurnId(ev.turn_id); }
 
     switch (ev.event) {
       case "plan_created":
@@ -710,7 +793,6 @@
         break;
 
       case "hitl_request":
-        hitlResumeToken = (p.hitl && p.hitl.resume_token) || "";
         AgentStore.setHitl({
           question: (p.hitl && p.hitl.question) || "请补充分析需求",
           options: (p.hitl && p.hitl.options) || []
@@ -721,14 +803,15 @@
           options: (p.hitl && p.hitl.options) || []
         });
         AgentStore.setRunning(false);
-        $("run").disabled = false;
-        $("run").textContent = "开始分析";
-        renderHitl(AgentStore.get());
+        AgentSidebarUI.noteRunStatus(
+          (AgentStore.getRuntime(threadId) || {}).runId, "paused");
+        AgentSidebarUI.archiveThread(); // 澄清挂起时也归档，切走再回可看到澄清卡
+        bindHitlCard();
         break;
 
       case "artifact_emit":
         // 主对话页只用于对话：产物入账后不自动跳转视图，
-        // 由侧边栏徽标提示（计数亮起），用户自行切换查看。
+        // 由顶部 Tab 徽标提示（计数亮起），用户自行切换查看。
         if (p.artifact) {
           AgentStore.pushArtifact(p.artifact);
         }
@@ -737,60 +820,117 @@
       case "done":
         AgentStore.pushTimeline({ kind: "done" });
         AgentStore.setRunning(false);
-        $("run").disabled = false;
-        $("run").textContent = "开始分析";
+        AgentStore.setHitl(null);
+        AgentSidebarUI.noteRunStatus(
+          (AgentStore.getRuntime(threadId) || {}).runId, "done");
+        AgentSidebarUI.archiveThread(); // 会话产物随整轮结果立即持久化
         break;
 
       case "error":
         AgentStore.pushTimeline({ kind: "error", error: p.error || "未知错误" });
         AgentStore.setRunning(false);
-        $("run").disabled = false;
-        $("run").textContent = "开始分析";
+        AgentStore.setHitl(null);
+        AgentSidebarUI.noteRunStatus(
+          (AgentStore.getRuntime(threadId) || {}).runId, "failed");
+        AgentSidebarUI.archiveThread();
         toast(p.error || "执行出错", "err");
         break;
     }
   }
 
-  function streamHandlers() {
+  /**
+   * 流句柄工厂：闭包绑死 threadId（自动重连 / 事件回调都不会串到别的会话）。
+   * 404 = run 缓冲过期（TTL/重启）：错误上屏后由归档快照兜底展示历史。
+   */
+  function streamHandlers(threadId) {
     return {
-      onEvent: handleAgentEvent,
+      onOpen: function (runId) {
+        var rt = AgentStore.getRuntime(threadId);
+        if (rt && runId && rt.runId !== runId) {
+          rt.runId = runId;
+          // 提问原文在 run() 提交时已写入 rt.query，随 runId 一并登记（重放重建轮次用）
+          AgentSidebarUI.attachRun(threadId, runId, rt.query); // 登记重放清单 + 状态轮询
+        }
+      },
+      // 断线重连按 run_id + 游标续订：严禁重发 ?query&thread（那会启动一个新 run，
+      // 造成同一提问被重复执行、产物互相覆盖）
+      reconnectUrl: function (lastSeq) {
+        var rt = AgentStore.getRuntime(threadId);
+        if (!rt || !rt.runId) { return null; }
+        return AgentProtocol.buildStreamUrl({ run_id: rt.runId, after: lastSeq || 0 });
+      },
+      onEvent: function (ev) { handleAgentEvent(threadId, ev); },
+      // 连接停滞（默认 120s 零字节，含服务端 15s 心跳）：连接半死时 fetch/read
+      // 永不 reject，必须主动判定并上屏，否则任务静默消失、UI 永久停在"正在分析"。
+      // 触发即代表游标自救已在流内耗尽（3+ 次续订均未恢复），属最终判定
+      onStall: function () {
+        markInterrupted(
+          threadId,
+          "任务已中断（连接多次自动恢复失败）。任务可能仍在服务端执行，可重新进入该会话恢复"
+        );
+        showError("Agent 流连接中断，请重试");
+      },
       onError: function (err) {
-        AgentStore.pushTimeline({ kind: "error", error: "连接中断：" + (err && err.message ? err.message : err) });
+        if (AgentSidebarUI.activeThreadId() !== threadId) { return; } // 后台流静默
+        var msg = (err && err.message) || String(err || "连接中断");
+        AgentStore.pushTimeline({
+          kind: "error",
+          error: msg.indexOf("404") >= 0
+            ? "任务结果已过期（服务端缓冲清理），历史对话可从本地快照查看"
+            : "连接中断：" + msg
+        });
         AgentStore.setRunning(false);
-        $("run").disabled = false;
-        $("run").textContent = "开始分析";
+        AgentSidebarUI.archiveThread();
         showError("Agent 流连接失败，请重试");
       }
     };
   }
 
+  /**
+   * 提交一轮提问。
+   *
+   * 会话语义（并行会话铁律）：
+   * - 空白工作台首次提问 -> beginThread 登记新会话；
+   * - 已有活跃会话且空闲 -> 追问进当前会话（服务端按 thread 继承历史语境）；
+   * - 已有会话且在跑 -> 拒绝并发提交（同一会话内串行）；
+   * - 严禁 abort 任何流：切走会话后任务在服务端继续执行（游标重放恢复）。
+   */
   function run() {
     var q = $("query").value.trim();
     if (!q) { showError("请输入问题"); return; }
     hideError();
-    currentQuery = q;
-    hitlResumeToken = "";
-    if (activeStream) { activeStream.abort(); }
-    AgentStore.reset();
-    AgentStreamUI.resetScroll();
-    AgentCanvas.reset();
+    var threadId = AgentSidebarUI.activeThreadId();
+    if (threadId && AgentStore.get().running) {
+      showError("当前会话正在分析中，请等待完成后再追问");
+      return;
+    }
+    var isNew = !threadId;
+    if (isNew) {
+      threadId = AgentSidebarUI.beginThread(q);
+      AgentStore.reset();
+      AgentStreamUI.resetScroll();
+      AgentCanvas.reset();
+    }
     AgentStore.pushUserMessage(q);
     AgentStore.setRunning(true);
-    $("run").disabled = true;
-    $("run").textContent = "分析中…";
+    $("query").value = "";
     var sel = selectedProviderModel();
+    // 先把本轮提问写入运行时：onOpen 回调立即需要它做轮次登记（重放重建）
+    var rt = AgentStore.getRuntime(threadId);
+    rt.query = q;
+    rt.lastSeq = 0; // 新一轮从游标 0 起（重连按 after 续订，不重发 query）
+    rt.resumeTries = 0; // 新一轮自救额度重置
     // 客户端不提交 principal：主体由服务端从身份映射（P0）
-    var stream = AgentEventSource.open(
-      AgentProtocol.buildStreamUrl(q, {
+    var handle = AgentEventSource.open(
+      AgentProtocol.buildStreamUrl({
+        query: q,
+        thread: threadId,
         provider_id: sel.provider_id,
         model_id: sel.model_id
       }),
-      streamHandlers()
+      streamHandlers(threadId)
     );
-    activeStream = stream;
-    window.__activeStream = stream; // 供「新对话」中断当前流
-    // 线程历史：提交即记录（含当前事件数，供历史列表展示规模）
-    AgentSidebarUI.recordThread(q, AgentStore.get().timelineEvents.length);
+    rt.handle = handle;
   }
 
   function bindEvents() {

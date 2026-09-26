@@ -47,7 +47,7 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph L1[交互层 web/]
-        WEBUI[Agent 对话流工作台<br>对话流活动时间线 + 侧边栏产物视图]
+        WEBUI[Agent 对话流工作台<br>对话流活动时间线 + 顶部 Tab 产物视图（按会话绑定）]
         SSE[SSE 流式端点<br>九类事件实时推送]
         API[查询 / 编排 / 指标 API]
     end

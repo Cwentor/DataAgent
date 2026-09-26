@@ -6,6 +6,10 @@
  * - currentArtifacts：右栏产物（markdown_report / echarts / table / code_snippet）；
  * - hitlState：HITL 澄清交互（question / options / resume_token / 已答复态）。
  *
+ * 另管理会话运行时注册表（getRuntime）：
+ * - 每会话一份流式运行时 {handle, runId, lastSeq, resumeToken, query}，
+ *   切换会话不清理——后台 run 依赖它做游标重连与 HITL 恢复；
+ *
  * 组件只通过 store.subscribe(部分字段, 回调) 感知变更，不直接互相引用。
  */
 (function () {
@@ -20,13 +24,22 @@
     agentStatus: "idle",
     /** 当前轮次（turn_id）。 */
     turnId: "",
+    /** 快照代际号：每次整体替换状态（reset / loadSnapshot）自增，
+     *  供对话流等渲染方感知「会话切换」并强制全量重建。 */
+    generation: 0,
     /** 当前任务 DAG：[{id, title, kind, status}]。 */
     activePlan: [],
     /** 左栏时间线：[{kind, ...}]（kind: user|plan|tool|reflection|hitl|done|error）。 */
     timelineEvents: [],
-    /** 右栏产物：{reports:[], charts:[], codes:[], tables:[]}。 */
+    /** 轮次索引：本会话每轮提问的元信息 [{turn, text, ts}]（turn 从 1 递增）。
+     *  产物按轮次绑定（artifact.turn），产物视图据此分组并标注来源轮次。 */
+    turns: [],
+    /** 当前轮号：pushUserMessage 开启新一轮时自增；产物入账即打上该轮号。 */
+    currentTurn: 0,
+    /** 右栏产物：{reports:[], charts:[], codes:[], tables:[]}；
+     *  每条产物携带 turn / turnText 标记（哪一轮产出的什么产物）。 */
     currentArtifacts: { reports: [], charts: [], codes: [], tables: [] },
-    /** 最终报告 markdown（导出用）。 */
+    /** 最终报告 markdown（导出用；取最新一轮报告）。 */
     finalReport: "",
     /** HITL 交互态。 */
     hitlState: null
@@ -44,6 +57,27 @@
     });
   }
 
+  /** 按轮号取提问原文（模块级：pushArtifact / turnInfo 共用，避免 self 引用）。 */
+  function turnTextOf(s, turn) {
+    if (!turn) { return ""; }
+    var text = "";
+    (s.turns || []).forEach(function (t) { if (t.turn === turn) { text = t.text || ""; } });
+    return text;
+  }
+
+  // ------------------------------------------------------------ 会话运行时注册表
+  // 每会话一份流式运行时（句柄/游标/resume_token/提问原文），与会话 id 绑定；
+  // 切换会话不清理（后台 run 依赖它做游标重连），仅 removeThread 时删除。
+  var runtimes = {}; // threadId -> {handle, runId, lastSeq, resumeToken, query}
+
+  function runtimeOf(threadId) {
+    if (!threadId) { threadId = "_blank"; }
+    if (!runtimes[threadId]) {
+      runtimes[threadId] = { handle: null, runId: "", lastSeq: 0, resumeToken: "", query: "" };
+    }
+    return runtimes[threadId];
+  }
+
   var store = {
     get: function () { return state; },
 
@@ -56,14 +90,63 @@
       };
     },
 
+    /** 会话流式运行时（不存在则初始化空壳；app.js / sidebar-ui 共享）。 */
+    getRuntime: function (threadId) { return runtimeOf(threadId); },
+
+    /** 删除会话运行时：先断开本地流读取（服务端 run 不受影响）再删除，
+     *  防止删除会话时 SSE 长连接泄漏占用浏览器同主机 6 连接预算。 */
+    dropRuntime: function (threadId) {
+      var key = threadId || "_blank";
+      var rt = runtimes[key];
+      if (rt && rt.handle) {
+        try { rt.handle.abort(); } catch (e) { /* 已断开则忽略 */ }
+        rt.handle = null;
+      }
+      delete runtimes[key];
+    },
+
     reset: function () {
       state.activePlan = [];
       state.timelineEvents = [];
+      state.turns = [];
+      state.currentTurn = 0;
       state.currentArtifacts = { reports: [], charts: [], codes: [], tables: [] };
       state.finalReport = "";
       state.hitlState = null;
       state.turnId = "";
+      state.running = false; // 新工作区从空闲开始（后台 run 不受影响）
+      state.agentStatus = "idle";
+      state.generation++;
+      emit("generation");
       emit("activePlan"); emit("timelineEvents"); emit("currentArtifacts"); emit("hitlState");
+      emit("turns"); emit("running"); emit("agentStatus");
+    },
+
+    /** 载入会话快照：整体替换状态并广播（时间线 uid 由快照原样带回）。
+     *  @param {{timelineEvents?:Array, activePlan?:Array, turns?:Array,
+     *           currentArtifacts?:Object, finalReport?:string}} snap */
+    loadSnapshot: function (snap) {
+      snap = snap || {};
+      state.timelineEvents = (snap.timelineEvents || []).slice();
+      state.activePlan = (snap.activePlan || []).slice();
+      state.turns = (snap.turns || []).slice();
+      state.currentTurn = snap.currentTurn || state.turns.length;
+      var arts = snap.currentArtifacts || {};
+      state.currentArtifacts = {
+        reports: (arts.reports || []).slice(),
+        charts: (arts.charts || []).slice(),
+        codes: (arts.codes || []).slice(),
+        tables: (arts.tables || []).slice()
+      };
+      state.finalReport = snap.finalReport || "";
+      state.hitlState = null; // HITL 澄清不跨会话恢复
+      state.turnId = "";
+      state.running = false;
+      state.agentStatus = "idle";
+      state.generation++;
+      emit("generation");
+      emit("activePlan"); emit("timelineEvents"); emit("currentArtifacts");
+      emit("turns"); emit("hitlState"); emit("running"); emit("agentStatus");
     },
 
     setRunning: function (v) {
@@ -82,11 +165,23 @@
       if (id && state.turnId !== id) { state.turnId = id; }
     },
 
-    /** 用户提问入时间线。 */
+    /** 用户提问入时间线，并开启新轮次（产物按轮次绑定）。 */
     pushUserMessage: function (text) {
-      state.timelineEvents.push({ kind: "user", text: text });
+      state.currentTurn += 1;
+      state.turns.push({ turn: state.currentTurn, text: text, ts: Date.now() });
+      state.timelineEvents.push({ kind: "user", text: text, turn: state.currentTurn });
+      emit("turns");
       emit("timelineEvents");
     },
+
+    /** 轮次元信息（产物分组标题用）；未知轮号返回兜底文案。 */
+    turnInfo: function (turn) {
+      var hit = null;
+      state.turns.forEach(function (t) { if (t.turn === turn) { hit = t; } });
+      return hit || { turn: turn || 0, text: "", ts: 0 };
+    },
+    /** 当前轮号（产物打标；0 = 无轮次语境，如历史快照遗留产物）。 */
+    currentTurnNo: function () { return state.currentTurn; },
 
     /** plan_created：建立/替换 DAG。 */
     setPlan: function (plan) {
@@ -101,6 +196,26 @@
         if (s.id === stepId) { s.status = status; hit = true; }
       });
       if (hit) { emit("activePlan"); }
+    },
+
+    /** 任务中断收尾：未完成步骤置 interrupted（避免永久停在"等待/执行中"）。 */
+    markPlanInterrupted: function () {
+      var hit = false;
+      state.activePlan.forEach(function (s) {
+        if (s.status === "pending" || s.status === "running") {
+          s.status = "interrupted";
+          hit = true;
+        }
+      });
+      if (hit) { emit("activePlan"); }
+    },
+
+    /** 单个工具块中断收尾：置 ended + interrupted，驱动就地改写为中断态。 */
+    markToolInterrupted: function (toolEvent) {
+      if (!toolEvent || toolEvent.ended) { return; }
+      toolEvent.ended = true;
+      toolEvent.interrupted = true;
+      emitItem("toolUpdate", toolEvent);
     },
 
     /** 时间线追加（plan 卡片只保留最新一张）。 */
@@ -136,11 +251,16 @@
       emit("timelineEvents");
     },
 
-    /** 产物入画布。 */
+    /** 产物入画布：自动打上当前轮次标记（哪一轮产出的什么产物）。
+     *  已带 turn 的产物（如重放补标 / 恢复快照）不覆盖。 */
     pushArtifact: function (artifact) {
       var map = { markdown_report: "reports", echarts: "charts", code_snippet: "codes", table: "tables" };
       var key = map[artifact.type];
       if (!key) { return; }
+      if (artifact.turn == null) {
+        artifact.turn = state.currentTurn;
+        artifact.turnText = turnTextOf(state, state.currentTurn);
+      }
       state.currentArtifacts[key].push(artifact);
       if (artifact.type === "markdown_report") { state.finalReport = artifact.content; }
       emit("currentArtifacts");

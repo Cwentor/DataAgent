@@ -106,6 +106,7 @@ def run_agent(
     trace_id: str | None = None,
     human_reply: str | None = None,
     resume_state: AgentState | None = None,
+    history_digest: str | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> AgentTrace | AgentState:
     """运行一次编排（同步简化版；HITL 恢复经 resume_state 传入）。
@@ -113,6 +114,11 @@ def run_agent(
     on_event：可选事件观察者（SSE 流式前端注入）。注册后编排过程实时发射
     plan_created / step_start / tool_* / reflection / artifact_emit 事件，
     终态补发 done/error 收尾事件；不传时零开销、行为与旧契约完全一致。
+
+    history_digest：同会话最近几轮对话摘要（多轮上下文）——非空时注入
+    Planner 提示词并放宽 clarify 澄清门（省略指代由 Planner 消解）；
+    None 时行为与单轮契约逐字一致。resume 路径的语境继承经 paused state
+    自带（history_digest 已在其中），无需重复传入。
     """
     import uuid
 
@@ -135,6 +141,7 @@ def run_agent(
             trace_id=resolved_trace,
             human_reply=human_reply,
             resume_state=resume_state,
+            history_digest=history_digest,
         )
         if on_event is not None:
             # 终态收尾事件（复位观察者前发射，否则为 no-op）
@@ -197,6 +204,7 @@ def _run_agent_inner(
     trace_id: str,
     human_reply: str | None,
     resume_state: AgentState | None,
+    history_digest: str | None,
 ) -> AgentState:
     """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。"""
     if resume_state is not None:
@@ -207,6 +215,7 @@ def _run_agent_inner(
         turn_id=turn_id,
         trace_id=trace_id,
         user_query=question,
+        history_digest=history_digest or "",
         human_reply=human_reply,
         phase="clarify" if human_reply is None else "plan",
     )

@@ -36,6 +36,15 @@ def _clean_session_memory():
 
 
 @pytest.fixture(autouse=True)
+def _clean_run_registry():
+    """每个测试后清空 Agent Run 注册表（并行会话缓冲），避免跨测试 run 泄漏。"""
+    yield
+    from web.runs import default_run_registry
+
+    default_run_registry().clear_all()
+
+
+@pytest.fixture(autouse=True)
 def _offline_llm(monkeypatch, tmp_path):
     """测试默认离线（确定性可复现铁律）：屏蔽本地 .env / providers.json 中的
     真实 LLM Key，重置 Model Provider 网关单例，杜绝用例发起真实网络调用。
