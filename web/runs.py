@@ -240,6 +240,7 @@ class RunRegistry:
                 session_id=run.orch_session_id,
                 history_digest=history_digest,
                 on_event=self._observer(run),
+                principal=run.owner,
             )
             self._finish_result(run, query, result)
         except Exception as exc:  # 编排异常收敛为 error 事件（不崩进程）
@@ -255,6 +256,7 @@ class RunRegistry:
                 session_id=run.orch_session_id,
                 resume_state=resume_state,
                 on_event=self._observer(run),
+                principal=run.owner,
             )
             self._finish_result(run, run.question, result)
         except Exception as exc:

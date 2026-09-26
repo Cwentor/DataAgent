@@ -183,3 +183,42 @@ def test_agent_run_status_snapshot_contract(client, monkeypatch, tmp_path):
     assert "resume_token" not in snap
     resp = client.get("/api/v1/agent/runs/run-unknown0000")
     assert resp.status_code == 404
+
+
+def test_langgraph_engine_web_resume_roundtrip(client, monkeypatch, tmp_path):
+    """web 层 LangGraph 引擎贯通：SSE 挂起 -> resume_token+human_reply -> 续跑。
+
+    registry.resume 走 run_agent(resume_state=...) -> resume_langgraph(Command)，
+    seq 连续且终帧正常收敛（done / 终态收尾）。
+    """
+    import json as jsonlib
+
+    from config import settings
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(settings, "ORCHESTRATOR_ENGINE", "langgraph")
+    with client.stream(
+        "GET",
+        "/api/v1/agent/chat/stream",
+        params={"query": "什么是销售额？", "thread": "t-lg"},
+    ) as resp:
+        frames = [jsonlib.loads(ln[6:]) for ln in resp.iter_lines() if ln.startswith("data: ")]
+    assert frames and frames[-1]["event"] == "hitl_request"
+    token = frames[-1]["payload"]["hitl"]["resume_token"]
+
+    with client.stream(
+        "GET",
+        "/api/v1/agent/chat/stream",
+        params={
+            "resume_token": token,
+            "human_reply": "按 2024-06 口径，看 GMV",
+            "run_id": resp.headers.get("x-run-id", ""),
+        },
+    ) as resp2:
+        frames2 = [jsonlib.loads(ln[6:]) for ln in resp2.iter_lines() if ln.startswith("data: ")]
+    assert frames2, "resume 流必须有事件"
+    # seq 连续（同一 run 续写），终态收敛
+    all_seqs = [f["seq"] for f in frames] + [f["seq"] for f in frames2]
+    assert all_seqs == sorted(all_seqs)
+    assert frames2[-1]["event"] in {"done", "error"}

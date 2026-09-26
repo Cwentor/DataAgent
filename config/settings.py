@@ -117,6 +117,9 @@ AGENT_REFLECTION_ENABLED: bool = os.getenv("AGENT_REFLECTION_ENABLED", "1") == "
 ORCHESTRATOR_ENGINE: str = os.getenv("ORCHESTRATOR_ENGINE", "native")
 # LangGraph 超级步护栏（与 native iteration>24 护栏语义校准，见计划 Task 5）
 ORCHESTRATOR_RECURSION_LIMIT: int = int(os.getenv("ORCHESTRATOR_RECURSION_LIMIT", "64"))
+# 图执行快照持久化（SqliteSaver）：非空时 clarify/plan_review 挂起可跨进程重启恢复；
+# 与会话记忆（STATE_STORE_DB / SessionStore）各司其职，互不替代（设计 §4.2）
+ORCHESTRATOR_CHECKPOINT_DB: str | None = os.getenv("ORCHESTRATOR_CHECKPOINT_DB") or None
 
 # --------------------------------------------------------------------------- #
 # Agent harness evolution (M1)：HTTP 引擎开关

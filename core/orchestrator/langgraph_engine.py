@@ -16,11 +16,15 @@
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 from collections.abc import Callable
+from pathlib import Path as FsPath
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END
 from langgraph.graph import StateGraph as LGStateGraph
 from langgraph.types import Command, interrupt
@@ -112,18 +116,27 @@ def _compile(checkpointer: Any) -> Any:
 
 
 # 进程级单例：interrupt/Command(resume) 依赖同一 checkpointer 才能跨调用恢复。
-# Task 8 将 get_checkpointer() 扩展为按 ORCHESTRATOR_CHECKPOINT_DB 返回 SqliteSaver。
 _checkpointer: Any = None
 _app: Any = None
-_app_lock = None  # 延迟创建（Task 8 引入 threading.Lock）
+_singletons_lock = threading.Lock()
 
 
 def get_checkpointer() -> Any:
-    """默认进程内 checkpointer（M0）；Task 8 按配置切换 SqliteSaver 持久化。"""
+    """按配置返回 checkpointer（M1 Task 8）。
+
+    ORCHESTRATOR_CHECKPOINT_DB 非空 -> SqliteSaver 持久化（长任务断点续航，
+    服务重启后 clarify/plan_review 挂起仍可恢复）；否则 MemorySaver（进程内）。
+    """
     global _checkpointer
-    if _checkpointer is None:
-        _checkpointer = MemorySaver()
-    return _checkpointer
+    with _singletons_lock:
+        if _checkpointer is None:
+            db = settings.ORCHESTRATOR_CHECKPOINT_DB
+            if db:
+                FsPath(db).parent.mkdir(parents=True, exist_ok=True)
+                _checkpointer = SqliteSaver(sqlite3.connect(str(db), check_same_thread=False))
+            else:
+                _checkpointer = MemorySaver()
+        return _checkpointer
 
 
 def build_langgraph_app(*, checkpointer: Any | None = None) -> Any:
@@ -167,6 +180,7 @@ def invoke_langgraph(
     observer: ObserverFn | None = None,
     recursion_limit: int | None = None,
     app: Any | None = None,
+    checkpointer: Any | None = None,
 ) -> tuple[AgentState, dict | None]:
     """从初始状态执行图；clarify 挂起时返回 (中间态, 中断 payload)。
 
@@ -177,7 +191,10 @@ def invoke_langgraph(
     cfg = _config(thread_id, resolved_observer)
     if recursion_limit is not None:
         cfg["recursion_limit"] = recursion_limit
-    result = (app or _get_app()).invoke(state, cfg)
+    resolved_app = app or (
+        build_langgraph_app(checkpointer=checkpointer) if checkpointer else _get_app()
+    )
+    result = resolved_app.invoke(state, cfg)
     return _extract(result)
 
 
@@ -189,13 +206,17 @@ def resume_langgraph(
     observer: ObserverFn | None = None,
     recursion_limit: int | None = None,
     app: Any | None = None,
+    checkpointer: Any | None = None,
 ) -> tuple[AgentState, dict | None]:
     """从挂起态恢复：resume_payload["resume_value"] 即 Command(resume=...) 注入值。"""
     resolved_observer = observer if observer is not None else events.get_observer()
     cfg = _config(thread_id, resolved_observer)
     if recursion_limit is not None:
         cfg["recursion_limit"] = recursion_limit
-    result = (app or _get_app()).invoke(Command(resume=resume_payload["resume_value"]), cfg)
+    resolved_app = app or (
+        build_langgraph_app(checkpointer=checkpointer) if checkpointer else _get_app()
+    )
+    result = resolved_app.invoke(Command(resume=resume_payload["resume_value"]), cfg)
     return _extract(result)
 
 

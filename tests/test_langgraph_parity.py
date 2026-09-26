@@ -135,3 +135,39 @@ def test_recursion_limit_anchors_termination(monkeypatch):
     )
     assert out.phase == "done"
     assert "迭代步数超限" in out.report
+
+
+# ---------------------------------------------------------------------------
+# Task 8：resume Command 化 + SqliteSaver 持久挂起（跨重启恢复）
+# ---------------------------------------------------------------------------
+
+
+def test_checkpointer_survives_process_restart(tmp_path, monkeypatch):
+    """服务重启后 clarify 挂起仍在：同 thread_id + 同一 sqlite 文件可恢复（Review Focus #5）。"""
+    import sqlite3
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    from core.orchestrator.langgraph_engine import invoke_langgraph, resume_langgraph
+
+    db = tmp_path / "ckpt.sqlite"
+    saver = SqliteSaver(sqlite3.connect(str(db), check_same_thread=False))
+    state, pending = invoke_langgraph(
+        _minimal_state(user_query="什么是销售额？"),
+        thread_id="u9:restart",
+        observer=None,
+        checkpointer=saver,
+    )
+    assert pending and pending["kind"] == "clarify"
+
+    # 模拟重启：全新 app 实例 + 同一 sqlite 文件 + 同 thread_id
+    saver2 = SqliteSaver(sqlite3.connect(str(db), check_same_thread=False))
+    resumed, pending2 = resume_langgraph(
+        state,
+        {"kind": "clarify", "resume_value": "按 2024-06 口径"},
+        thread_id="u9:restart",
+        observer=None,
+        checkpointer=saver2,
+    )
+    assert pending2 is None
+    assert resumed.phase != "clarify"

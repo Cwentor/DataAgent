@@ -112,6 +112,7 @@ def run_agent(
     resume_state: AgentState | None = None,
     history_digest: str | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    principal: str | None = None,
 ) -> AgentTrace | AgentState:
     """运行一次编排（同步简化版；HITL 恢复经 resume_state 传入）。
 
@@ -146,6 +147,7 @@ def run_agent(
             human_reply=human_reply,
             resume_state=resume_state,
             history_digest=history_digest,
+            principal=principal,
         )
         if on_event is not None:
             # 终态收尾事件（复位观察者前发射，否则为 no-op）
@@ -209,6 +211,7 @@ def _run_agent_inner(
     human_reply: str | None,
     resume_state: AgentState | None,
     history_digest: str | None,
+    principal: str | None = None,
 ) -> AgentState:
     """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。"""
     if settings.ORCHESTRATOR_ENGINE == "langgraph":
@@ -219,6 +222,7 @@ def _run_agent_inner(
             trace_id=trace_id,
             human_reply=human_reply,
             resume_state=resume_state,
+            principal=principal,
         )
     if resume_state is not None:
         graph = build_graph()
@@ -244,6 +248,7 @@ def _run_agent_langgraph_path(
     trace_id: str,
     human_reply: str | None,
     resume_state: AgentState | None,
+    principal: str | None = None,
 ) -> AgentState:
     """LangGraph 引擎路径：对外挂起契约与 native 逐字段一致（phase=clarify 中间态）。
 
@@ -262,7 +267,7 @@ def _run_agent_langgraph_path(
             final, _pending = resume_langgraph(
                 resume_state,
                 {"kind": "clarify", "resume_value": reply},
-                thread_id=session_id,
+                thread_id=_checkpoint_thread_id(principal, session_id),
             )
         except GraphRecursionError:
             return resume_state.apply(
@@ -279,10 +284,20 @@ def _run_agent_langgraph_path(
         phase="clarify" if human_reply is None else "plan",
     )
     try:
-        final, _pending = invoke_langgraph(state, thread_id=session_id)
+        final, _pending = invoke_langgraph(
+            state, thread_id=_checkpoint_thread_id(principal, session_id)
+        )
     except GraphRecursionError:
         return state.apply(phase="done", report=(state.report or "") + _guard_report)
     return final
 
 
 __all__ = ["AgentTrace", "build_graph", "run_agent"]
+
+
+def _checkpoint_thread_id(principal: str | None, session_id: str) -> str:
+    """Checkpointer thread_id 规范（设计 §4.2）：f"{user_id}:{session_id}"。
+
+    principal 缺省（评测/单测直调）回退 session_id，行为与 M0 一致。
+    """
+    return f"{principal}:{session_id}" if principal else session_id
