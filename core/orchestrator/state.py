@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from core.orchestrator.subagent import SubagentReport
 
 # 自愈重试上限（需求：max 3 retries）
 MAX_RETRIES = 3
@@ -128,6 +131,9 @@ class AgentState(BaseModel):
     # 自主性分级（M2 Plan Mode，规格 §5.2）：会话级偏好随 run 请求传入，
     # L1 每步确认 / L2 计划确认（默认）/ L3 高危确认 / L4 全自动
     autonomy_level: Literal["L1", "L2", "L3", "L4"] = "L2"
+    # B 线（M3）subagent 报告收集（父图唯一消费物）；LangGraph 主图侧经
+    # subagent.SubagentState 以 append reducer 声明同名通道（规格 §4.2 唯一例外）
+    subagent_reports: list[SubagentReport] = Field(default_factory=list)
     # 用户在 plan_review 审批卡选择的"修改"指令（回 plan 重规划时与
     # error_context 同一注入位注入 Planner 提示词）
     plan_edit_instruction: str | None = None
