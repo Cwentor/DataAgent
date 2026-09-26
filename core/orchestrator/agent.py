@@ -154,7 +154,21 @@ def run_agent(
             if final.phase == "clarify":
                 events.emit_event(
                     events.EVENT_HITL_REQUEST,
-                    {"hitl": {"question": final.clarification or "请补充分析需求"}},
+                    {
+                        "kind": "clarify",
+                        "hitl": {"question": final.clarification or "请补充分析需求"},
+                    },
+                )
+            elif final.phase == "plan_review":
+                events.emit_event(
+                    events.EVENT_HITL_REQUEST,
+                    {
+                        "kind": "plan_review",
+                        "hitl": {
+                            "plan_steps": [s.model_dump(mode="json") for s in final.plan_steps],
+                            "summary": final.plan_steps[0].goal if final.plan_steps else "",
+                        },
+                    },
                 )
             else:
                 events.emit_event(events.EVENT_DONE, {"report": final.report})
@@ -174,8 +188,8 @@ def run_agent(
         if token is not None:
             events.reset_observer(token)
 
-    if final.phase == "clarify":
-        # HITL：返回含澄清问题的中间态（调用方展示问题 -> 收集答复 -> 再次调用）
+    if final.phase in {"clarify", "plan_review"}:
+        # HITL：返回挂起中间态（调用方展示卡片 -> 收集答复/动作 -> 再次调用）
         return final
 
     # 编排完成摘要（流程可观测：每轮一次 info，含自愈计数与产物统计）
@@ -264,7 +278,7 @@ def _run_agent_langgraph_path(
         # 恢复路径：human_reply 由 web 层写回 resume_state（native graph.resume 同源）
         reply = resume_state.human_reply or ""
         try:
-            final, _pending = resume_langgraph(
+            final, pending = resume_langgraph(
                 resume_state,
                 {"kind": "clarify", "resume_value": reply},
                 thread_id=_checkpoint_thread_id(principal, session_id),
@@ -273,6 +287,8 @@ def _run_agent_langgraph_path(
             return resume_state.apply(
                 phase="done", report=(resume_state.report or "") + _guard_report
             )
+        if pending and pending.get("kind") == "plan_review":
+            return final.apply(phase="plan_review")
         return final
 
     state = AgentState(
@@ -284,11 +300,14 @@ def _run_agent_langgraph_path(
         phase="clarify" if human_reply is None else "plan",
     )
     try:
-        final, _pending = invoke_langgraph(
+        final, pending = invoke_langgraph(
             state, thread_id=_checkpoint_thread_id(principal, session_id)
         )
     except GraphRecursionError:
         return state.apply(phase="done", report=(state.report or "") + _guard_report)
+    if pending and pending.get("kind") == "plan_review":
+        # plan_review 挂起：与 clarify 共用 AgentState pause 契约
+        return final.apply(phase="plan_review")
     return final
 
 

@@ -324,6 +324,11 @@ def planner_node(state: AgentState) -> AgentState:
         from core.retrieval.profiling import profile_enum_values
 
         error_context = "\n".join(state.error_context.errors[-3:]) or None
+        # plan_review 审批卡的"修改"指令（M2）：与 error_context 同一注入位——
+        # 用户必须针对性修正计划，LLM 不得无视修改诉求重新规划
+        if state.plan_edit_instruction:
+            user_edit = f"用户修改指令：{state.plan_edit_instruction}"
+            error_context = f"{error_context}\n{user_edit}" if error_context else user_edit
         payload = _llm_json(
             llm,
             PLANNER_SYSTEM,

@@ -25,6 +25,7 @@ TOOL_HISTORY_BUDGET_CHARS = 60_000
 
 Phase = Literal[
     "clarify",  # 需要澄清（HITL 中断）
+    "plan_review",  # 分析计划待审批（HITL 中断，M2 Plan Mode）
     "plan",  # 规划 / 重规划
     "query",  # DSL 取数
     "analyze",  # 沙箱分析
@@ -124,6 +125,12 @@ class AgentState(BaseModel):
     # analyze 步骤据此解析本轮依赖的真实输入——严禁按 datasets 字典首尾
     # 取数：跨轮次累积时首尾会指向上（几）轮遗留数据集，产出假结论。
     step_outputs: dict[str, list[str]] = Field(default_factory=dict)
+    # 自主性分级（M2 Plan Mode，规格 §5.2）：会话级偏好随 run 请求传入，
+    # L1 每步确认 / L2 计划确认（默认）/ L3 高危确认 / L4 全自动
+    autonomy_level: Literal["L1", "L2", "L3", "L4"] = "L2"
+    # 用户在 plan_review 审批卡选择的"修改"指令（回 plan 重规划时与
+    # error_context 同一注入位注入 Planner 提示词）
+    plan_edit_instruction: str | None = None
     # 上次因 LLM 反思触发重规划时的产物进展指纹（重规划无进展护栏）：
     # 指纹不变说明重规划未带来任何新数据/新分析，必须停止空转。
     last_replan_fingerprint: str = ""

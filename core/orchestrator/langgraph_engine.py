@@ -31,7 +31,12 @@ from langgraph.types import Command, interrupt
 
 from config import settings
 from core.orchestrator import events
-from core.orchestrator.agent import route_from_clarify, route_from_critic, route_from_plan
+from core.orchestrator.agent import (
+    route_from_clarify,
+    route_from_critic,
+    route_from_plan,
+)
+from core.orchestrator.autonomy import maybe_interrupt
 from core.orchestrator.nodes import (
     clarify_node,
     code_exec_node,
@@ -88,6 +93,44 @@ def _clarify_gate(state: AgentState) -> AgentState:
     )
 
 
+def _plan_gate(state: AgentState) -> AgentState:
+    """plan_review 审批门（M2 Plan Mode，规格 §5.1）：多步 DAG 或含 analyze
+    步骤才触发；L1 强制触发。真中断 / L4 直通由 maybe_interrupt 分流。
+
+    phase 约定：approve 后保持 planner 产出的 phase（供 route_from_plan 分流）；
+    edit 置 phase="plan"（回 planner 重规划）；reject 置 phase="done"。
+    三种去向由 route_from_plan_gate 条件边分流，不得混用 route_from_plan。
+    gate 无 LLM 调用、无事件发射——resume 会从头重执行本节点。
+    """
+    multi_step = len(state.plan_steps) > 1 or any(s.kind == "analyze" for s in state.plan_steps)
+    forced = state.autonomy_level == "L1"
+    if state.phase != "plan" or not (multi_step or forced):
+        return state
+    resume = maybe_interrupt(
+        state,
+        {
+            "kind": "plan_review",
+            "plan_steps": [s.model_dump() for s in state.plan_steps],
+            "summary": state.plan_steps[0].goal if state.plan_steps else "",
+        },
+        trigger="plan_review",
+    )
+    if resume.get("action") == "reject":
+        return state.apply(phase="done", no_data_reason="用户拒绝了分析计划，未执行任何查询")
+    if resume.get("action") == "edit":
+        return state.apply(plan_edit_instruction=resume.get("instruction"), phase="plan")
+    return state  # approve：保持 phase，交 route_from_plan 分流
+
+
+def route_from_plan_gate(state: AgentState) -> str:
+    """plan_gate 条件边路由：approve 交原 route_from_plan；edit 回 plan；reject 收敛。"""
+    if state.phase == "plan" and state.plan_edit_instruction:
+        return "plan"
+    if state.phase == "done":
+        return "plan_gate_end"
+    return route_from_plan(state)
+
+
 def _compile(checkpointer: Any) -> Any:
     """装配六节点图 + clarify_gate：边结构与 native build_graph 同构。"""
     g = LGStateGraph(AgentState)
@@ -101,11 +144,21 @@ def _compile(checkpointer: Any) -> Any:
     g.set_entry_point("clarify")
     g.add_edge("clarify", "clarify_gate")
     g.add_conditional_edges("clarify_gate", route_from_clarify, {"plan": "plan"})
+    g.add_node("plan_gate", _plan_gate)
+    g.add_node("plan_gate_end", lambda s: s)
+    g.add_edge("plan", "plan_gate")
     g.add_conditional_edges(
-        "plan",
-        route_from_plan,
-        {"query": "query", "analyze": "analyze", "critique": "critique"},
+        "plan_gate",
+        route_from_plan_gate,
+        {
+            "query": "query",
+            "analyze": "analyze",
+            "critique": "critique",
+            "plan": "plan",
+            "plan_gate_end": "plan_gate_end",
+        },
     )
+    g.add_edge("plan_gate_end", END)
     g.add_edge("query", "analyze")
     g.add_edge("analyze", "critique")
     g.add_conditional_edges(
