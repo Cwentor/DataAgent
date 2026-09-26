@@ -6,3 +6,11 @@ ruff>=0.4
 numpy>=1.26
 pandas>=2.2
 pyarrow>=15.0
+# Agent harness evolution (M0): orchestration & serving layer only —
+# domain kernel deps in requirements.txt unchanged. 0.x/快速迭代生态一律精确 pin，
+# 升级走独立 PR + 全量回归门（设计文档 §9）。
+langgraph==1.2.12
+langgraph-checkpoint-sqlite==3.1.1
+httpx==0.28.1
+fastapi==0.141.1
+uvicorn==0.54.0

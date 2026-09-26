@@ -101,6 +101,8 @@ python -m web.server 8000
 | 环境管理器 | Miniconda / Anaconda（`conda 26.x+`） |
 | 包管理器 | pip |
 
+> **选型说明**：领域内核保持零框架依赖（`requirements.txt` 4 项不变）；编排/交互层自十七期起引入成熟框架并精确 pin（LangGraph 图编排 + FastAPI/uvicorn 服务层，见 `requirements-dev.txt`）。0.x 快速迭代生态的版本升级一律走独立 PR + 全量回归门。
+
 ### 二、克隆与安装
 
 ```bash
