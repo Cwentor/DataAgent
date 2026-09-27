@@ -788,7 +788,9 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
         if mismatch:
             state = state.apply(blocked_reason=mismatch, answered_by="blocked")
             guard_blocked.append(name)
-            events.emit_tool_start("futurebi_dsl_query", step.id, {"dataset": name, "dsl": dsl_payload})
+            events.emit_tool_start(
+                "futurebi_dsl_query", step.id, {"dataset": name, "dsl": dsl_payload}
+            )
             events.emit_tool_end(
                 "futurebi_dsl_query",
                 step.id,
@@ -2133,8 +2135,7 @@ def _cannot_answer_report(state: AgentState) -> str:
     profile = classify_intent(state.user_query)
     if profile.anchor_fields:
         lines.append(
-            f"已识别锚点：{'、'.join(profile.anchor_fields)}"
-            "（但不足以确定完整查询口径）。"
+            f"已识别锚点：{'、'.join(profile.anchor_fields)}" "（但不足以确定完整查询口径）。"
         )
     else:
         lines.append("未在语义目录中识别到任何指标或维度。")

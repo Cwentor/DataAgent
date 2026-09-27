@@ -1131,7 +1131,12 @@ def test_guard_intercept_full_audit(tmp_path, monkeypatch):
                     "depends_on": [],
                     "dsl": {
                         "metrics": [
-                            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                            {
+                                "kind": "aggregate",
+                                "field": "order_amount",
+                                "agg": "sum",
+                                "alias": "gmv",
+                            }
                         ],
                         "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
                         "time_filter": {
@@ -1140,7 +1145,14 @@ def test_guard_intercept_full_audit(tmp_path, monkeypatch):
                         },
                     },
                 },
-                {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+                {
+                    "id": "s2",
+                    "goal": "综合作答",
+                    "kind": "synthesize",
+                    "depends_on": ["s1"],
+                    "dsl": None,
+                    "code": None,
+                },
             ],
         },
     )
@@ -1183,7 +1195,12 @@ def test_code_exec_skipped_when_blocked(tmp_path, monkeypatch):
                     "depends_on": [],
                     "dsl": {
                         "metrics": [
-                            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                            {
+                                "kind": "aggregate",
+                                "field": "order_amount",
+                                "agg": "sum",
+                                "alias": "gmv",
+                            }
                         ],
                         "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
                         "time_filter": {
@@ -1253,7 +1270,14 @@ def _grounding_retry_plan_payload():
                     },
                 },
             },
-            {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+            {
+                "id": "s2",
+                "goal": "综合作答",
+                "kind": "synthesize",
+                "depends_on": ["s1"],
+                "dsl": None,
+                "code": None,
+            },
         ],
     }
 
@@ -1299,7 +1323,9 @@ def test_grounding_retry_exhausted_falls_back_to_deterministic(tmp_path, monkeyp
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
     fabricated = "编造报告：转化率高达 42.5%、留存 88.6%、复购 77.3%、曝光 99.2%。"
-    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: _grounding_retry_plan_payload())
+    monkeypatch.setattr(
+        nodes, "_llm_json", lambda llm, system, user: _grounding_retry_plan_payload()
+    )
     synth_calls = iter([fabricated, fabricated])
 
     def _fake_synth(state, material, extra_instruction=None):
@@ -1338,7 +1364,9 @@ def test_planner_clarification_object_form_with_options(monkeypatch):
     assert state.clarification_options == ["含退款的净销售额", "不含退款的总销售额"]
 
     # 纯字符串旧契约：options 为空
-    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: {"clarification": "哪个指标？", "steps": []})
+    monkeypatch.setattr(
+        nodes, "_llm_json", lambda llm, system, user: {"clarification": "哪个指标？", "steps": []}
+    )
     state2 = nodes.planner_node(AgentState(user_query="销售额是多少"))
     assert state2.clarification == "哪个指标？"
     assert state2.clarification_options == []
