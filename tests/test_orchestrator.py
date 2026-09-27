@@ -886,3 +886,26 @@ def test_run_agent_unknown_blocks_honestly(tmp_path, monkeypatch):
     assert "无法作答" in trace.report
     assert "万元" not in trace.report  # 绝无猜出的 GMV
     assert "province" in trace.report  # 能力清单引导存在
+
+
+def test_run_agent_blocked_report_skips_llm_synthesis(tmp_path, monkeypatch):
+    """拒答报告必须纯确定性构造：综合层 LLM 被短路（零调用实锤）。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    llm_report_calls: list[str] = []
+
+    original_chat = nodes._synthesize_with_llm
+
+    def _spy(state, material):
+        llm_report_calls.append("called")
+        return original_chat(state, material)
+
+    monkeypatch.setattr(nodes, "_synthesize_with_llm", _spy)
+    trace = run_agent("帮我看看最近情况", session_id="blockedshort")
+    assert trace.phase == "done"
+    assert "无法作答" in trace.report
+    assert llm_report_calls == []  # 短路实锤：综合层未被触碰
