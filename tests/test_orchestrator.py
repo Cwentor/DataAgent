@@ -22,6 +22,18 @@ def test_agent_state_forbids_extra_fields():
         AgentState(user_query="x", rogue_field=1)
 
 
+def test_agent_state_intent_fields_contract():
+    """十八期：诚实兜底链路的状态契约（blocked/answered_by/intent）。"""
+    state = AgentState(user_query="有多少个省份")
+    assert state.blocked_reason is None
+    assert state.answered_by == ""
+    assert state.intent_type is None
+    assert state.intent_anchors == []
+    # extra=forbid 不被破坏：未知字段仍拒绝
+    with pytest.raises(ValidationError):
+        AgentState(user_query="x", rogue_field=1)
+
+
 def test_error_context_retry_cap():
     state = AgentState(user_query="x")
     for i in range(MAX_RETRIES):
