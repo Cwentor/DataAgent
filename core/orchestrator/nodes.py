@@ -1870,8 +1870,14 @@ def _render_table(table: dict[str, Any], *, limit: int = 10, currency: bool = Tr
     return lines
 
 
-def _synthesize_with_llm(state: AgentState, material: str) -> str | None:
-    """LLM 商业分析师综合（审计修复 R1）；失败返回 None 走确定性兜底。"""
+def _synthesize_with_llm(
+    state: AgentState, material: str, extra_instruction: str | None = None
+) -> str | None:
+    """LLM 商业分析师综合（审计修复 R1）；失败返回 None 走确定性兜底。
+
+    ``extra_instruction``：Grounding 定向重写的修正指令（二期）——拼在
+    user_prompt 末尾，仅约束本次调用。
+    """
     llm = _resolve_llm()
     if llm is None:
         return None
@@ -1879,6 +1885,8 @@ def _synthesize_with_llm(state: AgentState, material: str) -> str | None:
         f"# 用户问题\n{state.user_query}\n\n# 上游分析材料（唯一数据事实来源）\n{material}\n\n"
         "# 现在，按四段式结构输出最终分析报告（Markdown）。"
     )
+    if extra_instruction:
+        user_prompt += "\n\n" + extra_instruction
     try:
         from agent.agent import extract_json
         from providers import chat_text
@@ -2212,24 +2220,44 @@ def synthesize_node(state: AgentState) -> AgentState:
         material = _analysis_material(state, include_trace=bool(state.error_context.errors))
         if material:
             llm_report = _synthesize_with_llm(state, material)
+            if llm_report:
+                # Grounding 定向重试闭环（二期）：不可溯源超阈值 => 携修正指令
+                # 重写 1 次；仍超阈值 => 放弃 LLM 叙事，降级确定性渲染
+                # （宁弃叙事不弃真实）
+                from core.orchestrator.grounding import collect_allowed_values, grounding_review
+
+                allowed = collect_allowed_values(state, workspace)
+                ungrounded = grounding_review(llm_report, allowed)
+                if len(ungrounded) > 3:
+                    events.emit_reflection(
+                        "报告数值溯源失败，定向重写",
+                        "retry",
+                        "不可溯源数值清单喂回 LLM 定向修正（上限 1 次）",
+                    )
+                    retry_instruction = (
+                        "# 数值溯源修正（硬性）\n"
+                        "你上一版报告中的以下数值未能对应到真实查询结果，"
+                        "严禁保留或再编造：\n- " + "\n- ".join(ungrounded[:10]) + "\n"
+                        "重写报告：仅允许引用素材中出现过的数值及其万元/百分比换算；"
+                        "素材中没有的数据必须如实写明「未获取到」。"
+                    )
+                    retry_report = _synthesize_with_llm(
+                        state, material, extra_instruction=retry_instruction
+                    )
+                    retry_ok = False
+                    if retry_report:
+                        ungrounded = grounding_review(retry_report, allowed)
+                        if len(ungrounded) <= 3:
+                            llm_report = retry_report
+                            retry_ok = True
+                    if not retry_ok:
+                        logger.warning(
+                            "Grounding 重写后仍不可溯源，降级确定性渲染",
+                            extra={"error": str(ungrounded[:10])[:400]},
+                        )
+                        llm_report = None
 
     if llm_report:
-        # Grounding 数值溯源校验（十八期最小版，只标注不拦截）：LLM 报告中的
-        # 数值应能溯源到真实查询数据；不可溯源值超阈值时追加提示小节。
-        # 拦截重试闭环属二期（防死循环/超时）。
-        from core.orchestrator.grounding import collect_allowed_values, grounding_review
-
-        allowed = collect_allowed_values(state, workspace)
-        ungrounded = grounding_review(llm_report, allowed)
-        if len(ungrounded) > 3:
-            logger.warning(
-                "LLM 报告存在不可溯源数值，追加溯源提示",
-                extra={"error": str(ungrounded[:10])[:400]},
-            )
-            llm_report = (
-                llm_report + "\n\n---\n**数据溯源提示**：以下数值未能对应到本次真实查询结果，"
-                "请谨慎采信：" + "、".join(ungrounded[:10])
-            )
         report = _degradation_banner(state) + llm_report
         events.emit_event(
             events.EVENT_ARTIFACT_EMIT,
