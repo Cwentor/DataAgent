@@ -107,7 +107,14 @@ def test_run_agent_hitl_flow(tmp_path, monkeypatch):
                     },
                 },
             },
-            {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+            {
+                "id": "s2",
+                "goal": "综合作答",
+                "kind": "synthesize",
+                "depends_on": ["s1"],
+                "dsl": None,
+                "code": None,
+            },
         ],
     }
     responses = iter([{"clarification": "你关注哪个时间段的 GMV？", "steps": []}, plan_payload])
@@ -923,14 +930,21 @@ def test_intent_dsl_guard_unit():
 
     legal = {
         "metrics": [
-            {"kind": "aggregate", "field": "province", "agg": "count_distinct", "alias": "province_count"}
+            {
+                "kind": "aggregate",
+                "field": "province",
+                "agg": "count_distinct",
+                "alias": "province_count",
+            }
         ],
         "filters": [{"field": "refund_amount", "operator": "gt", "value": 0}],
     }
     assert _intent_dsl_mismatch("有退款的省份有多少个", legal) is None
 
     metric_bad = {
-        "metrics": [{"kind": "aggregate", "field": "refund_amount", "agg": "sum", "alias": "refund_amount"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "refund_amount", "agg": "sum", "alias": "refund_amount"}
+        ],
         "filters": [],
     }
     assert _intent_dsl_mismatch("5月订单量是多少", metric_bad) is not None
@@ -957,7 +971,12 @@ def test_run_agent_guard_blocks_llm_misaligned_dsl(tmp_path, monkeypatch):
                     "depends_on": [],
                     "dsl": {
                         "metrics": [
-                            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                            {
+                                "kind": "aggregate",
+                                "field": "order_amount",
+                                "agg": "sum",
+                                "alias": "gmv",
+                            }
                         ],
                         "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
                         "time_filter": {
@@ -966,7 +985,14 @@ def test_run_agent_guard_blocks_llm_misaligned_dsl(tmp_path, monkeypatch):
                         },
                     },
                 },
-                {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+                {
+                    "id": "s2",
+                    "goal": "综合作答",
+                    "kind": "synthesize",
+                    "depends_on": ["s1"],
+                    "dsl": None,
+                    "code": None,
+                },
             ],
         },
     )
@@ -1010,7 +1036,12 @@ def test_planner_llm_intent_echoed_to_state(monkeypatch):
                     "depends_on": [],
                     "dsl": {
                         "metrics": [
-                            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                            {
+                                "kind": "aggregate",
+                                "field": "order_amount",
+                                "agg": "sum",
+                                "alias": "gmv",
+                            }
                         ],
                         "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
                         "time_filter": {
@@ -1019,7 +1050,14 @@ def test_planner_llm_intent_echoed_to_state(monkeypatch):
                         },
                     },
                 },
-                {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+                {
+                    "id": "s2",
+                    "goal": "综合作答",
+                    "kind": "synthesize",
+                    "depends_on": ["s1"],
+                    "dsl": None,
+                    "code": None,
+                },
             ],
         },
     )
@@ -1029,6 +1067,8 @@ def test_planner_llm_intent_echoed_to_state(monkeypatch):
     assert state.phase == "query"
 
     # 无 intent 字段：宽容不阻塞
-    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: {"clarification": None, "steps": []})
+    monkeypatch.setattr(
+        nodes, "_llm_json", lambda llm, system, user: {"clarification": None, "steps": []}
+    )
     state2 = nodes.planner_node(AgentState(user_query="5月GMV是多少"))
     assert state2.intent_type is None

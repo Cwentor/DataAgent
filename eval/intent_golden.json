@@ -1,0 +1,9 @@
+[
+  {"question": "有多少个省份", "expect": "count_answer", "expected_value": 8},
+  {"question": "2024年5月订单量是多少", "expect": "count_answer", "expected_value": null},
+  {"question": "2024年5月GMV是多少", "expect": "metric_wan_answer"},
+  {"question": "2024年5月GMV和订单量各多少", "expect": "multi_metric"},
+  {"question": "退款率是多少", "expect": "refusal"},
+  {"question": "流量表现怎么样", "expect": "refusal"},
+  {"question": "帮我看看最近情况", "expect": "refusal"}
+]

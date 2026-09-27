@@ -93,3 +93,41 @@ def _offline_llm(monkeypatch, tmp_path):
     yield
     reset_provider_factory(None)
     reset_default_provider_store(None)
+
+
+@pytest.fixture()
+def planner_clarify_then_plan(monkeypatch):
+    """HITL 传输层测试的触发器（十八期）。
+
+    离线字符规则退役后，clarify 唯一来源为 Planner clarification 契约；
+    mock planner：首轮输出澄清问题（挂起），恢复轮输出两步直答计划。
+    """
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import PlanStep
+
+    plan_steps = [
+        PlanStep(
+            id="s1",
+            goal="取GMV总量",
+            kind="query",
+            dsl={
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                ],
+                "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                "time_filter": {
+                    "range_type": "absolute",
+                    "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
+                },
+            },
+        ),
+        PlanStep(id="s2", goal="综合作答", kind="synthesize", depends_on=["s1"]),
+    ]
+    responses = iter(
+        [
+            {"clarification": "你关注的指标与时间范围是什么？", "steps": []},
+            {"clarification": None, "steps": [s.model_dump() for s in plan_steps]},
+        ]
+    )
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: next(responses))

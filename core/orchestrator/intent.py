@@ -158,7 +158,12 @@ def count_dimension_dsl(query: str) -> dict | None:
     field = profile.anchor_fields[0]
     return {
         "metrics": [
-            {"kind": "aggregate", "field": field, "agg": "count_distinct", "alias": f"{field}_count"}
+            {
+                "kind": "aggregate",
+                "field": field,
+                "agg": "count_distinct",
+                "alias": f"{field}_count",
+            }
         ],
         "dimensions": [],
         "filters": [],

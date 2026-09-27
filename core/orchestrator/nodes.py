@@ -30,19 +30,19 @@ from agent.heuristic import region_provinces
 from agent.time_utils import parse_explicit_time_window
 from audit.logging import get_logger
 from core.orchestrator import events
-from core.orchestrator.prompts import (
-    DEGRADED_SUMMARIZER_SYSTEM,
-    PLANNER_SYSTEM,
-    REFLECTOR_SYSTEM,
-    SYNTHESIZER_SYSTEM,
-    planner_prompt,
-)
 from core.orchestrator.intent import (
     DIMENSION_TERMS as DIMENSION_TERMS,
 )
 from core.orchestrator.intent import (
     IntentType,
     classify_intent,
+)
+from core.orchestrator.prompts import (
+    DEGRADED_SUMMARIZER_SYSTEM,
+    PLANNER_SYSTEM,
+    REFLECTOR_SYSTEM,
+    SYNTHESIZER_SYSTEM,
+    planner_prompt,
 )
 from core.orchestrator.state import (
     MAX_RETRIES,
@@ -362,9 +362,7 @@ def planner_node(state: AgentState) -> AgentState:
                 state = state.apply(
                     intent_type=str(intent_payload["type"]),
                     intent_anchors=[
-                        str(a)
-                        for a in (intent_payload.get("anchors") or [])
-                        if isinstance(a, str)
+                        str(a) for a in (intent_payload.get("anchors") or []) if isinstance(a, str)
                     ],
                 )
     if steps is None:
@@ -2070,16 +2068,12 @@ def _cannot_answer_report(state: AgentState) -> str:
 
     lines: list[str] = [f"## 数据说明：{state.user_query}", ""]
     lines.append(f"**本次无法作答：{state.blocked_reason}。**")
-    lines.append(
-        "系统仅在能够确定查询口径时作答——宁可拒答，也不猜测口径给出可能错误的结果。"
-    )
+    lines.append("系统仅在能够确定查询口径时作答——宁可拒答，也不猜测口径给出可能错误的结果。")
     lines.append("")
     lines.append("**当前支持查询的能力清单：**")
     lines.extend(capability_catalog_lines())
     lines.append("")
-    lines.append(
-        "建议：请调整问法（明确指标或维度），或配置 LLM 模型后重试以获得完整语义理解。"
-    )
+    lines.append("建议：请调整问法（明确指标或维度），或配置 LLM 模型后重试以获得完整语义理解。")
     return "\n".join(lines)
 
 
@@ -2184,10 +2178,8 @@ def synthesize_node(state: AgentState) -> AgentState:
                 extra={"error": str(ungrounded[:10])[:400]},
             )
             llm_report = (
-                llm_report
-                + "\n\n---\n**数据溯源提示**：以下数值未能对应到本次真实查询结果，"
-                "请谨慎采信："
-                + "、".join(ungrounded[:10])
+                llm_report + "\n\n---\n**数据溯源提示**：以下数值未能对应到本次真实查询结果，"
+                "请谨慎采信：" + "、".join(ungrounded[:10])
             )
         report = _degradation_banner(state) + llm_report
         events.emit_event(
