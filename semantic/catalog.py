@@ -21,11 +21,16 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class FieldMeta:
-    """字段元数据：物理表 + 列名 + 类型（dtype 用于字面量安全转义）。"""
+    """字段元数据：物理表 + 列名 + 类型（dtype 用于字面量安全转义）。
+
+    label：中文语义标签（如「订单金额」），供 Web 侧栏展示与 Planner
+    提示词注入；None 时消费方回退物理列名，保持旧契约逐字不变。
+    """
 
     table: str
     column: str
     dtype: str  # 用于字面量安全转义：str / int / float / bool / timestamp
+    label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,30 +49,40 @@ class JoinRule:
 # 逻辑字段 -> 物理字段（内置默认目录；生产环境由 catalog_loader 从元数据+YAML 重建）
 COLUMNS: dict[str, FieldMeta] = {
     # fact_orders（主事实表）
-    "order_id": FieldMeta("fact_orders", "order_id", "int"),
-    "user_id": FieldMeta("fact_orders", "user_id", "int"),
-    "product_id": FieldMeta("fact_orders", "product_id", "int"),
-    "order_amount": FieldMeta("fact_orders", "order_amount", "float"),
-    "discount_amount": FieldMeta("fact_orders", "discount_amount", "float"),
-    "pay_status": FieldMeta("fact_orders", "pay_status", "str"),
-    "order_time": FieldMeta("fact_orders", "order_time", "timestamp"),
-    "shop_id": FieldMeta("fact_orders", "shop_id", "int"),
+    "order_id": FieldMeta("fact_orders", "order_id", "int", label="订单ID"),
+    "user_id": FieldMeta("fact_orders", "user_id", "int", label="用户ID"),
+    "product_id": FieldMeta("fact_orders", "product_id", "int", label="商品ID"),
+    "order_amount": FieldMeta("fact_orders", "order_amount", "float", label="订单金额"),
+    "discount_amount": FieldMeta("fact_orders", "discount_amount", "float", label="优惠金额"),
+    "pay_status": FieldMeta("fact_orders", "pay_status", "str", label="支付状态"),
+    "order_time": FieldMeta("fact_orders", "order_time", "timestamp", label="下单时间"),
+    "shop_id": FieldMeta("fact_orders", "shop_id", "int", label="门店ID"),
     # fact_refunds（第二事实表：退款）
-    "refund_id": FieldMeta("fact_refunds", "refund_id", "int"),
-    "refund_amount": FieldMeta("fact_refunds", "refund_amount", "float"),
-    "refund_time": FieldMeta("fact_refunds", "refund_time", "timestamp"),
-    "refund_status": FieldMeta("fact_refunds", "refund_status", "str"),
+    "refund_id": FieldMeta("fact_refunds", "refund_id", "int", label="退款单ID"),
+    "refund_amount": FieldMeta("fact_refunds", "refund_amount", "float", label="退款金额"),
+    "refund_time": FieldMeta("fact_refunds", "refund_time", "timestamp", label="退款时间"),
+    "refund_status": FieldMeta("fact_refunds", "refund_status", "str", label="退款状态"),
     # dim_user
-    "province": FieldMeta("dim_user", "province", "str"),
-    "gender": FieldMeta("dim_user", "gender", "str"),
-    "register_time": FieldMeta("dim_user", "register_time", "timestamp"),
+    "province": FieldMeta("dim_user", "province", "str", label="省份"),
+    "gender": FieldMeta("dim_user", "gender", "str", label="性别"),
+    "register_time": FieldMeta("dim_user", "register_time", "timestamp", label="注册时间"),
     # dim_product
-    "category": FieldMeta("dim_product", "category", "str"),
-    "brand": FieldMeta("dim_product", "brand", "str"),
-    "unit_price": FieldMeta("dim_product", "unit_price", "float"),
-    "product_name": FieldMeta("dim_product", "product_name", "str"),
+    "category": FieldMeta("dim_product", "category", "str", label="品类"),
+    "brand": FieldMeta("dim_product", "brand", "str", label="品牌"),
+    "unit_price": FieldMeta("dim_product", "unit_price", "float", label="单价"),
+    "product_name": FieldMeta("dim_product", "product_name", "str", label="商品名称"),
     # dim_shop
-    "shop_name": FieldMeta("dim_shop", "shop_name", "str"),
+    "shop_name": FieldMeta("dim_shop", "shop_name", "str", label="门店名称"),
+}
+
+# 物理表 -> 中文表标签：Web 侧栏分组标题与 Planner 摘要展示用。
+# 内置常量（不随 overlay 重建）；overlay 引入未登记的新表时消费方回退表名本身。
+TABLE_LABELS: dict[str, str] = {
+    "fact_orders": "订单事实表",
+    "fact_refunds": "退款事实表",
+    "dim_user": "用户维度表",
+    "dim_product": "商品维度表",
+    "dim_shop": "门店维度表",
 }
 
 # 表别名（编译器内部使用）

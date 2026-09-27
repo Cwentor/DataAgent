@@ -135,12 +135,18 @@ def schema_digest(enum_values: dict[str, list[str]] | None = None) -> str:
 
     ``enum_values``：低基数字段的实际取值（SchemaAgent 动态 profiling，
     core.retrieval.profiling）——注入后 Planner 不再臆造过滤字面值。
+    中文标签（label）非空时以 ``逻辑名: 中文 (物理位置, 类型)`` 格式注入，
+    帮助 Planner 把「订单金额」等中文问法直接锚定到逻辑字段；label 为 None
+    时保持旧格式逐字不变。
     """
     from semantic.catalog import COLUMNS
 
     lines = []
     for name, meta in sorted(COLUMNS.items()):
-        line = f"- {name} ({meta.table}.{meta.column}, {meta.dtype})"
+        if meta.label:
+            line = f"- {name}: {meta.label} ({meta.table}.{meta.column}, {meta.dtype})"
+        else:
+            line = f"- {name} ({meta.table}.{meta.column}, {meta.dtype})"
         values = (enum_values or {}).get(name)
         if values:
             line += " 可取值: " + "|".join(values)
@@ -185,8 +191,17 @@ def _llm_json(llm: Any, system: str, user: str) -> dict[str, Any] | None:
 def clarify_node(state: AgentState) -> AgentState:
     """歧义检测：HITL 门（需求 §2.A ClarificationNode）。
 
-    确定性规则：问题过短/无指标词/无时间锚且是多轮首问 => 请求澄清。
-    多轮首问判定：history_digest 非空 = 同会话追问轮，省略指代短句（如
+    澄清判定权分层（2026-09：确定性字符规则误拦简单问题修复）：
+    - LLM 可用 => 直接放行规划。"是否需要人工澄清"由 Planner 在规划时
+      一并裁决（计划契约的 clarification 字段）：Planner 持有语义目录、
+      枚举值与会话历史上下文，能判定"有多少个省份"这类事实型问题可经
+      count_distinct 直接作答；此前"过短/无指标词即澄清"的字符规则会把
+      这类问题拦在 Planner 门外（回归锚点），且固定文案无法针对问题定向。
+      判定与规划同一次 LLM 调用完成，不新增延迟；Planner 输出 clarification
+      时仍走 phase=clarify 的 HITL 中断，契约不变。
+    - LLM 不可用（离线兜底）=> 保留确定性规则保守澄清：无理解力场景下
+      宁问勿猜。
+    追问轮判定：history_digest 非空 = 同会话追问轮，省略指代短句（如
     「那华南呢」）的语境由 Planner 结合会话历史补全，不再触发澄清门。
     用户已答复（human_reply）时把答复并入 user_query 并继续。
     """
@@ -197,6 +212,9 @@ def clarify_node(state: AgentState) -> AgentState:
 
     if state.history_digest:
         # 追问轮：有会话历史兜底语境，直接放行给 Planner 消解省略指代
+        return state.apply(phase="plan")
+    if _resolve_llm() is not None:
+        # LLM 在场：澄清判定交给 Planner（clarification 契约），简单问题直达规划
         return state.apply(phase="plan")
     metric_words = ("gmv", "销量", "金额", "订单", "退款", "率", "数", "额")
     has_metric = any(w in query.lower() for w in metric_words)
@@ -228,6 +246,20 @@ def _heuristic_plan(query: str) -> list[PlanStep]:
         w in query for w in ("为什么", "下滑", "下降", "下跌", "上涨", "增长", "归因", "原因")
     )
     if not diagnostic:
+        count_dsl = _count_dimension_dsl(query)
+        if count_dsl is not None:
+            # 基数类事实问题（多少个省份/几个品类）：count_distinct 直答。
+            # DSL 内嵌进步骤——query 节点不必再按问题类型二次猜测兜底口径
+            field = count_dsl["metrics"][0]["field"]
+            return [
+                PlanStep(
+                    id="s1",
+                    goal=f"统计{_dimension_label(field)}的去重取值个数",
+                    kind="query",
+                    dsl=count_dsl,
+                ),
+                PlanStep(id="s2", goal="直接报告计数结果", kind="synthesize", depends_on=["s1"]),
+            ]
         return [
             PlanStep(id="s1", goal=f"查询回答问题所需数据：{query[:40]}", kind="query"),
             PlanStep(id="s2", goal="综合查询结果作答", kind="synthesize", depends_on=["s1"]),
@@ -447,6 +479,54 @@ def _scalar_dsl(query: str) -> dict[str, Any]:
     }
 
 
+# 基数类问句的量词模式（"多少个省份 / 几个品类 / 多少家店铺"）。要求"量词"
+# 与维度词共现且不含指标词——"各省GMV多少"式指标问句不是计数问句。
+_COUNT_QUESTION_TERMS = (
+    "多少个",
+    "几个",
+    "多少种",
+    "几种",
+    "多少类",
+    "几类",
+    "多少家",
+    "几家",
+)
+_COUNT_EXCLUDE_METRIC_WORDS = ("gmv", "销量", "金额", "订单", "退款", "率", "额", "收入", "成本")
+
+
+def _count_dimension_dsl(query: str) -> dict[str, Any] | None:
+    """基数类事实问题的确定性 count_distinct DSL（非基数问题返回 None）。
+
+    "有多少个省份 / 几个品类 / 多少家店铺"式元数据问题：语义目录维度字段
+    的去重计数即可作答，无需时间窗口与指标锚定。LLM 不可用或规划失败时
+    兜底规划据此产出计数 DSL——此前兜底一律 ``_scalar_dsl`` 取 sum(gmv)，
+    产出"问省份数、答 GMV 总额"的答非所问（回归锚点）。
+
+    保守判定：量词模式与维度词共现、恰好一个维度、且不含指标词；多维度
+    计数或边界模糊的问句不兜底（LLM 在场时由 Planner 裁决）。
+    """
+    if not any(t in query for t in _COUNT_QUESTION_TERMS):
+        return None
+    if any(w in query.lower() for w in _COUNT_EXCLUDE_METRIC_WORDS):
+        return None
+    dims = _explicit_dimensions(query)
+    if len(dims) != 1:
+        return None
+    field = dims[0]
+    return {
+        "metrics": [
+            {
+                "kind": "aggregate",
+                "field": field,
+                "agg": "count_distinct",
+                "alias": f"{field}_count",
+            }
+        ],
+        "dimensions": [],
+        "filters": [],
+    }
+
+
 def _inherit_overview_scope(
     dsl: dict[str, Any], overview_variants: list[dict[str, Any]]
 ) -> tuple[dict[str, Any], list[str]]:
@@ -607,6 +687,7 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
 
     # 步骤 DSL：LLM 给出则规范化后交网关强校验，否则按问题类型走确定性兜底：
     # 诊断类 => 两期分省明细对（总量与归因同源，口径天然一致）；
+    # 基数类（多少个省份/几个品类）=> count_distinct 直答；
     # 其余 => 单期总量（标量问题附维度无意义）
     if step.dsl is not None:
         dsl_variants = [_normalize_dsl_draft(step.dsl)]
@@ -615,9 +696,12 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
             w in state.user_query
             for w in ("为什么", "下滑", "下降", "下跌", "上涨", "增长", "归因", "原因")
         )
+        count_dsl = None if diagnostic else _count_dimension_dsl(state.user_query)
         if diagnostic:
             baseline_dsl, current_dsl = _diagnostic_dsl_pair(state.user_query)
             dsl_variants = [baseline_dsl, current_dsl]
+        elif count_dsl is not None:
+            dsl_variants = [count_dsl]
         else:
             dsl_variants = [_scalar_dsl(state.user_query)]
 
@@ -1539,6 +1623,19 @@ def _fmt_wan(value: Any) -> str:
         return str(value)
 
 
+def _fmt_scalar_answer(column: str, value: Any) -> str:
+    """单行单列答案的人读化：计数类列原样输出，金额类列万元化。
+
+    回归锚点（2026-09）：单值渲染此前无条件走 _fmt_wan——问"有多少个省份"
+    会答"查询答案：0.00 万元"。计数/比率不是金额：列名含 count 或中文
+    计数词时按原值输出（count_distinct 别名约定为 <field>_count）。
+    """
+    lowered = column.lower()
+    if "count" in lowered or "数量" in column or "个数" in column or "家数" in column:
+        return str(value)
+    return _fmt_wan(value)
+
+
 def _fmt_pct(value: Any) -> str:
     """小数占比 -> 人读百分比（保留一位小数）。"""
     try:
@@ -1564,7 +1661,7 @@ def _dataset_analyst_markdown(
     ]
     preview = _preview_rows(str(workspace / "inputs" / ref.get("path", "")), limit=30)
     if total == 1 and len(cols) == 1 and preview:
-        lines.append(f"- **查询答案：{_fmt_wan(preview[0][0])}**")
+        lines.append(f"- **查询答案：{_fmt_scalar_answer(cols[0], preview[0][0])}**")
     artifact: dict[str, Any] | None = None
     if preview:
         head = preview[:5]

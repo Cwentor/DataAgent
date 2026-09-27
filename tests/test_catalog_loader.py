@@ -51,8 +51,29 @@ def test_build_catalog_from_conn_without_overlay(conn):
     assert cat.fact_table == "fact_orders"
     assert "order_amount" in cat.columns
     assert cat.columns["order_amount"].dtype == "float"
+    assert cat.columns["order_amount"].label == "订单金额"
     assert cat.join_rules["dim_user"].join_type == "inner"
     assert cat.fact_join_rules["fact_refunds"].join_type == "left"
+
+
+def test_overlay_label_overrides_and_falls_back(conn, tmp_path):
+    """中文标签：覆写显式 label 优先；缺省回退内置默认文案；新字段无内置默认为 None。"""
+    overlay = _overlay(
+        tmp_path,
+        extra_fields={
+            "province": {
+                "table": "dim_user",
+                "column": "province",
+                "dtype": "str",
+                "label": "收货省份",
+            },
+            "gross_amount": {"table": "fact_orders", "column": "order_amount", "dtype": "float"},
+        },
+    )
+    cat = build_catalog(conn=conn, overlay_path=overlay)
+    assert cat.columns["province"].label == "收货省份"
+    assert cat.columns["order_amount"].label == "订单金额"
+    assert cat.columns["gross_amount"].label is None
 
 
 def test_overlay_adds_new_field_and_compiles(conn, tmp_path):

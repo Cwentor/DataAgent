@@ -572,7 +572,7 @@ def test_schema_summary_requires_auth():
 
 
 def test_schema_summary_groups_by_table():
-    """认证后返回按物理表分组的字段清单（逻辑字段/物理列/类型）。"""
+    """认证后返回按物理表分组的字段清单（逻辑字段/物理列/类型/中文标签）。"""
     server, port = _start_server()
     try:
         _, login, _ = _login(port, "admin", "admin123")
@@ -588,10 +588,16 @@ def test_schema_summary_groups_by_table():
         names = [t["table"] for t in tables]
         assert "fact_orders" in names
         orders = next(t for t in tables if t["table"] == "fact_orders")
+        assert orders["label"] == "订单事实表"
         fields = {f["field"] for f in orders["fields"]}
         assert "order_amount" in fields
         gmv_meta = next(f for f in orders["fields"] if f["field"] == "order_amount")
-        assert gmv_meta == {"field": "order_amount", "column": "order_amount", "dtype": "float"}
+        assert gmv_meta == {
+            "field": "order_amount",
+            "column": "order_amount",
+            "dtype": "float",
+            "label": "订单金额",
+        }
     finally:
         server.shutdown()
         server.server_close()

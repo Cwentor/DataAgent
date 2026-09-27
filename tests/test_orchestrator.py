@@ -66,9 +66,13 @@ def test_run_agent_diagnostic_e2e(tmp_path, monkeypatch):
 
 
 def test_run_agent_hitl_flow(tmp_path, monkeypatch):
-    """歧义问题 -> 澄清中断 -> 用户答复 -> 完成全流程。"""
+    """歧义问题 -> 澄清中断 -> 用户答复 -> 完成全流程（离线兜底链路）。"""
+    import core.orchestrator.nodes as nodes
     from config import settings
 
+    # 钉死离线兜底：本用例覆盖确定性澄清门（LLM 在场时简单问题由 Planner
+    # 裁决是否澄清，见 test_run_agent_factoid_bypasses_clarify_gate）
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     paused = run_agent("GMV呢？", session_id="hitl")
     assert not isinstance(paused, dict)
@@ -81,6 +85,25 @@ def test_run_agent_hitl_flow(tmp_path, monkeypatch):
     )
     assert final.phase == "done"
     assert any(s["ok"] for s in final.steps)
+
+
+def test_run_agent_factoid_bypasses_clarify_gate(tmp_path, monkeypatch):
+    """LLM 在场时事实型短问句直达完成，不再被澄清门打断。
+
+    回归锚点："有多少个省份"此前被确定性字符规则（过短/无指标词即澄清）
+    误拦在 Planner 门外；判定权上交 Planner（clarification 契约）后应直达
+    规划。钉 _llm_json 返回 None（Planner LLM 失败走启发式兜底），聚焦验证
+    clarify_node 的"LLM 在场即放行"分支：全程无 clarify 中断。
+    """
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("有多少个省份", session_id="factoid")
+    assert trace.phase == "done"
+    assert trace.clarification is None
 
 
 def test_run_agent_simple_query_path(tmp_path, monkeypatch):
@@ -243,6 +266,82 @@ def test_planner_node_feeds_error_context_to_llm(monkeypatch):
     assert "nonexistent 不在语义目录" in captured["user"]
 
 
+def test_planner_node_llm_clarification_triggers_hitl(monkeypatch):
+    """Planner 判定歧义输出 clarification => phase=clarify（LLM 自主澄清通道）。
+
+    澄清判定权上交 Planner 后（clarify_node 在 LLM 在场时放行），这是
+    phase=clarify 的唯一触发源：契约消费链路必须实锤可达 HITL 中断。
+    """
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        nodes,
+        "_llm_json",
+        lambda llm, system, user: {
+            "clarification": "你关注的指标是 GMV 还是订单量？",
+            "steps": [],
+        },
+    )
+    state = nodes.planner_node(AgentState(user_query="表现怎么样？"))
+    assert state.phase == "clarify"
+    assert "GMV" in (state.clarification or "")
+
+
+# --------------------------------------------------------------------------- #
+# 基数类事实问题兜底（回归锚点："有多少个省份"曾被兜底成 sum(GMV) 答非所问）
+# --------------------------------------------------------------------------- #
+def test_count_dimension_dsl_matches_factoid_questions():
+    """量词 + 单一维度词的基数问句 => count_distinct DSL；指标问句不误判。"""
+    from core.orchestrator.nodes import _count_dimension_dsl
+
+    dsl = _count_dimension_dsl("有多少个省份")
+    assert dsl is not None
+    assert dsl["metrics"] == [
+        {
+            "kind": "aggregate",
+            "field": "province",
+            "agg": "count_distinct",
+            "alias": "province_count",
+        }
+    ]
+    assert _count_dimension_dsl("多少家店铺") is not None
+    assert _count_dimension_dsl("有几个品类") is not None
+    # 指标问句 / 多维度 / 无量词：不兜底（LLM 在场时由 Planner 裁决）
+    assert _count_dimension_dsl("各省GMV多少") is None
+    assert _count_dimension_dsl("GMV多少") is None
+    assert _count_dimension_dsl("有多少个省份和品类") is None
+
+
+def test_fmt_scalar_answer_counts_are_not_wan():
+    """单值答案渲染：计数列原样输出，金额列维持万元化。"""
+    from core.orchestrator.nodes import _fmt_scalar_answer
+
+    assert _fmt_scalar_answer("province_count", 9) == "9"
+    assert _fmt_scalar_answer("gmv", 1156943.73) == "115.69 万元"
+
+
+def test_run_agent_count_factoid_survives_planner_llm_failure(tmp_path, monkeypatch):
+    """LLM 客户端在场但 Planner 调用失败时，基数问题兜底直答省份数。
+
+    复现线上场景：clarify 放行（LLM 在场）-> Planner LLM 失败（_llm_json
+    返回 None）-> 启发式兜底。回归锚点：兜底此前一律 _scalar_dsl 取
+    sum(gmv)，产出"问省份数、答 115.69 万元 GMV"的离谱报告。
+    """
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("有多少个省份", session_id="countq")
+    assert trace.phase == "done"
+    # mock 数仓 8 个省份：计数直答，且严禁金额化（"0.00 万元"式离谱答案）
+    assert "查询答案：8" in trace.report
+    assert "万元" not in trace.report
+
+
 # --------------------------------------------------------------------------- #
 # 多轮会话上下文（并行会话改造：同会话追问继承历史语境）
 # --------------------------------------------------------------------------- #
@@ -301,15 +400,22 @@ def test_planner_node_feeds_history_to_llm(monkeypatch):
     assert "2024年5月北京的GMV是多少" in captured["user"]
 
 
-def test_clarify_node_passes_followup_with_history():
+def test_clarify_node_passes_followup_with_history(monkeypatch):
     """省略式追问（短句无指标词）有会话历史时放行规划，不再触发澄清门。"""
+    import core.orchestrator.nodes as nodes
     from core.orchestrator.nodes import clarify_node
     from core.orchestrator.state import AgentState
 
     followup = AgentState(user_query="那华南呢", history_digest="用户: 2024年5月北京GMV")
     assert clarify_node(followup).phase == "plan"
 
-    # 无历史（会话首问）保持旧契约：过短仍澄清
+    # LLM 在场：澄清判定权交给 Planner（clarification 契约），事实型短问句
+    # 不再被字符规则误拦（回归锚点："有多少个省份"曾被迫澄清）
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    assert clarify_node(AgentState(user_query="有多少个省份")).phase == "plan"
+
+    # 离线兜底（LLM 不可用）：无历史短问句保守澄清（宁问勿猜）
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
     first = AgentState(user_query="那华南呢")
     assert clarify_node(first).phase == "clarify"
 

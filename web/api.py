@@ -395,19 +395,35 @@ async def reveal_provider_key(provider_id: str, request: Request) -> Response:
 # --------------------------------------------------------------------------- #
 @app.get("/api/schema/summary")
 async def schema_summary(request: Request) -> dict:
-    """语义目录摘要（照抄 stdlib Handler._schema_summary）。"""
+    """语义目录摘要（照抄 stdlib Handler._schema_summary）。
+
+    字段级返回 label（中文语义标签，可能为 None）；表级返回 label
+    （中文表标签，未登记的新表回退表名本身）。
+    """
     ctx = _require_auth(request)
     set_request_context(request_id=get_request_id(), user=ctx.username)
-    from semantic.catalog import COLUMNS
+    from semantic.catalog import COLUMNS, TABLE_LABELS
 
     tables: dict[str, list[dict]] = {}
     for logical, meta in sorted(COLUMNS.items()):
         tables.setdefault(meta.table, []).append(
-            {"field": logical, "column": meta.column, "dtype": meta.dtype}
+            {
+                "field": logical,
+                "column": meta.column,
+                "dtype": meta.dtype,
+                "label": meta.label,
+            }
         )
     return {
         "principal": ctx.principal,
-        "tables": [{"table": name, "fields": fields} for name, fields in sorted(tables.items())],
+        "tables": [
+            {
+                "table": name,
+                "label": TABLE_LABELS.get(name, name),
+                "fields": fields,
+            }
+            for name, fields in sorted(tables.items())
+        ],
     }
 
 
