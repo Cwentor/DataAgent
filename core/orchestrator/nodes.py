@@ -1515,6 +1515,15 @@ def critic_node(state: AgentState) -> AgentState:
     - 诊断类问题但缺少 summary 产物 => 重规划；
     - 检查通过 => synthesize；重试耗尽 => 如实报告失败。
     """
+    # 诚实拒答短路（十八期，先于一切重规划判定）：意图不可确定/意图-DSL
+    # 错位时重规划取不回"理解力"，直接转综合输出拒答说明，严禁空转烧额度
+    if state.blocked_reason:
+        events.emit_reflection(
+            state.blocked_reason,
+            "proceed",
+            "转入综合节点输出诚实拒答说明",
+        )
+        return state.apply(phase="synthesize")
     has_summary = any(a.kind == "summary" for a in state.artifacts)
     has_data = bool(state.datasets)
     diagnostic = any(
@@ -1990,6 +1999,29 @@ def _no_data_report(state: AgentState) -> str:
     return "\n".join(lines)
 
 
+def _cannot_answer_report(state: AgentState) -> str:
+    """意图不可确定的诚实拒答报告（十八期）。
+
+    与 _no_data_report 同哲学：严禁让 LLM 在无理解依据时编造答案。
+    说明原因 + 能力清单引导 + 可行动建议；纯确定性字符串构造，零 LLM 调用。
+    """
+    from core.orchestrator.intent import capability_catalog_lines
+
+    lines: list[str] = [f"## 数据说明：{state.user_query}", ""]
+    lines.append(f"**本次无法作答：{state.blocked_reason}。**")
+    lines.append(
+        "系统仅在能够确定查询口径时作答——宁可拒答，也不猜测口径给出可能错误的结果。"
+    )
+    lines.append("")
+    lines.append("**当前支持查询的能力清单：**")
+    lines.extend(capability_catalog_lines())
+    lines.append("")
+    lines.append(
+        "建议：请调整问法（明确指标或维度），或配置 LLM 模型后重试以获得完整语义理解。"
+    )
+    return "\n".join(lines)
+
+
 def synthesize_node(state: AgentState) -> AgentState:
     """综合节点：执行轨迹 + 产物 => 商业分析师口径的 Markdown 报告。
 
@@ -2009,6 +2041,16 @@ def synthesize_node(state: AgentState) -> AgentState:
     from config import settings
 
     workspace = settings.WORKSPACE_ROOT / state.session_id / state.turn_id
+
+    # 诚实拒答（十八期）：blocked_reason 优先于一切——直接确定性输出拒答
+    # 报告，跳过 LLM 综合层（零 token 消耗、零虚构风险）
+    if state.blocked_reason:
+        report = _cannot_answer_report(state)
+        events.emit_event(
+            events.EVENT_ARTIFACT_EMIT,
+            {"artifact": {"type": "markdown_report", "title": "数据说明", "content": report}},
+        )
+        return state.apply(report=report, phase="done")
 
     # R3 降级保护：自愈额度耗尽 => 降级简报（无论是否已获取部分数据），
     # 严禁把未加工的 scratchpad / 工具执行结果吐给前端
