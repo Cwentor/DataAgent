@@ -974,3 +974,17 @@ def test_run_agent_guard_blocks_llm_misaligned_dsl(tmp_path, monkeypatch):
     assert trace.phase == "done"
     assert "无法作答" in trace.report
     assert "万元" not in trace.report
+
+
+def test_heuristic_answer_banner_visible(tmp_path, monkeypatch):
+    """兜底接管时报告顶部必须显著标注（降级不可静默）。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("有多少个省份", session_id="bannerq")
+    assert trace.phase == "done"
+    assert "查询答案：8" in trace.report
+    assert "离线兜底引擎" in trace.report

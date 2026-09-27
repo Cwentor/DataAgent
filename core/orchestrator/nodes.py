@@ -2066,6 +2066,16 @@ def _cannot_answer_report(state: AgentState) -> str:
     return "\n".join(lines)
 
 
+def _degradation_banner(state: AgentState) -> str:
+    """兜底接管的降级标注（十八期：降级不可静默）。"""
+    if state.answered_by != "heuristic":
+        return ""
+    return (
+        "> ⚠️ **本次回答由离线兜底引擎生成**（LLM 规划不可用），"
+        "口径为确定性规则匹配结果，仅供参考。\n\n"
+    )
+
+
 def synthesize_node(state: AgentState) -> AgentState:
     """综合节点：执行轨迹 + 产物 => 商业分析师口径的 Markdown 报告。
 
@@ -2144,7 +2154,7 @@ def synthesize_node(state: AgentState) -> AgentState:
             llm_report = _synthesize_with_llm(state, material)
 
     if llm_report:
-        report = llm_report
+        report = _degradation_banner(state) + llm_report
         events.emit_event(
             events.EVENT_ARTIFACT_EMIT,
             {"artifact": {"type": "markdown_report", "title": "分析报告", "content": report}},
@@ -2152,7 +2162,13 @@ def synthesize_node(state: AgentState) -> AgentState:
         return state.apply(report=report, phase="done")
 
     # ---- 确定性分析师兜底（无 LLM / LLM 输出反契约）---- #
-    lines: list[str] = [f"## 分析报告：{state.user_query}", ""]
+    lines: list[str] = []
+    banner = _degradation_banner(state)
+    if banner:
+        lines.append(banner.rstrip("\n"))
+        lines.append("")
+    lines.append(f"## 分析报告：{state.user_query}")
+    lines.append("")
     for summary in deduped_summaries:
         lines.extend(_summary_analyst_markdown(summary))
         lines.append("")
