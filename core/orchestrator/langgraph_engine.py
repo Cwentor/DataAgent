@@ -114,7 +114,13 @@ def _plan_gate(state: AgentState) -> AgentState:
     会落 critique 空转重规划直至迭代护栏强制终止。
     """
     if state.phase == "clarify" and state.clarification:
-        resume_value = interrupt({"kind": "clarify", "clarification": state.clarification})
+        resume_value = interrupt(
+            {
+                "kind": "clarify",
+                "clarification": state.clarification,
+                "options": list(state.clarification_options),
+            }
+        )
         # 合并语义逐字对齐 _clarify_gate（user_query 追加"（用户补充：…）"）；
         # plan_steps 必须置空（终审 Important #3）：重规划场景下旧计划会让
         # 路由/反思拿旧状态行事，用户答复被静默吞掉

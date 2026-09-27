@@ -112,6 +112,7 @@ class AgentRun:
                     "kind": "clarify",
                     "hitl": {
                         "question": state.clarification or "请补充分析需求",
+                        "options": list(state.clarification_options),
                         "resume_token": token,
                     },
                 }

@@ -1310,3 +1310,60 @@ def test_grounding_retry_exhausted_falls_back_to_deterministic(tmp_path, monkeyp
     assert trace.phase == "done"
     assert "查询答案" in trace.report  # 确定性渲染接管（数据真实）
     assert "转化率" not in trace.report  # 编造叙事被整体放弃
+
+
+# --------------------------------------------------------------------------- #
+# 二期：选项式澄清（clarification 对象形态 + options 全链透传）
+# --------------------------------------------------------------------------- #
+def test_planner_clarification_object_form_with_options(monkeypatch):
+    """clarification 对象形态（question+options）规范化；纯字符串旧契约兼容。"""
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+
+    def _obj_form(llm, system, user):
+        return {
+            "clarification": {
+                "question": "销售额按哪个口径？",
+                "options": ["含退款的净销售额", "不含退款的总销售额", ""],  # 空串被过滤
+            },
+            "steps": [],
+        }
+
+    monkeypatch.setattr(nodes, "_llm_json", _obj_form)
+    state = nodes.planner_node(AgentState(user_query="销售额是多少"))
+    assert state.phase == "clarify"
+    assert state.clarification == "销售额按哪个口径？"
+    assert state.clarification_options == ["含退款的净销售额", "不含退款的总销售额"]
+
+    # 纯字符串旧契约：options 为空
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: {"clarification": "哪个指标？", "steps": []})
+    state2 = nodes.planner_node(AgentState(user_query="销售额是多少"))
+    assert state2.clarification == "哪个指标？"
+    assert state2.clarification_options == []
+
+    # 对象缺 question => 回退默认问题文本，options 保留（二期 RF#3）
+    monkeypatch.setattr(
+        nodes,
+        "_llm_json",
+        lambda llm, system, user: {"clarification": {"options": ["口径A"]}, "steps": []},
+    )
+    state3 = nodes.planner_node(AgentState(user_query="销售额是多少"))
+    assert state3.phase == "clarify"
+    assert state3.clarification
+    assert state3.clarification_options == ["口径A"]
+
+
+def test_hitl_event_carries_options(tmp_path, monkeypatch, planner_clarify_then_plan):
+    """hitl_request 事件携带 options（前端 elHitl 消费契约）。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    events: list[dict] = []
+    run_agent("GMV呢？", session_id="optq", on_event=events.append)
+    hitl = [e for e in events if e["event"] == "hitl_request"]
+    assert hitl and hitl[0]["payload"]["hitl"].get("options") == [
+        "2024年5月GMV",
+        "2024年5月订单量",
+    ]

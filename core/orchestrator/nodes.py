@@ -346,7 +346,20 @@ def planner_node(state: AgentState) -> AgentState:
         )
         if payload:
             if payload.get("clarification"):
-                return state.apply(phase="clarify", clarification=str(payload["clarification"]))
+                clar_raw = payload["clarification"]
+                options: list[str] = []
+                if isinstance(clar_raw, dict):
+                    question = str(clar_raw.get("question") or "").strip()
+                    raw_opts = clar_raw.get("options")
+                    if isinstance(raw_opts, list):
+                        options = [str(o) for o in raw_opts if isinstance(o, str) and o.strip()]
+                else:
+                    question = str(clar_raw).strip()
+                return state.apply(
+                    phase="clarify",
+                    clarification=question or "请补充分析需求",
+                    clarification_options=options,
+                )
             steps = _plan_from_llm(payload)
             # intent 回传（十八期）：仅诊断可观测，宽容消费（缺失/非法不阻塞）；
             # L3 守卫不依赖它（用 intent 模块确定性重判）
