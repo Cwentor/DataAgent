@@ -305,10 +305,13 @@ def test_planner_node_llm_clarification_triggers_hitl(monkeypatch):
 # 基数类事实问题兜底（回归锚点："有多少个省份"曾被兜底成 sum(GMV) 答非所问）
 # --------------------------------------------------------------------------- #
 def test_count_dimension_dsl_matches_factoid_questions():
-    """量词 + 单一维度词的基数问句 => count_distinct DSL；指标问句不误判。"""
-    from core.orchestrator.nodes import _count_dimension_dsl
+    """量词 + 单一维度词的基数问句 => count_distinct DSL；指标问句不误判。
 
-    dsl = _count_dimension_dsl("有多少个省份")
+    十八期：count_dimension_dsl 收编至 core.orchestrator.intent。
+    """
+    from core.orchestrator.intent import count_dimension_dsl
+
+    dsl = count_dimension_dsl("有多少个省份")
     assert dsl is not None
     assert dsl["metrics"] == [
         {
@@ -318,12 +321,12 @@ def test_count_dimension_dsl_matches_factoid_questions():
             "alias": "province_count",
         }
     ]
-    assert _count_dimension_dsl("多少家店铺") is not None
-    assert _count_dimension_dsl("有几个品类") is not None
+    assert count_dimension_dsl("多少家店铺") is not None
+    assert count_dimension_dsl("有几个品类") is not None
     # 指标问句 / 多维度 / 无量词：不兜底（LLM 在场时由 Planner 裁决）
-    assert _count_dimension_dsl("各省GMV多少") is None
-    assert _count_dimension_dsl("GMV多少") is None
-    assert _count_dimension_dsl("有多少个省份和品类") is None
+    assert count_dimension_dsl("各省GMV多少") is None
+    assert count_dimension_dsl("GMV多少") is None
+    assert count_dimension_dsl("有多少个省份和品类") is None
 
 
 def test_fmt_scalar_answer_counts_are_not_wan():
@@ -693,7 +696,9 @@ def test_diagnostic_dsl_pair_respects_explicit_time():
     # 两期相邻不重叠（半开区间共用分界）
     assert baseline["time_filter"]["absolute"]["end"] == current["time_filter"]["absolute"]["start"]
 
-    scalar = _scalar_dsl("2030 年 5 月的 GMV 总额是多少？")
+    # 十八期：_scalar_dsl 锚点化（anchors + query 两参），显式时间语义不变
+    scalar = _scalar_dsl(("order_amount",), "2030 年 5 月的 GMV 总额是多少？")
+    assert scalar is not None
     assert scalar["time_filter"]["absolute"] == {"start": "2030-05-01", "end": "2030-06-01"}
 
     # 无显式时间 => 缺省锚不变（评测确定性回归锚点）
@@ -803,3 +808,55 @@ def test_synthesize_no_data_skips_llm(monkeypatch):
     assert "无法进行" in out.report
     assert "2024-06-30" in out.report
     assert "不会以其他时段的数据代替作答" in out.report
+
+
+# --------------------------------------------------------------------------- #
+# 十八期：兜底准入收敛（回归锚点：兜底曾固定 sum(gmv)，问省份数答 GMV 总额）
+# --------------------------------------------------------------------------- #
+def test_scalar_dsl_by_anchors():
+    """标量兜底按锚点取数：金额 sum、计数 count、别名带语义（Review Focus 4）。"""
+    from core.orchestrator.nodes import _scalar_dsl
+
+    dsl = _scalar_dsl(("order_amount", "order_id"), "2024年5月GMV和订单量各多少")
+    assert dsl is not None
+    assert dsl["metrics"] == [
+        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "order_amount"},
+        {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "order_id_count"},
+    ]
+    assert dsl["filters"] == [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}]
+    # 跨表混合锚：兜底拒答（口径混乱风险，LLM 在场时由 Planner 规划）
+    assert _scalar_dsl(("order_amount", "refund_amount"), "GMV和退款金额各多少") is None
+    # 纯退款单锚：不带 pay_status 过滤（fact_refunds 无该字段语义）
+    refund = _scalar_dsl(("refund_amount",), "2024年5月退款金额是多少")
+    assert refund is not None and refund["filters"] == []
+
+
+def test_heuristic_plan_admission():
+    """兜底准入制：UNKNOWN 返回 None（诚实拒答），三类可答意图各归其位。"""
+    from core.orchestrator import intent as intent_mod
+    from core.orchestrator.nodes import _heuristic_plan
+
+    assert _heuristic_plan("有多少个省份") is not None
+    assert _heuristic_plan("为什么GMV下滑") is not None
+    metric_steps = _heuristic_plan("2024年5月订单量是多少")
+    assert metric_steps is not None
+    assert metric_steps[0].dsl is not None
+    assert metric_steps[0].dsl["metrics"][0]["field"] == "order_id"
+    # 退款率：数仓无字段，拒答（Review Focus 1）
+    assert _heuristic_plan("退款率是多少") is None
+    assert intent_mod.classify_intent("退款率是多少").intent == intent_mod.IntentType.UNKNOWN
+
+
+def test_run_agent_unknown_blocks_honestly(tmp_path, monkeypatch):
+    """UNKNOWN 问题：LLM 失败后兜底拒答，绝不再猜 GMV（核心回归锚点）。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("帮我看看最近情况", session_id="blockedq")
+    assert trace.phase == "done"
+    assert "无法作答" in trace.report
+    assert "万元" not in trace.report  # 绝无猜出的 GMV
+    assert "province" in trace.report  # 能力清单引导存在

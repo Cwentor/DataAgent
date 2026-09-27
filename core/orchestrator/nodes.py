@@ -37,6 +37,13 @@ from core.orchestrator.prompts import (
     SYNTHESIZER_SYSTEM,
     planner_prompt,
 )
+from core.orchestrator.intent import (
+    DIMENSION_TERMS as DIMENSION_TERMS,
+)
+from core.orchestrator.intent import (
+    IntentType,
+    classify_intent,
+)
 from core.orchestrator.state import (
     MAX_RETRIES,
     AgentState,
@@ -57,27 +64,8 @@ logger = get_logger("core.orchestrator")
 # --------------------------------------------------------------------------- #
 # 维度下钻候选（审计修复 M2：杜绝"没问分省却默认走分省"）
 # --------------------------------------------------------------------------- #
-# 维度词 -> 语义字段（用户显式指定维度时据此确定下钻口径）。
-_DIMENSION_TERMS: dict[str, str] = {
-    "province": "province",
-    "省份": "province",
-    "省": "province",
-    "地区": "province",
-    "地域": "province",
-    "区域": "province",
-    "大区": "province",
-    "城市": "province",
-    "category": "category",
-    "品类": "category",
-    "类目": "category",
-    "品类结构": "category",
-    "brand": "brand",
-    "品牌": "brand",
-    "店铺": "shop_name",
-    "门店": "shop_name",
-    "shop_name": "shop_name",
-}
-
+# 维度词 -> 语义字段映射收编至 core.orchestrator.intent（DIMENSION_TERMS，
+# 十八期：意图分类与兜底准入的唯一词源）。
 # 用户未显式指定维度时的候选维度池（有意收窄，与 DRILLDOWN_DIM_FIELDS 同源）：
 # 联合明细同时覆盖 province 与 category，分析层按 info-gain 择优下钻，
 # 而非默认向用户呈现分省。高基数字段（shop_name/brand 明细膨胀）不入池，
@@ -105,11 +93,11 @@ def _explicit_dimensions(query: str) -> list[str]:
     - 泛化的"按维度拆分"（"按维度/分维度"）不锚定具体字段 => 返回空，
       交由分析层在候选池内按信息增益自动下钻；
     - "地区/省份/大区/城市"等词统一归一为 province；"品类/类目"-> category；
-      "品牌"-> brand；"店铺/门店"-> shop_name。
+      "品牌"-> brand；"店铺/门店"-> shop_name（词表见 intent.DIMENSION_TERMS）。
     """
     found: list[str] = []
     lowered = query.lower()
-    for term, field in _DIMENSION_TERMS.items():
+    for term, field in DIMENSION_TERMS.items():
         if term in lowered and field not in found:
             found.append(field)
     return found
@@ -230,40 +218,46 @@ def clarify_node(state: AgentState) -> AgentState:
 # --------------------------------------------------------------------------- #
 # 2) Planner
 # --------------------------------------------------------------------------- #
-def _heuristic_plan(query: str) -> list[PlanStep]:
-    """确定性兜底规划：诊断式 DAG（总量对比 -> 因子分解 -> 维度下钻 -> 综合）。
+def _heuristic_plan(query: str) -> list[PlanStep] | None:
+    """确定性兜底规划（十八期准入制）：意图可确定才产计划，否则 None 诚实拒答。
 
-    触发词：为什么/下滑/下降/上涨/增长/归因/原因。其余问题走单查询+综合。
-
-    诊断 DAG 强制分层（先因子后维度，审计修复 M2）：
-    1. s1(query)：两期总量 + 驱动因子（orders/buyers）同源落库；
-    2. s2(analyze)：乘法因子分解（GMV = 买家数 × 人均订单数 × 客单价），
-       先定位"量跌还是价跌"；
-    3. s3(analyze)：维度信息增益下钻（显式维度优先，否则候选池择优），
-       定位"哪个维度-取值是主因"；s2/s3 的产物共同喂养综合。
+    - DIAGNOSTIC => 诊断式 DAG（总量对比 -> 因子分解 -> 维度下钻 -> 综合）；
+    - CARDINALITY => count_distinct 直答（DSL 由 intent 模块构造）；
+    - METRIC_SCALAR => 按锚点直答（跨表混合锚等不可构造时 None）；
+    - UNKNOWN => None（planner 置 blocked_reason，critic/synthesize 短路拒答）。
     """
-    diagnostic = any(
-        w in query for w in ("为什么", "下滑", "下降", "下跌", "上涨", "增长", "归因", "原因")
-    )
-    if not diagnostic:
-        count_dsl = _count_dimension_dsl(query)
-        if count_dsl is not None:
-            # 基数类事实问题（多少个省份/几个品类）：count_distinct 直答。
-            # DSL 内嵌进步骤——query 节点不必再按问题类型二次猜测兜底口径
-            field = count_dsl["metrics"][0]["field"]
-            return [
-                PlanStep(
-                    id="s1",
-                    goal=f"统计{_dimension_label(field)}的去重取值个数",
-                    kind="query",
-                    dsl=count_dsl,
-                ),
-                PlanStep(id="s2", goal="直接报告计数结果", kind="synthesize", depends_on=["s1"]),
-            ]
+    profile = classify_intent(query)
+    if profile.intent == IntentType.DIAGNOSTIC:
+        return _diagnostic_plan_steps(query)
+    if profile.intent == IntentType.CARDINALITY:
+        from core.orchestrator.intent import count_dimension_dsl
+
+        dsl = count_dimension_dsl(query)
+        if dsl is None:
+            return None
+        field = dsl["metrics"][0]["field"]
         return [
-            PlanStep(id="s1", goal=f"查询回答问题所需数据：{query[:40]}", kind="query"),
+            PlanStep(
+                id="s1",
+                goal=f"统计{_dimension_label(field)}的去重取值个数",
+                kind="query",
+                dsl=dsl,
+            ),
+            PlanStep(id="s2", goal="直接报告计数结果", kind="synthesize", depends_on=["s1"]),
+        ]
+    if profile.intent == IntentType.METRIC_SCALAR:
+        dsl = _scalar_dsl(profile.anchor_fields, query)
+        if dsl is None:
+            return None
+        return [
+            PlanStep(id="s1", goal="按锚定指标取数作答", kind="query", dsl=dsl),
             PlanStep(id="s2", goal="综合查询结果作答", kind="synthesize", depends_on=["s1"]),
         ]
+    return None
+
+
+def _diagnostic_plan_steps(query: str) -> list[PlanStep]:
+    """诊断 DAG（先因子后维度，审计修复 M2 分层强制；原准入制前逻辑原样）。"""
     explicit = _explicit_dimensions(query)
     if explicit:
         dim_goal = f"按用户指定维度（{'/'.join(explicit)}）做信息增益下钻，输出归因矩阵"
@@ -380,12 +374,27 @@ def planner_node(state: AgentState) -> AgentState:
         planner_used = "heuristic"
     else:
         planner_used = "llm"
+    if steps is None:
+        # 兜底准入拒绝：意图不可确定 => 诚实拒答。路由链：plan_steps 为空 =>
+        # route_from_plan 进 critique => critic 对 blocked_reason 短路 => 拒答报告。
+        # 严禁在此猜测口径产计划（回归锚点：曾固定 sum(gmv) 答非所问）。
+        return state.apply(
+            blocked_reason="无法从语义目录识别问题意图（未命中任何指标/维度锚点）",
+            answered_by="blocked",
+            plan_steps=[],
+            scratchpad=[*state.scratchpad, "[planner] blocked: intent unknown"],
+        )
     # plan_review 修改指令已注入提示词，消费即清除——路由以指令存在性判定
     # "待重规划"，不清除会导致 planner 空转循环
     if state.plan_edit_instruction:
         state = state.apply(plan_edit_instruction=None)
     events.emit_plan(steps)
-    return state.apply(plan_steps=steps, phase="query", scratchpad=[f"[planner] {planner_used}"])
+    return state.apply(
+        plan_steps=steps,
+        phase="query",
+        scratchpad=[f"[planner] {planner_used}"],
+        answered_by=planner_used,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -458,72 +467,64 @@ def _diagnostic_dsl_pair(query: str) -> tuple[dict[str, Any], dict[str, Any]]:
     )
 
 
-def _scalar_dsl(query: str) -> dict[str, Any]:
-    """非诊断问题的确定性单期总量 DSL（标量问题附维度与因子无意义）。
+# 标量兜底的聚合方式映射（金额 sum / 订单数 count / 买家数 count_distinct）。
+_SCALAR_FIELD_AGG: dict[str, str] = {
+    "order_amount": "sum",
+    "discount_amount": "sum",
+    "refund_amount": "sum",
+    "order_id": "count",
+    "user_id": "count_distinct",
+}
+_SCALAR_ANCHOR_TABLE: dict[str, str] = {
+    "order_amount": "fact_orders",
+    "discount_amount": "fact_orders",
+    "order_id": "fact_orders",
+    "user_id": "fact_orders",
+    "refund_amount": "fact_refunds",
+}
 
-    与诊断路径严格区分：诊断取两期维度明细 + 驱动因子；标量问题只回答
-    "这个数是多少"，多取指标会让"查询答案"式的单值呈现失效。
-    时间窗口同 ``_diagnostic_dsl_pair``：用户显式时间优先，缺省回退
-    2024-05 锚；超界窗口由取数执行前的时间域守卫拦截。
+
+def _scalar_dsl(anchors: tuple[str, ...], query: str) -> dict[str, Any] | None:
+    """标量指标问题的确定性 DSL（按锚点取数，多锚多度量）。
+
+    回归锚点（十八期）：此前固定 sum(order_amount)，"问退款、答 GMV"。
+    - 聚合方式按字段语义映射；别名带聚合语义（sum 原名、计数带 _count 后缀，
+      与 _fmt_scalar_answer 的计数列判定联动）；
+    - 过滤口径随锚点主表适配：fact_orders 锚点带 pay_status=SUCCESS；
+      纯 refund_amount 锚点不带（该过滤对退款语义无意义）；
+    - 跨表混合锚（GMV+退款金额）单查询无法同口径构造 => None（兜底拒答，
+      LLM 在场时由 Planner 规划）；
+    - 时间窗口：用户显式时间优先（parse_explicit_time_window），
+      缺省 2024-05 锚（报告侧说明缺省口径）。
     """
+    if not anchors or any(a not in _SCALAR_FIELD_AGG for a in anchors):
+        return None
+    tables = {_SCALAR_ANCHOR_TABLE[a] for a in anchors}
+    if len(tables) > 1:
+        return None
     explicit = parse_explicit_time_window(query)
     window = (
         {"start": explicit[0], "end": explicit[1]}
         if explicit
         else {"start": "2024-05-01", "end": "2024-05-15"}
     )
-    return {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
-        "time_filter": {"range_type": "absolute", "absolute": window},
-    }
-
-
-# 基数类问句的量词模式（"多少个省份 / 几个品类 / 多少家店铺"）。要求"量词"
-# 与维度词共现且不含指标词——"各省GMV多少"式指标问句不是计数问句。
-_COUNT_QUESTION_TERMS = (
-    "多少个",
-    "几个",
-    "多少种",
-    "几种",
-    "多少类",
-    "几类",
-    "多少家",
-    "几家",
-)
-_COUNT_EXCLUDE_METRIC_WORDS = ("gmv", "销量", "金额", "订单", "退款", "率", "额", "收入", "成本")
-
-
-def _count_dimension_dsl(query: str) -> dict[str, Any] | None:
-    """基数类事实问题的确定性 count_distinct DSL（非基数问题返回 None）。
-
-    "有多少个省份 / 几个品类 / 多少家店铺"式元数据问题：语义目录维度字段
-    的去重计数即可作答，无需时间窗口与指标锚定。LLM 不可用或规划失败时
-    兜底规划据此产出计数 DSL——此前兜底一律 ``_scalar_dsl`` 取 sum(gmv)，
-    产出"问省份数、答 GMV 总额"的答非所问（回归锚点）。
-
-    保守判定：量词模式与维度词共现、恰好一个维度、且不含指标词；多维度
-    计数或边界模糊的问句不兜底（LLM 在场时由 Planner 裁决）。
-    """
-    if not any(t in query for t in _COUNT_QUESTION_TERMS):
-        return None
-    if any(w in query.lower() for w in _COUNT_EXCLUDE_METRIC_WORDS):
-        return None
-    dims = _explicit_dimensions(query)
-    if len(dims) != 1:
-        return None
-    field = dims[0]
+    filters = (
+        [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}]
+        if tables == {"fact_orders"}
+        else []
+    )
     return {
         "metrics": [
             {
                 "kind": "aggregate",
                 "field": field,
-                "agg": "count_distinct",
-                "alias": f"{field}_count",
+                "agg": _SCALAR_FIELD_AGG[field],
+                "alias": field if _SCALAR_FIELD_AGG[field] == "sum" else f"{field}_count",
             }
+            for field in anchors
         ],
-        "dimensions": [],
-        "filters": [],
+        "filters": filters,
+        "time_filter": {"range_type": "absolute", "absolute": dict(window)},
     }
 
 
@@ -687,23 +688,36 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
 
     # 步骤 DSL：LLM 给出则规范化后交网关强校验，否则按问题类型走确定性兜底：
     # 诊断类 => 两期分省明细对（总量与归因同源，口径天然一致）；
-    # 基数类（多少个省份/几个品类）=> count_distinct 直答；
-    # 其余 => 单期总量（标量问题附维度无意义）
+    # 标量指标类 => 按锚点直答；其余（兜底不可构造）=> 置拒答原因不执行
     if step.dsl is not None:
         dsl_variants = [_normalize_dsl_draft(step.dsl)]
     else:
-        diagnostic = any(
-            w in state.user_query
-            for w in ("为什么", "下滑", "下降", "下跌", "上涨", "增长", "归因", "原因")
-        )
-        count_dsl = None if diagnostic else _count_dimension_dsl(state.user_query)
-        if diagnostic:
+        profile = classify_intent(state.user_query)
+        if profile.intent == IntentType.DIAGNOSTIC:
             baseline_dsl, current_dsl = _diagnostic_dsl_pair(state.user_query)
             dsl_variants = [baseline_dsl, current_dsl]
-        elif count_dsl is not None:
-            dsl_variants = [count_dsl]
+        elif profile.intent == IntentType.METRIC_SCALAR:
+            scalar = _scalar_dsl(profile.anchor_fields, state.user_query)
+            dsl_variants = [scalar] if scalar is not None else []
         else:
-            dsl_variants = [_scalar_dsl(state.user_query)]
+            # CARDINALITY 步骤由 _heuristic_plan 内嵌 DSL（step.dsl 非空），
+            # 走不到这里；UNKNOWN/不可构造锚点严禁猜口径
+            dsl_variants = []
+        if not dsl_variants:
+            # 兜底无法构造合规 DSL：不猜口径，置拒答原因跳过执行
+            updated = state.apply(
+                blocked_reason="无法为该问题构造确定性查询（锚点不可用或跨表混合）",
+                answered_by="blocked",
+            )
+            return (
+                updated,
+                ToolRecord(
+                    step_id=step.id,
+                    tool="execute_dsl_query",
+                    ok=False,
+                    summary=f"[{step.id}] 兜底准入拒绝：意图锚点不可构造",
+                ),
+            )
 
     # 维度拆分步骤 => 口径继承（数据清洗与对齐层，R2）
     has_dimensions = step.dsl is not None and bool(step.dsl.get("dimensions"))
