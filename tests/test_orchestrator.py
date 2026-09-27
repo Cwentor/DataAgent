@@ -1395,3 +1395,37 @@ def test_hitl_event_carries_options(tmp_path, monkeypatch, planner_clarify_then_
         "2024年5月GMV",
         "2024年5月订单量",
     ]
+
+
+def test_grounding_retry_residual_still_flagged(tmp_path, monkeypatch):
+    """重写成功但残留 1-3 个不可溯源 => 报告保留但必须标注（终审 Important #1）。
+
+    两级行为：首轮 1-3 沉默（一期契约）；重试过的报告可信度降低，
+    残留必须让用户知情。
+    """
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    plan_seen = iter([_grounding_retry_plan_payload()])
+    synth_reports = iter(
+        [
+            "编造报告：转化率高达 42.5%、留存 88.6%、复购 77.3%、曝光 99.2%。",
+            "GMV 为 115.69 万元，测算转化率 42.5%。",
+        ]
+    )
+
+    def _fake_llm_json(llm, system, user):
+        return next(plan_seen)
+
+    def _fake_synth(state, material, extra_instruction=None):
+        return next(synth_reports)
+
+    monkeypatch.setattr(nodes, "_llm_json", _fake_llm_json)
+    monkeypatch.setattr(nodes, "_synthesize_with_llm", _fake_synth)
+    trace = run_agent("2024年5月GMV是多少", session_id="retryres")
+    assert trace.phase == "done"
+    assert "115.69" in trace.report
+    assert "数据溯源提示" in trace.report  # 重试残留必须标注
+    assert "42.5" in trace.report  # 残留数值仍呈现但已警示

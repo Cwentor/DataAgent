@@ -2264,6 +2264,14 @@ def synthesize_node(state: AgentState) -> AgentState:
                         if len(ungrounded) <= 3:
                             llm_report = retry_report
                             retry_ok = True
+                            if ungrounded:
+                                # 重试成功但残留少量不可溯源（二期终审 Important #1）：
+                                # 重试过的报告可信度降低，残留必须让用户知情
+                                llm_report = (
+                                    llm_report
+                                    + "\n\n---\n**数据溯源提示**：以下数值未能对应到本次真实查询结果，"
+                                    "请谨慎采信：" + "、".join(ungrounded[:10])
+                                )
                     if not retry_ok:
                         logger.warning(
                             "Grounding 重写后仍不可溯源，降级确定性渲染",
