@@ -54,28 +54,45 @@ def test_agentstate_extra_forbid_unchanged():
 
 
 def test_clarify_interrupt_and_resume_roundtrip(monkeypatch):
-    """clarify 中断 -> Command(resume) 恢复：同一原语，gate 节点无副作用。
+    """clarify 中断 -> resume 恢复 -> 新计划 -> plan_review -> approve 全链。
 
-    十八期：clarify 唯一来源为 Planner clarification 契约（离线字符规则
-    退役，"什么是销售额？"现为硬锚标量不再澄清）——mock planner 首轮输出
-    clarification、恢复轮产出终态，验证中断-恢复契约与 plan_gate 挂起点
-    （回归锚点：此前 plan→clarify 无图边，clarification 从未真正中断）。
+    终审 M5：恢复 clarify→plan_review 链式覆盖（一期改写时丢失）。
+    mock planner：首轮 clarification（挂起），恢复轮返回两步计划（触发
+    plan_review 审批门），批准后收敛。
     """
     import core.orchestrator.langgraph_engine as lge_mod
     from core.orchestrator.langgraph_engine import invoke_langgraph, resume_langgraph
+    from core.orchestrator.state import PlanStep
 
-    calls = iter(["clarify", "done"])
+    two_step = [
+        PlanStep(
+            id="p1",
+            goal="取上月销售额",
+            kind="query",
+            dsl={
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                ],
+                "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                "time_filter": {
+                    "range_type": "absolute",
+                    "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
+                },
+            },
+        ),
+        PlanStep(id="p2", goal="综合作答", kind="synthesize", depends_on=["p1"]),
+    ]
+    calls = iter(["clarify", "plan"])
 
     def _planner(state):
         if next(calls) == "clarify":
             return state.apply(phase="clarify", clarification="你关注哪个指标？")
-        return state.apply(phase="done", report="恢复后规划完成（mock）")
+        return state.apply(plan_steps=two_step, phase="query", answered_by="llm")
 
     monkeypatch.setattr(lge_mod, "planner_node", _planner)
 
-    events_seen: list[dict] = []
-    state = _minimal_state(user_query="什么是销售额？")
-    state2, pending = invoke_langgraph(state, thread_id="u1:s1", observer=events_seen.append)
+    state = _minimal_state(user_query="什么是销售额？", autonomy_level="L2")
+    state2, pending = invoke_langgraph(state, thread_id="u1:s1", observer=None)
     assert pending is not None and pending["kind"] == "clarify"
     assert state2.phase == "clarify"
 
@@ -83,10 +100,18 @@ def test_clarify_interrupt_and_resume_roundtrip(monkeypatch):
         state2,
         {"kind": "clarify", "resume_value": "按 2024-06 口径"},
         thread_id="u1:s1",
-        observer=events_seen.append,
+        observer=None,
     )
-    assert pending2 is None
-    assert resumed.phase in {"plan", "query", "analyze", "critique", "synthesize", "done"}
+    # 恢复后产出两步计划 => 必然再遇 plan_review 审批门（M5 链式实锤）
+    assert pending2 is not None and pending2["kind"] == "plan_review"
+    approved, pending3 = resume_langgraph(
+        resumed,
+        {"kind": "plan_review", "resume_value": {"action": "approve", "instruction": None}},
+        thread_id="u1:s1",
+        observer=None,
+    )
+    assert pending3 is None
+    assert approved.phase == "done"
 
 
 def test_observer_reaches_nodes_inside_langgraph_threads():
