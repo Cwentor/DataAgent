@@ -91,3 +91,15 @@ def test_capability_catalog_groups_unit_price_separately():
     money_line = next(line for line in lines if line.startswith("- 金额指标"))
     assert "unit_price" not in money_line
     assert any("unit_price" in line for line in lines)  # 仍在清单中（其他分组）
+
+
+def test_terms_built_from_catalog_aliases():
+    """意图词表从语义目录 FieldMeta.aliases 动态构建（单一事实源）。"""
+    from semantic.catalog import COLUMNS
+
+    assert COLUMNS["order_amount"].aliases  # 内置默认已登记
+    assert "gmv" in COLUMNS["order_amount"].aliases
+    assert COLUMNS["province"].aliases  # 维度字段已登记
+    # 长词优先仍成立
+    profile = classify_intent("5月退款金额是多少")
+    assert profile.anchor_fields == ("refund_amount",)

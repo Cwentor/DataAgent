@@ -215,3 +215,30 @@ def test_build_catalog_without_db_falls_back_to_defaults(tmp_path, monkeypatch):
         "食品",
         "家居",
     }
+
+
+def test_loader_aliases_fallback_and_override(conn, tmp_path):
+    """aliases：无覆写键回退内置默认；有覆写键则采用 json 值（二期 RF#1）。"""
+    from semantic.catalog import COLUMNS
+
+    assert COLUMNS["order_amount"].aliases  # 前置：内置默认已登记
+
+    # 无 aliases 覆写键 => 回退内置默认（向后兼容旧 semantic.json）
+    cat = build_catalog(conn=conn, overlay_path=_overlay(tmp_path))
+    assert cat.columns["order_amount"].aliases == COLUMNS["order_amount"].aliases
+
+    # 显式覆写 aliases => 采用 json 值
+    p = _overlay(
+        tmp_path,
+        extra_fields={
+            "order_amount": {
+                "table": "fact_orders",
+                "column": "order_amount",
+                "dtype": "float",
+                "label": "订单金额",
+                "aliases": ["gmv", "自定义别名"],
+            }
+        },
+    )
+    cat2 = build_catalog(conn=conn, overlay_path=p)
+    assert cat2.columns["order_amount"].aliases == ("gmv", "自定义别名")
