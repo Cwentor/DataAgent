@@ -59,6 +59,11 @@ def set_observer(fn: ObserverFn | None) -> Token:
     return _observer.set(fn)
 
 
+def get_observer() -> ObserverFn | None:
+    """读取当前上下文的观察者（LangGraph 适配层经 config 跨线程传递用）。"""
+    return _observer.get()
+
+
 def reset_observer(token: Token) -> None:
     """恢复观察者上下文（必须配对 set_observer 使用）。"""
     _observer.reset(token)

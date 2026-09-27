@@ -91,32 +91,28 @@ def test_profiling_degradation_logs_warning(monkeypatch, caplog):
     assert any("降级" in r.message for r in _records(caplog, "core.retrieval.profiling"))
 
 
-def test_graph_iteration_guard_logs_error(caplog):
-    """图迭代护栏触发：error 级留痕。"""
-    from core.orchestrator.graph import StateGraph
-    from core.orchestrator.state import AgentState
+def test_graph_iteration_guard_logs_error(monkeypatch, caplog):
+    """图迭代护栏触发（LangGraph recursion_limit）：error 级留痕 + done 收敛。"""
+    from config import settings
+    from core.orchestrator.agent import run_agent
 
-    graph = StateGraph(max_iterations=3)
-    graph.add_node("loop", lambda s: s.apply())  # 相位不变（非 clarify）形成自环
-    graph.add_edge("loop", "loop")
-    graph.set_entry("loop")
-    final = graph.run(AgentState())
-    assert "迭代步数超限" in (final.report or "")
-    assert any("迭代步数超限" in r.message for r in _records(caplog, "core.orchestrator.graph"))
+    monkeypatch.setattr(settings, "ORCHESTRATOR_RECURSION_LIMIT", 3)
+    out = run_agent(
+        "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
+        session_id="log-guard",
+    )
+    assert "迭代步数超限" in (out.report or "")
+    assert any("迭代步数超限" in r.message for r in _records(caplog, "core.orchestrator.agent"))
 
 
 def test_run_agent_exception_logs(monkeypatch, caplog):
     """编排顶层异常：logger.exception 留痕后原样抛出。"""
     import core.orchestrator.agent as agent_mod
-    from core.orchestrator.graph import StateGraph
 
-    def boom(state):
+    def boom(*args, **kwargs):
         raise RuntimeError("模拟编排崩溃")
 
-    graph = StateGraph(max_iterations=3)
-    graph.add_node("plan", boom)
-    graph.set_entry("plan")
-    monkeypatch.setattr(agent_mod, "build_graph", lambda **kwargs: graph)
+    monkeypatch.setattr(agent_mod, "_run_agent_langgraph_path", boom)
 
     with pytest.raises(RuntimeError, match="模拟编排崩溃"):
         agent_mod.run_agent("测试问题", session_id="logtest")

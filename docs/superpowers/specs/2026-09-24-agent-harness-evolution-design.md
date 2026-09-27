@@ -255,3 +255,16 @@ M4 验收收敛：双跑对比 + 评测扩展 + 删除旧引擎与开关 + 文�
 - **D 上下文工程线**：长会话压缩（摘要化）、工作记忆/情景记忆/语义记忆分层、token 预算管理。
 - **E 主动性线**：定时巡检（指标异动自动检测 + 预警报告）、订阅式报告、proactive agent。
 - **LangGraph 原生流式**：stream_mode 升级（token 级流式输出）作为事件总线的后续增强。
+
+## 十三、实施状态（2026-09-26 归档）
+
+- **M0-M4 已全部实施完成**，单引擎收敛（自研 StateGraph / ThreadingHTTPServer / 双引擎开关已删除）。
+- 实施计划与验收记录：`docs/plans/2026-09-26-agent-harness-evolution-m0-m4.md`；
+  双跑对比就绪度报告：`docs/reviews/20260926-readiness-harness-migration-parity.md`；
+  前置并发审计：`docs/reviews/20260926-audit-orchestration-concurrency.md`。
+- 语义修订（实施期裁决，以本节为准）：
+  - L2 审批语义收敛为"每轮 turn 审批一次"（`plan_reviewed` 标记），自愈驱动的
+    重规划不再打断用户；
+  - SSE/引擎等价验收修订为分层等价（源数据非确定性实测详见就绪度报告）；
+  - golden 扩展不新增装饰性用例（eval agent 模式不经过编排器），B 线锚点由
+    确定性单测承担。

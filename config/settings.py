@@ -110,6 +110,22 @@ MAX_AGENT_STEPS: int = int(os.getenv("MAX_AGENT_STEPS", "5"))
 AGENT_REFLECTION_ENABLED: bool = os.getenv("AGENT_REFLECTION_ENABLED", "1") == "1"
 
 # --------------------------------------------------------------------------- #
+# Agent harness evolution：LangGraph 超级步护栏（M4 已单引擎收敛）
+# --------------------------------------------------------------------------- #
+# 自主性默认档（规格 §5.2）：生产默认 L2 计划确认；测试环境置 L4 全自动
+AGENT_DEFAULT_AUTONOMY: str = os.getenv("AGENT_DEFAULT_AUTONOMY", "L2")
+# 超级步护栏（M0 迁移期与 native iteration>24 校准；M4 起为唯一护栏口径）
+ORCHESTRATOR_RECURSION_LIMIT: int = int(os.getenv("ORCHESTRATOR_RECURSION_LIMIT", "64"))
+# 图执行快照持久化（SqliteSaver）：非空时 clarify/plan_review 挂起可跨进程重启恢复；
+# 与会话记忆（STATE_STORE_DB / SessionStore）各司其职，互不替代（设计 §4.2）
+ORCHESTRATOR_CHECKPOINT_DB: str | None = os.getenv("ORCHESTRATOR_CHECKPOINT_DB") or None
+# B 线（M3）subagent 并发控制：默认 4 兼顾 LLM 限流与 DuckDB 连接池容量（DB_POOL_SIZE）
+SUBAGENT_MAX_PARALLEL: int = int(os.getenv("SUBAGENT_MAX_PARALLEL", "4"))
+# critique 充分性不足时的重派上限（规格 §6.4：≤1 轮，不无限重试）
+SUBAGENT_REDISPATCH_MAX: int = int(os.getenv("SUBAGENT_REDISPATCH_MAX", "1"))
+
+
+# --------------------------------------------------------------------------- #
 # 意图路由与决策中心（Intent Router & Decision Engine）—— 见 agent/router/
 # --------------------------------------------------------------------------- #
 # LLM 语义分类器判决置信度阈值：低于该值拒绝采纳，优雅降级到规则兜底

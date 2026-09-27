@@ -13,10 +13,6 @@
 
 from __future__ import annotations
 
-import http.client
-import json
-import threading
-
 from config import settings
 
 
@@ -96,39 +92,53 @@ def test_self_heal_gives_up_after_cap(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # 2) Web 全流程（HTTP）
 # --------------------------------------------------------------------------- #
+class _FakeSrv:
+    def shutdown(self):
+        pass
+
+    def server_close(self):
+        pass
+
+
+def _start_test_client():
+    """M4 单引擎：FastAPI TestClient 替代 ThreadingHTTPServer（无 Cookie 持久化）。"""
+    from fastapi.testclient import TestClient
+
+    from web.api import app as _app
+
+    return _FakeSrv(), TestClient(_app, raise_server_exceptions=False)
+
+
+def _client_req(client, method, path, payload=None, headers=None):
+    resp = client.request(method, path, json=payload, headers=headers or {})
+    return resp.status_code, resp.json()
+
+
+_REQ_CLIENT = None
+
+
 def _req(port, method, path, payload=None, headers=None):
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
-    data = json.dumps(payload).encode() if payload is not None else None
-    hdrs = {"Content-Type": "application/json"}
-    hdrs.update(headers or {})
-    conn.request(method, path, body=data, headers=hdrs)
-    resp = conn.getresponse()
-    body_out = resp.read().decode()
-    conn.close()
-    return resp.status, json.loads(body_out)
+    return _client_req(_REQ_CLIENT, method, path, payload, headers)
 
 
 def test_agent_run_http_flow(tmp_path, monkeypatch):
     """HTTP 全流程：登录 -> agent/run -> clarify -> resume -> done。"""
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    from web.server import Handler  # 复用完整路由
-    from web.server import ThreadingHTTPServer as _S
-
-    server = _S(("127.0.0.1", 0), Handler)
-    port = server.server_address[1]
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
+    global _REQ_CLIENT
+    server, http_client = _start_test_client()
+    _REQ_CLIENT = http_client
+    port = 0
     try:
+        # 未认证 401（须在登录前：TestClient 持久化登录 Cookie 会放行后续请求）
+        status, _ = _req(port, "POST", "/api/agent/run", {"query": "GMV呢"})
+        assert status == 401
+
         # 登录拿 token（默认演示账号）
         status, login = _req(
             port, "POST", "/api/auth/login", {"username": "admin", "password": "admin123"}
         )
         assert status == 200, login
         H = {"Authorization": "Bearer " + login["token"]}
-
-        # 未认证 401
-        status, _ = _req(port, "POST", "/api/agent/run", {"query": "GMV呢"})
-        assert status == 401
 
         # 歧义问题 -> clarify 中断 + resume_token
         status, body = _req(port, "POST", "/api/agent/run", {"query": "GMV呢"}, H)

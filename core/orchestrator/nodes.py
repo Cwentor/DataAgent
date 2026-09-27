@@ -324,6 +324,11 @@ def planner_node(state: AgentState) -> AgentState:
         from core.retrieval.profiling import profile_enum_values
 
         error_context = "\n".join(state.error_context.errors[-3:]) or None
+        # plan_review 审批卡的"修改"指令（M2）：与 error_context 同一注入位——
+        # 用户必须针对性修正计划，LLM 不得无视修改诉求重新规划
+        if state.plan_edit_instruction:
+            user_edit = f"用户修改指令：{state.plan_edit_instruction}"
+            error_context = f"{error_context}\n{user_edit}" if error_context else user_edit
         payload = _llm_json(
             llm,
             PLANNER_SYSTEM,
@@ -343,6 +348,10 @@ def planner_node(state: AgentState) -> AgentState:
         planner_used = "heuristic"
     else:
         planner_used = "llm"
+    # plan_review 修改指令已注入提示词，消费即清除——路由以指令存在性判定
+    # "待重规划"，不清除会导致 planner 空转循环
+    if state.plan_edit_instruction:
+        state = state.apply(plan_edit_instruction=None)
     events.emit_plan(steps)
     return state.apply(plan_steps=steps, phase="query", scratchpad=[f"[planner] {planner_used}"])
 

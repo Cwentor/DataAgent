@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import threading
-import urllib.request
-
-from web.server import Handler, ThreadingHTTPServer
 from web.service import run_query
 
 
@@ -54,20 +49,17 @@ def test_run_query_unknown_question(conn):
 
 
 def test_http_smoke():
-    """启动临时 HTTP 服务，验证 /api/health 与静态页可达。"""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    port = server.server_address[1]
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as resp:
-            assert json.loads(resp.read().decode("utf-8")) == {"status": "ok"}
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
-            html = resp.read().decode("utf-8")
-        assert "DataAgent" in html
-    finally:
-        server.shutdown()
-        server.server_close()
+    """HTTP 冒烟：/api/health 与静态首页可达（M4 单引擎：FastAPI TestClient）。"""
+    from fastapi.testclient import TestClient
+
+    from web.api import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+    html = client.get("/").text
+    assert "DataAgent" in html
 
 
 def test_run_query_self_heal_rewrites(conn, monkeypatch):

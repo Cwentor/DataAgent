@@ -17,7 +17,7 @@
   var TOOL_LABELS = AgentProtocol.TOOL_LABELS;
   var VIRTUALIZE_THRESHOLD = 50; // 超过该条数后启用窗口化（规格：>50 步虚拟化）
   var BUFFER = 6;                // 视口上下各多渲染的条目数
-  var EST_H = { user: 44, plan: 150, tool: 46, reflection: 36, hitl: 150, done: 52, error: 44, interrupt: 48 };
+  var EST_H = { user: 44, plan: 150, tool: 46, reflection: 36, hitl: 150, plan_review: 190, manifest: 90, done: 52, error: 44, interrupt: 48 };
 
   var TOOL_BADGES = {
     futurebi_dsl_query: { cls: "dsl", text: "DSL" },
@@ -121,7 +121,65 @@
     return div;
   }
 
-  function elHitl(item) {
+/** 分析计划审批卡（M2 Plan Mode）：步骤列表 + 批准/修改/拒绝三操作。
+ *  卡片由 app.js 的 bindHitlCard 绑定动作按钮（data-plan-action 契约）。 */
+/** run manifest 卡（M3）：fan-out 子任务轨迹摘要（task_id/status/steps）。 */
+  function elManifest(item) {
+    var card = document.createElement("div");
+    card.className = "manifest-card";
+    var head = document.createElement("div");
+    head.className = "manifest-head";
+    head.textContent = "子任务轨迹（" + (item.manifest || []).length + "）";
+    card.appendChild(head);
+    var list = document.createElement("ul");
+    list.className = "manifest-list";
+    (item.manifest || []).forEach(function (m) {
+      var li = document.createElement("li");
+      li.textContent = m.task_id + " · " + m.status + " · " + (m.steps || 0) + " 条结论";
+      list.appendChild(li);
+    });
+    card.appendChild(list);
+    return card;
+  }
+
+    function elPlanReview(item) {
+    var card = document.createElement("div");
+    card.className = "hitl-card plan-review-card";
+    var head = document.createElement("div");
+    head.className = "hitl-q";
+    head.textContent = "分析计划审批：" + (item.summary || "请确认以下执行计划");
+    card.appendChild(head);
+    var list = document.createElement("ol");
+    list.className = "plan-steps";
+    (item.planSteps || []).forEach(function (step) {
+      var li = document.createElement("li");
+      li.textContent = "[" + (step.kind || "query") + "] " + (step.goal || "");
+      list.appendChild(li);
+    });
+    card.appendChild(list);
+    var editRow = document.createElement("div");
+    editRow.className = "hitl-input-row";
+    editRow.innerHTML = '<input class="plan-edit-input" placeholder="修改指令（选"修改"时必填）…">';
+    card.appendChild(editRow);
+    var actions = document.createElement("div");
+    actions.className = "hitl-options";
+    [
+      { action: "approve", text: "批准" },
+      { action: "edit", text: "修改" },
+      { action: "reject", text: "拒绝" }
+    ].forEach(function (a) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "hitl-pill";
+      btn.setAttribute("data-plan-action", a.action);
+      btn.textContent = a.text;
+      actions.appendChild(btn);
+    });
+    card.appendChild(actions);
+    return card;
+  }
+
+    function elHitl(item) {
     var card = document.createElement("div");
     card.className = "hitl-card";
     card.innerHTML = '<div class="hitl-q">' + esc(item.question || "需要补充信息") + "</div>";
@@ -342,6 +400,8 @@
     if (item.kind === "tool") { return elTool(item); }
     if (item.kind === "reflection") { return elReflection(item); }
     if (item.kind === "hitl") { return elHitl(item); }
+    if (item.kind === "plan_review") { return elPlanReview(item); }
+    if (item.kind === "manifest") { return elManifest(item); }
     if (item.kind === "done") { return elDone(item); }
     if (item.kind === "error") { return elError(item); }
     if (item.kind === "interrupt") { return elInterrupt(item); }

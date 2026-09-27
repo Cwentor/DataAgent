@@ -35,6 +35,17 @@
         <span class="side-label">新对话</span>
       </button>
 
+      <!-- 自主性分级（M2 Plan Mode，规格 §5.2）：随会话持久化，随 run 请求上送 -->
+      <div class="side-autonomy">
+        <label class="side-section-head" for="autonomy-select">自主性</label>
+        <select id="autonomy-select" class="side-autonomy-select" title="自主性分级：L1 每步确认 / L2 计划确认 / L3 高危确认 / L4 全自动">
+          <option value="L1">L1 · 每步确认</option>
+          <option value="L2" selected>L2 · 计划确认</option>
+          <option value="L3">L3 · 高危确认</option>
+          <option value="L4">L4 · 全自动</option>
+        </select>
+      </div>
+
       <!-- 会话历史（本机最近 20 条，每条绑定自己的一套产物） -->
       <div class="side-history">
         <div class="side-section-head">会话历史</div>

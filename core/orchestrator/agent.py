@@ -15,22 +15,15 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from audit.logging import get_logger
+from config import settings
 from core.orchestrator import events
-from core.orchestrator.graph import StateGraph
-from core.orchestrator.nodes import (
-    clarify_node,
-    code_exec_node,
-    critic_node,
-    dsl_query_node,
-    planner_node,
-    synthesize_node,
-)
 from core.orchestrator.state import AgentState
 
 logger = get_logger("core.orchestrator.agent")
@@ -57,45 +50,22 @@ class AgentTrace(BaseModel):
         return self.model_dump(mode="json")
 
 
-def build_graph(*, max_iterations: int = 24) -> StateGraph:
-    """装配六节点图：clarify -> plan -> query -> analyze -> critique -> synthesize。"""
-    graph = StateGraph(max_iterations=max_iterations)
-    graph.add_node("clarify", clarify_node)
-    graph.add_node("plan", planner_node)
-    graph.add_node("query", dsl_query_node)
-    graph.add_node("analyze", code_exec_node)
-    graph.add_node("critique", critic_node)
-    graph.add_node("synthesize", synthesize_node)
-    graph.set_entry("clarify")
+def route_from_clarify(state: AgentState) -> str:
+    """clarify 后固定进入规划（HITL 中断时图在 clarify 暂停，不走此处）。"""
+    return "plan"
 
-    def route_from_clarify(state: AgentState) -> str:
-        # clarify 后固定进入规划（HITL 中断时图在 clarify 暂停，不走此处）
-        return "plan"
 
-    def route_from_plan(state: AgentState) -> str:
-        # 规划产出 query 步骤则取数；纯分析计划（无数据需求）直接进沙箱
-        if any(s.kind == "query" and s.status == "pending" for s in state.plan_steps):
-            return "query"
-        if any(s.kind == "analyze" and s.status == "pending" for s in state.plan_steps):
-            return "analyze"
-        return "critique"
+def route_from_plan(state: AgentState) -> str:
+    """规划产出 query 步骤则取数；纯分析计划（无数据需求）直接进沙箱。"""
+    if any(s.kind == "query" and s.status == "pending" for s in state.plan_steps):
+        return "query"
+    if any(s.kind == "analyze" and s.status == "pending" for s in state.plan_steps):
+        return "analyze"
+    return "critique"
 
-    def route_from_critic(state: AgentState) -> str:
-        return state.phase  # plan(重规划) | synthesize
 
-    graph.add_edge("clarify", "plan")
-    graph.add_conditional_edges(
-        "plan",
-        route_from_plan,
-        {"query": "query", "analyze": "analyze", "critique": "critique"},
-    )
-    graph.add_edge("query", "analyze")
-    graph.add_edge("analyze", "critique")
-    graph.add_conditional_edges(
-        "critique", route_from_critic, {"plan": "plan", "synthesize": "synthesize"}
-    )
-    graph.add_edge("synthesize", "END")
-    return graph
+def route_from_critic(state: AgentState) -> str:
+    return state.phase  # plan(重规划) | synthesize
 
 
 def run_agent(
@@ -108,6 +78,8 @@ def run_agent(
     resume_state: AgentState | None = None,
     history_digest: str | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    principal: str | None = None,
+    autonomy_level: str | None = None,
 ) -> AgentTrace | AgentState:
     """运行一次编排（同步简化版；HITL 恢复经 resume_state 传入）。
 
@@ -142,16 +114,44 @@ def run_agent(
             human_reply=human_reply,
             resume_state=resume_state,
             history_digest=history_digest,
+            principal=principal,
+            autonomy_level=autonomy_level,
         )
         if on_event is not None:
             # 终态收尾事件（复位观察者前发射，否则为 no-op）
             if final.phase == "clarify":
                 events.emit_event(
                     events.EVENT_HITL_REQUEST,
-                    {"hitl": {"question": final.clarification or "请补充分析需求"}},
+                    {
+                        "kind": "clarify",
+                        "hitl": {"question": final.clarification or "请补充分析需求"},
+                    },
+                )
+            elif final.phase == "plan_review":
+                events.emit_event(
+                    events.EVENT_HITL_REQUEST,
+                    {
+                        "kind": "plan_review",
+                        "hitl": {
+                            "plan_steps": [s.model_dump(mode="json") for s in final.plan_steps],
+                            "summary": final.plan_steps[0].goal if final.plan_steps else "",
+                        },
+                    },
                 )
             else:
-                events.emit_event(events.EVENT_DONE, {"report": final.report})
+                manifest = [
+                    {
+                        "task_id": r.task_id,
+                        "status": r.status,
+                        "steps": len(r.findings),
+                    }
+                    for r in (getattr(final, "subagent_reports", None) or [])
+                ]
+                done_payload = {"report": final.report}
+                if manifest:
+                    # B 线（M3）：run manifest 随 done 事件构成完整审计轨迹
+                    done_payload["manifest"] = manifest
+                events.emit_event(events.EVENT_DONE, done_payload)
     except Exception as exc:
         logger.exception(
             "编排执行失败",
@@ -168,8 +168,8 @@ def run_agent(
         if token is not None:
             events.reset_observer(token)
 
-    if final.phase == "clarify":
-        # HITL：返回含澄清问题的中间态（调用方展示问题 -> 收集答复 -> 再次调用）
+    if final.phase in {"clarify", "plan_review"}:
+        # HITL：返回挂起中间态（调用方展示卡片 -> 收集答复/动作 -> 再次调用）
         return final
 
     # 编排完成摘要（流程可观测：每轮一次 info，含自愈计数与产物统计）
@@ -205,11 +205,75 @@ def _run_agent_inner(
     human_reply: str | None,
     resume_state: AgentState | None,
     history_digest: str | None,
+    principal: str | None = None,
+    autonomy_level: str | None = None,
 ) -> AgentState:
-    """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。"""
+    """run_agent 的图执行主体（事件观察者生命周期由 run_agent 管理）。
+
+    M4 单引擎收敛：旧自研 StateGraph 与 ORCHESTRATOR_ENGINE 开关已删除，
+    本函数恒走 LangGraph 路径（签名保持，调用方零改动）。
+    """
+    return _run_agent_langgraph_path(
+        question,
+        session_id=session_id,
+        turn_id=turn_id,
+        trace_id=trace_id,
+        human_reply=human_reply,
+        resume_state=resume_state,
+        history_digest=history_digest,
+        principal=principal,
+        autonomy_level=autonomy_level,
+    )
+
+
+def _run_agent_langgraph_path(
+    question: str,
+    *,
+    session_id: str,
+    turn_id: str,
+    trace_id: str,
+    human_reply: str | None,
+    resume_state: AgentState | None,
+    history_digest: str | None = None,
+    principal: str | None = None,
+    autonomy_level: str | None = None,
+) -> AgentState:
+    """LangGraph 引擎路径：对外挂起契约与 native 逐字段一致（phase=clarify 中间态）。
+
+    护栏语义校准（计划 Task 5）：native iteration>24 置 phase=done 并在报告留痕；
+    LangGraph 侧 GraphRecursionError 捕获后转换为同样的 done 收敛，报告文本逐字对齐。
+    """
+    from langgraph.errors import GraphRecursionError
+
+    from core.orchestrator.langgraph_engine import invoke_langgraph, resume_langgraph
+
+    _guard_report = "\n[编排器] 迭代步数超限，强制终止。"
     if resume_state is not None:
-        graph = build_graph()
-        return graph.resume(resume_state)
+        # 恢复路径：human_reply 由 web 层写回 resume_state（native graph.resume 同源）。
+        # M2 Plan Mode：web 层把审批动作编码为 JSON 字符串经 human_reply 通道传入，
+        # 此处还原为 dict（plain 文本 = clarify 答复，原样传递）
+        reply = resume_state.human_reply or ""
+        if reply.startswith("{"):
+            try:
+                parsed = json.loads(reply)
+                if isinstance(parsed, dict) and "action" in parsed:
+                    reply = parsed
+            except json.JSONDecodeError:
+                pass  # 非 JSON 文本：clarify 纯文本答复
+        try:
+            final, pending = resume_langgraph(
+                resume_state,
+                {"kind": "clarify", "resume_value": reply},
+                thread_id=_checkpoint_thread_id(principal, session_id),
+            )
+        except GraphRecursionError:
+            return resume_state.apply(
+                phase="done", report=(resume_state.report or "") + _guard_report
+            )
+        if pending and pending.get("kind") == "plan_review":
+            return final.apply(phase="plan_review")
+        return final
+
     state = AgentState(
         session_id=session_id,
         turn_id=turn_id,
@@ -218,9 +282,30 @@ def _run_agent_inner(
         history_digest=history_digest or "",
         human_reply=human_reply,
         phase="clarify" if human_reply is None else "plan",
+        **({"autonomy_level": autonomy_level} if autonomy_level else {}),
     )
-    graph = build_graph()
-    return graph.run(state)
+    try:
+        final, pending = invoke_langgraph(
+            state, thread_id=_checkpoint_thread_id(principal, session_id)
+        )
+    except GraphRecursionError:
+        logger.error(
+            "图迭代步数超限，强制终止",
+            extra={"error": f"recursion_limit={settings.ORCHESTRATOR_RECURSION_LIMIT}"},
+        )
+        return state.apply(phase="done", report=(state.report or "") + _guard_report)
+    if pending and pending.get("kind") == "plan_review":
+        # plan_review 挂起：与 clarify 共用 AgentState pause 契约
+        return final.apply(phase="plan_review")
+    return final
 
 
-__all__ = ["AgentTrace", "build_graph", "run_agent"]
+__all__ = ["AgentTrace", "run_agent"]
+
+
+def _checkpoint_thread_id(principal: str | None, session_id: str) -> str:
+    """Checkpointer thread_id 规范（设计 §4.2）：f"{user_id}:{session_id}"。
+
+    principal 缺省（评测/单测直调）回退 session_id，行为与 M0 一致。
+    """
+    return f"{principal}:{session_id}" if principal else session_id
