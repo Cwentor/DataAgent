@@ -61,6 +61,11 @@
   - **归因技能包**：维度熵/信息增益下钻、乘法对数链式指标分解树（GMV=UV×CR×AOV）、加法差额分解、DTW 相似性、Holt-Winters 异常检测、Shapley 值公平归因——全部与已知解析解对拍
   - **数据交换协议**：DSL 查询结果 PII 脱敏（列名启发式 + 值形态正则，确定性哈希掩码）后物化为 ParquetRef（sha256 可审计），沙箱零网络零 DB socket
   - **裸 SQL 网关**：字符串载荷 / SQL 键 / 自由文本 SQL 形态在网关层直接拒绝（`GuardrailViolation`），"LLM 永不产出裸 SQL"三重防线
+  - **意图路由收敛与诚实兜底（十八期）**：澄清判定权上收 Planner（支持选项式反问——候选口径 pill 按钮点击即答复）；
+    兜底准入制：诊断 / 基数（有多少个省份）/ 硬锚定指标三类意图确定性直答（附缺省口径说明），其余意图诚实拒答
+    （原因 + 已识别锚点 + 能力清单，全程零 LLM 调用）；L3 意图-DSL 错位守卫执行前拦截"基数意图 + 金额聚合"式错位查询；
+    Grounding 定向重试闭环——LLM 报告数值溯源校验（量纲归一化容差），不可溯源超阈值携修正指令重写 1 次，
+    仍不达标降级确定性渲染；意图词表以 `FieldMeta.aliases` 为单一事实源，兜底接管降级标注全程可见
   - **HTTP 入口**：`POST /api/agent/run`（同步编排，鉴权 + HITL 澄清中断/恢复，resume_token 属主绑定）与
     `GET /api/v1/agent/chat/stream`（SSE 流式：plan_created / step_start / tool_start / tool_end /
     reflection / hitl_request / artifact_emit / done / error 九类事件实时推送，异常收敛为 error 事件不崩流）
@@ -193,6 +198,9 @@ python -m eval.eval_runner
 # 运行 Golden 评测（agent 模式）
 python -m eval.eval_runner --pipeline agent
 
+# 运行意图路由评测（答非所问率防回归）
+python -m eval.intent_eval
+
 # 打印编译 SQL 查看详情
 python -m eval.eval_runner --print-sql
 ```
@@ -275,9 +283,9 @@ DataAgent/
 ├── auth/         # 身份认证：JWT + Session + 登录限流
 ├── audit/        # 审计快照 + 可观测性指标
 ├── web/          # Web UI / HTTP 服务 / 异步查询 / 编排端点
-├── eval/         # Golden 评测（25 用例，含多轮对话序列，双模式）
+├── eval/         # Golden 评测（25 用例，双模式）+ 意图路由评测（答非所问率防回归）
 ├── mock/         # 确定性 DuckDB 数仓
-├── tests/        # 40 个测试文件（678 用例，含执行前审计 / 结果断言 / 日志可见性回归）
+├── tests/        # 48 个测试文件（766 用例，含意图路由 / 诚实拒答 / Grounding 溯源回归）
 └── docs/         # 详细文档 + 评审归档
 ```
 
@@ -300,7 +308,7 @@ DataAgent/
 | 模型网关 `providers/` | 四协议适配（OpenAI Chat / Responses、Anthropic、Gemini）+ JSON Mode 抹平 + 自研 Key 加密（HMAC-SHA256 密钥派生 + 流加密 + 篡改校验标签） | 一套契约抹平供应商差异；Key 落盘加密、列表零回传，SSE 编排支持请求级模型切换免重启 |
 | Web 层 `web/` | 标准库 `http.server`（`ThreadingHTTPServer`）+ 原生 JS 零前端框架 + vendored ECharts / PrismJS + SSE 流式 | 零 Web 框架、零前端构建链；>50 步窗口化虚拟渲染保证长会话流畅 |
 | 数仓 `mock/` | DuckDB 确定性数仓（`AS_OF_DATE=2024-06-30`、随机种子 42） | 嵌入式零部署；评测与演示完全可复现 |
-| 评测 `eval/` | Golden Dataset（25 用例，oracle / agent 双模式）+ 确定性锚点 | 同一份数据同时考核编译器上限（oracle）与端到端正确率（agent） |
+| 评测 `eval/` | Golden Dataset（25 用例，oracle / agent 双模式）+ 意图路由评测（8 用例行为断言）+ 确定性锚点 | 同一份数据同时考核编译器上限（oracle）与端到端正确率（agent）；答非所问率与虚构风险进 CI 持续监控 |
 | 质量保障 `tests/` | pytest（678 用例）+ black + ruff + CI | 契约 / 编译 / 审计 / 自愈 / 可观测全路径回归覆盖 |
 
 ---
@@ -315,7 +323,7 @@ DataAgent/
 | [Web UI 与 API](docs/api.md) | 端点、鉴权与查询示例 |
 | [安全模型](docs/security.md) | 认证、数据权限、演示账号 |
 | [质量保障](docs/quality.md) | Golden 评测、CI、可复现锚点 |
-| [演进里程碑](docs/roadmap.md) | 十二期能力演进 |
+| [演进里程碑](docs/roadmap.md) | 十八期能力演进 |
 | [生产就绪评审](./docs/reviews/20260905-production-readiness-audit.md) | 生产就绪度评估与整改项 |
 | [评审归档](./docs/reviews/README.md) | 历次评审落盘文件统一归档目录 |
 | [工程约定](./AGENTS.md) | 面向 AI 协作者的运行环境与命令 |

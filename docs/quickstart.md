@@ -16,10 +16,11 @@ pip install -r requirements-dev.txt
 python -m mock.init_duckdb
 python -m eval.eval_runner
 python -m eval.eval_runner --pipeline agent
+python -m eval.intent_eval
 python -m pytest -q
 ```
 
-`eval_runner` 默认运行 oracle 流程；`--pipeline agent` 运行真实 Agent（未配置 API Key 时使用启发式兜底）。如需打印编译 SQL：
+`eval_runner` 默认运行 oracle 流程；`--pipeline agent` 运行真实 Agent（未配置 API Key 时使用启发式兜底）；`intent_eval` 验证意图路由与诚实兜底（基数直答 / 指标锚定直答 / 目录外实体拒答）。如需打印编译 SQL：
 
 ```bash
 python -m eval.eval_runner --print-sql

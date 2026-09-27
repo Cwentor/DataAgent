@@ -29,6 +29,8 @@ flowchart LR
 
 编排器的六节点为：澄清 HITL → 规划 → 受控取数 → 沙箱分析 → 反思重规划（≤3 次受控自愈）→ 综合报告；计划为步骤 DAG，全过程经 SSE 以九类事件实时推送。重规划时最近失败摘要（error_context）注入 Planner 提示词——自愈是针对性修正而非盲重试。
 
+**意图路由收敛与诚实兜底（十八期）**：澄清判定权上收 Planner（clarification 契约，支持选项式反问）；兜底执行准入制——仅诊断、基数（如「有多少个省份」）与硬锚定指标三类意图可确定性直答（附缺省口径说明），其余意图置 `blocked_reason` 走诚实拒答报告（原因 + 已识别锚点 + 能力清单，全程零 LLM 调用）；L3 意图-DSL 错位守卫在执行前拦截「基数意图 + 金额聚合」式错位查询；意图词表以 `FieldMeta.aliases` 为单一事实源。
+
 ## 多角色架构对齐（pi-agent-harness）
 
 对标 pi-agent-harness 的多角色团队架构（5 核心角色 + Chain/Evaluator-Optimizer 编排），DataAgent 的角色落位如下。与 Harness 的差异点：**安全裁决与结果质检由确定性代码承担而非 LLM**——符合"LLM 仅产 DSL"铁律，结论可复现、可单测、零幻觉。
@@ -195,6 +197,7 @@ flowchart LR
 | --- | --- | --- |
 | 语义 | 聚合、比率、时间过滤、窗口指标、日期补零、分组 Top-N | `semantic/` |
 | Agent | LLM / 启发式双路径、意图路由、RAG、澄清与多轮槽位回填、观察驱动重规划、对比分解综合、反思层、自愈错误上下文注入 | `agent/` |
+| 诚实兜底 | 意图分类器（`FieldMeta.aliases` 词表硬匹配）、兜底准入制与诚实拒答、L3 意图-DSL 错位守卫、Grounding 定向重试闭环（重写 1 次 → 降级确定性渲染）、选项式澄清 | `core/orchestrator/intent.py`、`grounding.py`、`nodes.py` |
 | 编排 | StateGraph 六节点、步骤 DAG 计划、HITL 澄清中断恢复、反思重规划 ≤3 次自愈（错误上下文感知）、九类 SSE 事件 | `core/orchestrator/` |
 | 取数 | DSL 管道 typed Tool 化、PII 脱敏（列名启发式 + 值形态正则）、ParquetRef 物化（audit 审计面）、裸 SQL 网关守卫、动态 profiling（低基数字段枚举值） | `core/retrieval/` |
 | 质检 | DataQA 四类结果断言（空结果 / NULL 率 / 负值 / 维度唯一性），编排与 web 双链路同源，发现分级留痕 | `core/retrieval/quality.py` |
