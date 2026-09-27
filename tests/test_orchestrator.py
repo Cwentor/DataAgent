@@ -78,14 +78,41 @@ def test_run_agent_diagnostic_e2e(tmp_path, monkeypatch):
 
 
 def test_run_agent_hitl_flow(tmp_path, monkeypatch):
-    """歧义问题 -> 澄清中断 -> 用户答复 -> 完成全流程（离线兜底链路）。"""
+    """LLM 规划判定歧义 -> 澄清中断 -> 用户答复 -> 完成全流程。
+
+    十八期：离线字符规则退役后，clarify 的唯一来源是 Planner clarification
+    契约；本用例以 mock LLM 验证中断-恢复两段式契约不回归。
+    """
     import core.orchestrator.nodes as nodes
     from config import settings
 
-    # 钉死离线兜底：本用例覆盖确定性澄清门（LLM 在场时简单问题由 Planner
-    # 裁决是否澄清，见 test_run_agent_factoid_bypasses_clarify_gate）
-    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    plan_payload = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV总量",
+                "kind": "query",
+                "depends_on": [],
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                    "time_filter": {
+                        "range_type": "absolute",
+                        "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
+                    },
+                },
+            },
+            {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+        ],
+    }
+    responses = iter([{"clarification": "你关注哪个时间段的 GMV？", "steps": []}, plan_payload])
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: next(responses))
+
     paused = run_agent("GMV呢？", session_id="hitl")
     assert not isinstance(paused, dict)
     assert paused.phase == "clarify" and paused.clarification
@@ -415,8 +442,8 @@ def test_planner_node_feeds_history_to_llm(monkeypatch):
     assert "2024年5月北京的GMV是多少" in captured["user"]
 
 
-def test_clarify_node_passes_followup_with_history(monkeypatch):
-    """省略式追问（短句无指标词）有会话历史时放行规划，不再触发澄清门。"""
+def test_clarify_node_single_exit(monkeypatch):
+    """离线字符规则退役：一律放行（能答兜底答、不能答兜底拒答），澄清归 Planner LLM。"""
     import core.orchestrator.nodes as nodes
     from core.orchestrator.nodes import clarify_node
     from core.orchestrator.state import AgentState
@@ -424,15 +451,14 @@ def test_clarify_node_passes_followup_with_history(monkeypatch):
     followup = AgentState(user_query="那华南呢", history_digest="用户: 2024年5月北京GMV")
     assert clarify_node(followup).phase == "plan"
 
-    # LLM 在场：澄清判定权交给 Planner（clarification 契约），事实型短问句
-    # 不再被字符规则误拦（回归锚点："有多少个省份"曾被迫澄清）
+    # LLM 在场：澄清判定在 Planner（clarification 契约）
     monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
     assert clarify_node(AgentState(user_query="有多少个省份")).phase == "plan"
 
-    # 离线兜底（LLM 不可用）：无历史短问句保守澄清（宁问勿猜）
+    # 离线：单一出口放行——兜底准入决定答或拒，不再固定文案澄清
     monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
-    first = AgentState(user_query="那华南呢")
-    assert clarify_node(first).phase == "clarify"
+    assert clarify_node(AgentState(user_query="有多少个省份")).phase == "plan"
+    assert clarify_node(AgentState(user_query="那华南呢")).phase == "plan"
 
 
 def test_run_agent_accepts_history_digest(tmp_path, monkeypatch):

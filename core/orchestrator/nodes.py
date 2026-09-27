@@ -179,19 +179,11 @@ def _llm_json(llm: Any, system: str, user: str) -> dict[str, Any] | None:
 def clarify_node(state: AgentState) -> AgentState:
     """歧义检测：HITL 门（需求 §2.A ClarificationNode）。
 
-    澄清判定权分层（2026-09：确定性字符规则误拦简单问题修复）：
-    - LLM 可用 => 直接放行规划。"是否需要人工澄清"由 Planner 在规划时
-      一并裁决（计划契约的 clarification 字段）：Planner 持有语义目录、
-      枚举值与会话历史上下文，能判定"有多少个省份"这类事实型问题可经
-      count_distinct 直接作答；此前"过短/无指标词即澄清"的字符规则会把
-      这类问题拦在 Planner 门外（回归锚点），且固定文案无法针对问题定向。
-      判定与规划同一次 LLM 调用完成，不新增延迟；Planner 输出 clarification
-      时仍走 phase=clarify 的 HITL 中断，契约不变。
-    - LLM 不可用（离线兜底）=> 保留确定性规则保守澄清：无理解力场景下
-      宁问勿猜。
-    追问轮判定：history_digest 非空 = 同会话追问轮，省略指代短句（如
-    「那华南呢」）的语境由 Planner 结合会话历史补全，不再触发澄清门。
-    用户已答复（human_reply）时把答复并入 user_query 并继续。
+    十八期单一出口（字符规则退役）：clarify 仅保留结构职责——human_reply
+    合并、追问轮放行，其余一律放行规划。是否需要人工澄清由 LLM 在场的
+    Planner 裁决（clarification 契约）；离线由兜底准入裁决（能答则答、
+    不能答经 blocked_reason 诚实拒答）。旧"过短/无指标词即澄清"规则会把
+    "有多少个省份"这类事实型问题误拦（回归锚点），且固定文案无法定向。
     """
     query = state.user_query.strip()
     if state.human_reply:
@@ -201,18 +193,7 @@ def clarify_node(state: AgentState) -> AgentState:
     if state.history_digest:
         # 追问轮：有会话历史兜底语境，直接放行给 Planner 消解省略指代
         return state.apply(phase="plan")
-    if _resolve_llm() is not None:
-        # LLM 在场：澄清判定交给 Planner（clarification 契约），简单问题直达规划
-        return state.apply(phase="plan")
-    metric_words = ("gmv", "销量", "金额", "订单", "退款", "率", "数", "额")
-    has_metric = any(w in query.lower() for w in metric_words)
-    if len(query) >= 12 and has_metric:
-        return state.apply(phase="plan")
-    question = (
-        "为了准确定位，请补充：1) 你关注的指标（如 GMV / 订单量）与时间范围；"
-        "2) 希望按哪个维度（地区/品类/店铺）分析？"
-    )
-    return state.apply(phase="clarify", clarification=question)
+    return state.apply(phase="plan")
 
 
 # --------------------------------------------------------------------------- #

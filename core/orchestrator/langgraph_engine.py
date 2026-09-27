@@ -107,7 +107,21 @@ def _plan_gate(state: AgentState) -> AgentState:
     edit 置 phase="plan"（回 planner 重规划）；reject 置 phase="done"。
     三种去向由 route_from_plan_gate 条件边分流，不得混用 route_from_plan。
     gate 无 LLM 调用、无事件发射——resume 会从头重执行本节点。
+
+    十八期：Planner LLM 判定歧义（clarification 契约）=> 在此挂起等待用户
+    答复，恢复后合并答复回 plan 重规划。回归锚点：此前 gate 对 phase=clarify
+    直接透传，而 plan→clarify 无图边——clarification 分支从未真正中断，
+    会落 critique 空转重规划直至迭代护栏强制终止。
     """
+    if state.phase == "clarify" and state.clarification:
+        resume_value = interrupt({"kind": "clarify", "clarification": state.clarification})
+        # 合并语义逐字对齐 _clarify_gate（user_query 追加"（用户补充：…）"）
+        return state.apply(
+            user_query=f"{state.user_query}（用户补充：{str(resume_value).strip()}）",
+            human_reply=None,
+            clarification=None,
+            phase="plan",
+        )
     multi_step = len(state.plan_steps) > 1 or any(s.kind == "analyze" for s in state.plan_steps)
     forced = state.autonomy_level == "L1"
     # planner 产出计划后会把 phase 直接置为首个待执行步骤（query/analyze/critique），
