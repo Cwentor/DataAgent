@@ -372,12 +372,16 @@ def planner_node(state: AgentState) -> AgentState:
         planner_used = "llm"
     if steps is None:
         # 兜底准入拒绝：意图不可确定 => 诚实拒答。路由链：plan_steps 为空 =>
-        # route_from_plan 进 critique => critic 对 blocked_reason 短路 => 拒答报告。
-        # 严禁在此猜测口径产计划（回归锚点：曾固定 sum(gmv) 答非所问）。
+        # route_from_plan_gate 对 blocked_reason 落 critique => critic 短路 =>
+        # 拒答报告。严禁在此猜测口径产计划（回归锚点：曾固定 sum(gmv) 答非所问）。
+        # plan_edit_instruction 必须清除（终审 Important #2）：不清除会被
+        # plan_gate 的 edit 路由无条件回 plan 形成无限循环，用户最终看到
+        # "迭代步数超限"而非拒答报告。
         return state.apply(
             blocked_reason="无法从语义目录识别问题意图（未命中任何指标/维度锚点）",
             answered_by="blocked",
             plan_steps=[],
+            plan_edit_instruction=None,
             scratchpad=[*state.scratchpad, "[planner] blocked: intent unknown"],
         )
     # plan_review 修改指令已注入提示词，消费即清除——路由以指令存在性判定
@@ -1707,8 +1711,34 @@ def _fmt_pct(value: Any) -> str:
         return str(value)
 
 
+def _default_scope_note(state: AgentState) -> str:
+    """缺省口径说明（十八期，规格 §3.2；终审 Important #5）。
+
+    兜底 scalar 直答使用缺省时间窗（2024-05 锚）与支付状态过滤，报告必须
+    说明口径——用户不能只看到"查询答案：XXX 万元"而不知道统计范围。
+    扫描计划内 query 步骤 DSL，命中缺省锚/支付过滤时生成口径行。
+    """
+    notes: list[str] = []
+    for step in state.plan_steps:
+        if step.kind != "query" or step.dsl is None:
+            continue
+        tf = (step.dsl.get("time_filter") or {}).get("absolute") or {}
+        if tf.get("start") == "2024-05-01" and tf.get("end") == "2024-05-15":
+            notes.append(f"缺省统计窗口 {tf['start']} ~ {tf['end']}")
+        for f in step.dsl.get("filters") or []:
+            if (
+                isinstance(f, dict)
+                and f.get("field") == "pay_status"
+                and f.get("value") == "SUCCESS"
+            ):
+                notes.append("仅统计成功支付（pay_status=SUCCESS）订单")
+    if not notes:
+        return ""
+    return "- 口径说明：" + "；".join(dict.fromkeys(notes))
+
+
 def _dataset_analyst_markdown(
-    name: str, ref: dict[str, Any], workspace: Any
+    name: str, ref: dict[str, Any], workspace: Any, scope_note: str = ""
 ) -> tuple[str, dict | None]:
     """把一个已物化数据集渲染为分析师口径的报告片段 + 前端 table 载荷。
 
@@ -1725,6 +1755,8 @@ def _dataset_analyst_markdown(
     preview = _preview_rows(str(workspace / "inputs" / ref.get("path", "")), limit=30)
     if total == 1 and len(cols) == 1 and preview:
         lines.append(f"- **查询答案：{_fmt_scalar_answer(cols[0], preview[0][0])}**")
+        if scope_note:
+            lines.append(scope_note)
     artifact: dict[str, Any] | None = None
     if preview:
         head = preview[:5]
@@ -2209,7 +2241,9 @@ def synthesize_node(state: AgentState) -> AgentState:
             lines.append(f"- 图表产物：`{artifact.name}`（ECharts 规格已生成）")
     # 纯查询结果直接呈现（取数成功但没有沙箱分析的场景）
     for name, ref in state.datasets.items():
-        section, table_artifact = _dataset_analyst_markdown(name, ref, workspace)
+        section, table_artifact = _dataset_analyst_markdown(
+            name, ref, workspace, scope_note=_default_scope_note(state)
+        )
         lines.append("")
         lines.append(section)
         if table_artifact is not None:

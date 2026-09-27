@@ -368,3 +368,25 @@ def test_plan_review_edit_branch_replans(monkeypatch):
     assert len(calls) == 2  # planner 被再次调用（重规划发生）
     assert resumed.plan_edit_instruction is None  # 指令被 planner 消费后清除
     assert resumed.phase == "done"
+
+
+def test_route_from_plan_gate_empty_plan_routing():
+    """clarify resume 后的直连路由（终审 Important #3）。
+
+    - resume 后 phase=plan 且 plan_steps 空、无 blocked => 直接回 plan 节点
+      重规划，严禁借道 critique（重规划场景下 datasets 已有旧数据，critic
+      会判三检通过直走 synthesize，静默吞掉用户对澄清的答复）；
+    - blocked 拒答仍落 critique（critic 短路输出拒答报告）。
+    """
+    from core.orchestrator.langgraph_engine import route_from_plan_gate
+
+    resumed = _minimal_state(
+        user_query="x（用户补充：按品类）",
+        plan_steps=[],
+    ).apply(phase="plan")
+    assert route_from_plan_gate(resumed) == "plan"
+
+    blocked = _minimal_state(user_query="x", plan_steps=[]).apply(
+        phase="plan", blocked_reason="无法从语义目录识别问题意图"
+    )
+    assert route_from_plan_gate(blocked) == "critique"
