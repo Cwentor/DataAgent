@@ -121,8 +121,11 @@ def _req(port, method, path, payload=None, headers=None):
     return _client_req(_REQ_CLIENT, method, path, payload, headers)
 
 
-def test_agent_run_http_flow(tmp_path, monkeypatch):
-    """HTTP 全流程：登录 -> agent/run -> clarify -> resume -> done。"""
+def test_agent_run_http_flow(tmp_path, monkeypatch, planner_clarify_then_plan):
+    """HTTP 全流程：登录 -> agent/run -> clarify -> resume -> done。
+
+    十八期：clarify 触发改为 mock Planner clarification（离线字符规则退役）。
+    """
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     global _REQ_CLIENT
     server, http_client = _start_test_client()

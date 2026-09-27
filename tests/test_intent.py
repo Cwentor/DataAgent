@@ -40,7 +40,12 @@ def test_count_dsl_shape():
     dsl = count_dimension_dsl("有多少个省份")
     assert dsl == {
         "metrics": [
-            {"kind": "aggregate", "field": "province", "agg": "count_distinct", "alias": "province_count"}
+            {
+                "kind": "aggregate",
+                "field": "province",
+                "agg": "count_distinct",
+                "alias": "province_count",
+            }
         ],
         "dimensions": [],
         "filters": [],

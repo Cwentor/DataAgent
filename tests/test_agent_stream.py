@@ -197,8 +197,11 @@ def test_sse_stream_contract(sse_server):
     assert "markdown_report" in artifact_types and "echarts" in artifact_types
 
 
-def test_sse_hitl_flow(sse_server):
-    """歧义问题 -> hitl_request（含 resume_token）-> 答复恢复 -> done。"""
+def test_sse_hitl_flow(sse_server, planner_clarify_then_plan):
+    """歧义问题 -> hitl_request（含 resume_token）-> 答复恢复 -> done。
+
+    十八期：clarify 触发改为 mock Planner clarification（离线字符规则退役）。
+    """
     port, token = sse_server
     _, events = _sse_events(port, "query=GMV%E5%91%A2%EF%BC%9F", token)
     hitl = [e for e in events if e["event"] == "hitl_request"]

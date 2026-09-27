@@ -116,8 +116,11 @@ def test_event_artifact_emit(tmp_path, monkeypatch):
     assert "series" in chart["payload"]["artifact"]["content"]
 
 
-def test_event_hitl_request(tmp_path, monkeypatch):
-    """歧义问题：clarify 中断 -> hitl_request 事件携带澄清问题。"""
+def test_event_hitl_request(tmp_path, monkeypatch, planner_clarify_then_plan):
+    """歧义问题：clarify 中断 -> hitl_request 事件携带澄清问题。
+
+    十八期：clarify 触发改为 mock Planner clarification（离线字符规则退役）。
+    """
     from config import settings
 
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)

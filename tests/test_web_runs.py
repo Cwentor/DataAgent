@@ -104,8 +104,11 @@ def test_status_owner_fail_closed(registry):
     assert registry.status(run.run_id, owner=None) is not None  # admin
 
 
-def test_hitl_pause_resume_seq_continuous(registry):
-    """HITL：歧义短问暂停 -> hitl_request 入缓冲 -> resume 同 run 续写，seq 连续。"""
+def test_hitl_pause_resume_seq_continuous(registry, planner_clarify_then_plan):
+    """HITL：歧义短问暂停 -> hitl_request 入缓冲 -> resume 同 run 续写，seq 连续。
+
+    十八期：clarify 触发改为 mock Planner clarification（离线字符规则退役）。
+    """
     run = registry.start("GMV呢？", owner="alice", session_key="webui:t1")
     # 歧义问题离线走确定性澄清（clarify 规则：过短无指标细节 -> 暂停）
     deadline = time.time() + 30
@@ -135,8 +138,11 @@ def test_hitl_pause_resume_seq_continuous(registry):
     assert registry.resume_by_token(token, "再次答复", owner="alice") is None
 
 
-def test_hitl_resume_wrong_owner_fail_closed(registry):
-    """resume 属主校验：他人携带有效 token 一律拒绝（fail-closed）。"""
+def test_hitl_resume_wrong_owner_fail_closed(registry, planner_clarify_then_plan):
+    """resume 属主校验：他人携带有效 token 一律拒绝（fail-closed）。
+
+    十八期：clarify 触发改为 mock Planner clarification。
+    """
     run = registry.start("GMV呢？", owner="alice", session_key="webui:t1")
     deadline = time.time() + 30
     while time.time() < deadline:
@@ -200,7 +206,12 @@ def test_parallel_runs_isolated(registry):
 
 
 def test_memory_writeback_and_history_inheritance(registry):
-    """多轮上下文闭环：首轮回写会话记忆，第二轮自动装载 history_digest。"""
+    """多轮上下文闭环：首轮回写会话记忆，第二轮自动装载 history_digest。
+
+    十八期行为校准：无历史短问（bob）现为兜底诚实拒答（done），不再走
+    固定文案澄清门——会话隔离语义不变（bob 无 assistant 历史），拒答报告
+    即"未获历史语境时的诚实出口"。
+    """
     from agent.memory import default_session_store
 
     r1 = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t-mem")
@@ -213,8 +224,8 @@ def test_memory_writeback_and_history_inheritance(registry):
     # 第二轮：start 自动装载历史摘要（无 LLM 时至少不炸，digest 透传进 state）
     r2 = registry.start("那上海呢", owner="alice", session_key="webui:t-mem")
     assert _wait_terminal(r2) in ("done", "failed")
-    # 跨用户同 session_key：不继承（owner 强绑定）——bob 无历史，同句短问走
-    # 澄清门 paused（alice 因有历史直接放行），隔离生效的实锤
+    # 跨用户同 session_key：不继承（owner 强绑定）——bob 无历史，同句短问
+    # 走兜底诚实拒答（alice 因有历史直接放行规划），隔离生效的实锤
     r3 = registry.start("那华南呢", owner="bob", session_key="webui:t-mem")
     deadline = time.time() + 30
     while time.time() < deadline:
@@ -223,7 +234,7 @@ def test_memory_writeback_and_history_inheritance(registry):
                 break
         time.sleep(0.05)
     with r3._cond:
-        assert r3.status == "paused"
+        assert r3.status == "done"
     bob_state = default_session_store().get("webui:t-mem", "bob")
     assert bob_state is None or all(m.role == "user" for m in bob_state.history)
 

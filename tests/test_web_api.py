@@ -283,8 +283,11 @@ def test_langgraph_engine_web_resume_roundtrip(client, monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_hitl_payload_kind_clarify(client, monkeypatch, tmp_path):
-    """clarify 挂起的 hitl_request payload 带 kind=clarify（向后兼容扩展）。"""
+def test_hitl_payload_kind_clarify(client, monkeypatch, tmp_path, planner_clarify_then_plan):
+    """clarify 挂起的 hitl_request payload 带 kind=clarify（向后兼容扩展）。
+
+    十八期：clarify 触发改为 mock Planner clarification（离线字符规则退役）。
+    """
     import json as jsonlib
 
     from config import settings
