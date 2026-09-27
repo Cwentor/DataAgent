@@ -19,6 +19,7 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
 # 输出契约（必须是且仅是一个 JSON 对象，禁止任何其他文本）
 {
   "clarification": null | "仅当问题歧义到无法选出任何合理默认口径时的一句澄清问题（判定纪律见下节）",
+  "intent": {"type": "diagnostic|cardinality|metric_scalar|unknown", "anchors": ["命中的语义字段"]},
   "steps": [
     {
       "id": "s1",
@@ -41,6 +42,12 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
   3. 仅缺维度——标量问题不加维度；趋势/归因问题用候选维度池按信息增益裁决；
   4. 追问与省略指代——结合会话历史补全后直接规划；
 - 必须澄清时，一次只问一个缺口、问题具体可答，严禁抛"请补充指标与维度"式泛问。
+
+# 意图回传（可选，尽力而为）
+- intent 字段是你对问题意图的判断回传，仅用于系统诊断观测，不影响计划合法性；
+- type 取值：diagnostic（归因诊断）/ cardinality（维度基数探查，如"多少个省份"）/
+  metric_scalar（指标取值，如"5月GMV"）/ unknown（无法归类）；
+- anchors 填语义目录中实际命中的字段名（如 ["order_amount"]）。
 
 # DSL 契约要点（完整 Schema 见系统注入的语义目录；字段名与结构必须逐字对齐，写错即整计划被拒）
 - metrics: [{"kind": "aggregate", "field": "<语义字段>", "agg": "sum|count|avg|min|max|count_distinct", "alias": "<英文标识符>"}]
