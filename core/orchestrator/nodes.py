@@ -768,11 +768,16 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
     notes: list[str] = []
     produced: list[str] = []
     blocked_windows: list[str] = []
+    guard_blocked: list[str] = []
     for i, dsl_payload in enumerate(dsl_variants):
-        # L3 意图-DSL 错位守卫（十八期）：拦截即不执行，置拒答原因
+        name = f"{step.id}_v{i}" if len(dsl_variants) > 1 else step.id
+        # L3 意图-DSL 错位守卫（十八期）：拦截即不执行，置拒答原因；
+        # 审计面完整（二期 M1）：tool_start/end 配对、notes 记录
         mismatch = _intent_dsl_mismatch(state.user_query, dsl_payload)
         if mismatch:
             state = state.apply(blocked_reason=mismatch, answered_by="blocked")
+            guard_blocked.append(name)
+            events.emit_tool_start("futurebi_dsl_query", step.id, {"dataset": name, "dsl": dsl_payload})
             events.emit_tool_end(
                 "futurebi_dsl_query",
                 step.id,
@@ -780,8 +785,8 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
                 duration_ms=0.0,
                 error=mismatch,
             )
+            notes.append(f"{name} 被意图守卫拦截：{mismatch}")
             continue
-        name = f"{step.id}_v{i}" if len(dsl_variants) > 1 else step.id
         events.emit_tool_start("futurebi_dsl_query", step.id, {"dataset": name, "dsl": dsl_payload})
         started = time.perf_counter()
         # 时间域守卫（无数据诚实原则）：必然空集的窗口执行前即拒绝，
@@ -838,8 +843,12 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
         )
 
     # 数据集经 state.datasets 传递（ParquetRef 契约），parquet 产物在 synthesize 汇总
-    all_blocked = bool(blocked_windows) and not produced
-    if all_blocked:
+    all_blocked = (bool(blocked_windows) or bool(guard_blocked)) and not produced
+    if guard_blocked and not produced:
+        windows = "；".join(dict.fromkeys(guard_blocked))
+        no_data_reason = f"取数全部被意图守卫拦截：{windows}"
+        summary = f"[{step.id}] 取数被意图守卫拦截：{'；'.join(notes)}"
+    elif all_blocked:
         windows = "、".join(dict.fromkeys(blocked_windows))
         no_data_reason = f"查询时间范围 {windows} 超出数仓数据覆盖范围，该时段无任何数据"
         summary = f"[{step.id}] 取数被时间域守卫拦截：{no_data_reason}"
@@ -1317,9 +1326,10 @@ def code_exec_node(state: AgentState) -> AgentState:
     """沙箱分析节点：执行 analyze 步骤（需求 §2.A CodeExecutionNode）。"""
     from config import settings
 
-    if state.no_data_reason:
+    if state.no_data_reason or state.blocked_reason:
         # 时间域守卫已拦截取数：无数据可分析，严禁在空数据上跑分解/下钻
-        # 产出编造结论，直接转入反思节点（=> 诚实说明无数据）
+        # 产出编造结论；意图守卫已拦截（二期 M2）：拒答路径零沙箱执行、
+        # 零产物发射。两者均直接返回，交由 critic 短路到 synthesize。
         return state
 
     updated = state
