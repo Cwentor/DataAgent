@@ -166,6 +166,9 @@ class AgentState(BaseModel):
     history_digest: str = ""
     plan_steps: list[PlanStep] = Field(default_factory=list)
     clarification: str | None = Field(default=None, description="向用户发出的澄清问题")
+    clarification_options: list[str] = Field(
+        default_factory=list, description="选项式澄清候选（前端 pill 按钮，点击即答复）"
+    )
     human_reply: str | None = Field(default=None, description="HITL 恢复时的用户答复")
     # 执行轨迹
     tool_calls: list[ToolRecord] = Field(default_factory=list)

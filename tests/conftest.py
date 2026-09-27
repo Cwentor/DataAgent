@@ -125,7 +125,13 @@ def planner_clarify_then_plan(monkeypatch):
     ]
     responses = iter(
         [
-            {"clarification": "你关注的指标与时间范围是什么？", "steps": []},
+            {
+                "clarification": {
+                    "question": "你关注的指标与时间范围是什么？",
+                    "options": ["2024年5月GMV", "2024年5月订单量"],
+                },
+                "steps": [],
+            },
             {"clarification": None, "steps": [s.model_dump() for s in plan_steps]},
         ]
     )

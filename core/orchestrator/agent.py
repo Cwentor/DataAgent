@@ -124,7 +124,10 @@ def run_agent(
                     events.EVENT_HITL_REQUEST,
                     {
                         "kind": "clarify",
-                        "hitl": {"question": final.clarification or "请补充分析需求"},
+                        "hitl": {
+                            "question": final.clarification or "请补充分析需求",
+                            "options": list(final.clarification_options),
+                        },
                     },
                 )
             elif final.phase == "plan_review":
