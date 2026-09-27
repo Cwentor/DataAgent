@@ -2154,6 +2154,24 @@ def synthesize_node(state: AgentState) -> AgentState:
             llm_report = _synthesize_with_llm(state, material)
 
     if llm_report:
+        # Grounding 数值溯源校验（十八期最小版，只标注不拦截）：LLM 报告中的
+        # 数值应能溯源到真实查询数据；不可溯源值超阈值时追加提示小节。
+        # 拦截重试闭环属二期（防死循环/超时）。
+        from core.orchestrator.grounding import collect_allowed_values, grounding_review
+
+        allowed = collect_allowed_values(state, workspace)
+        ungrounded = grounding_review(llm_report, allowed)
+        if len(ungrounded) > 3:
+            logger.warning(
+                "LLM 报告存在不可溯源数值，追加溯源提示",
+                extra={"error": str(ungrounded[:10])[:400]},
+            )
+            llm_report = (
+                llm_report
+                + "\n\n---\n**数据溯源提示**：以下数值未能对应到本次真实查询结果，"
+                "请谨慎采信："
+                + "、".join(ungrounded[:10])
+            )
         report = _degradation_banner(state) + llm_report
         events.emit_event(
             events.EVENT_ARTIFACT_EMIT,
