@@ -52,30 +52,79 @@ class JoinRule:
 # 逻辑字段 -> 物理字段（内置默认目录；生产环境由 catalog_loader 从元数据+YAML 重建）
 COLUMNS: dict[str, FieldMeta] = {
     # fact_orders（主事实表）
-    "order_id": FieldMeta("fact_orders", "order_id", "int", label="订单ID", aliases=("订单量", "订单数")),
-    "user_id": FieldMeta("fact_orders", "user_id", "int", label="用户ID", aliases=("买家数", "用户数")),
+    "order_id": FieldMeta(
+        "fact_orders", "order_id", "int", label="订单ID", aliases=("订单量", "订单数")
+    ),
+    "user_id": FieldMeta(
+        "fact_orders", "user_id", "int", label="用户ID", aliases=("买家数", "用户数")
+    ),
     "product_id": FieldMeta("fact_orders", "product_id", "int", label="商品ID"),
-    "order_amount": FieldMeta("fact_orders", "order_amount", "float", label="订单金额", aliases=("gmv", "销售额", "订单金额", "成交金额")),
-    "discount_amount": FieldMeta("fact_orders", "discount_amount", "float", label="优惠金额", aliases=("优惠金额", "折扣金额")),
+    "order_amount": FieldMeta(
+        "fact_orders",
+        "order_amount",
+        "float",
+        label="订单金额",
+        aliases=("gmv", "销售额", "订单金额", "成交金额"),
+    ),
+    "discount_amount": FieldMeta(
+        "fact_orders",
+        "discount_amount",
+        "float",
+        label="优惠金额",
+        aliases=("优惠金额", "折扣金额"),
+    ),
     "pay_status": FieldMeta("fact_orders", "pay_status", "str", label="支付状态"),
     "order_time": FieldMeta("fact_orders", "order_time", "timestamp", label="下单时间"),
     "shop_id": FieldMeta("fact_orders", "shop_id", "int", label="门店ID"),
     # fact_refunds（第二事实表：退款）
     "refund_id": FieldMeta("fact_refunds", "refund_id", "int", label="退款单ID"),
-    "refund_amount": FieldMeta("fact_refunds", "refund_amount", "float", label="退款金额", aliases=("退款金额",)),
+    "refund_amount": FieldMeta(
+        "fact_refunds", "refund_amount", "float", label="退款金额", aliases=("退款金额",)
+    ),
     "refund_time": FieldMeta("fact_refunds", "refund_time", "timestamp", label="退款时间"),
     "refund_status": FieldMeta("fact_refunds", "refund_status", "str", label="退款状态"),
     # dim_user
-    "province": FieldMeta("dim_user", "province", "str", label="省份", aliases=("province", "省份", "省", "地区", "地域", "区域", "大区", "城市", "广东", "浙江", "江苏", "北京", "上海", "四川", "湖北", "山东")),
+    "province": FieldMeta(
+        "dim_user",
+        "province",
+        "str",
+        label="省份",
+        aliases=(
+            "province",
+            "省份",
+            "省",
+            "地区",
+            "地域",
+            "区域",
+            "大区",
+            "城市",
+            "广东",
+            "浙江",
+            "江苏",
+            "北京",
+            "上海",
+            "四川",
+            "湖北",
+            "山东",
+        ),
+    ),
     "gender": FieldMeta("dim_user", "gender", "str", label="性别"),
     "register_time": FieldMeta("dim_user", "register_time", "timestamp", label="注册时间"),
     # dim_product
-    "category": FieldMeta("dim_product", "category", "str", label="品类", aliases=("category", "品类", "类目", "品类结构")),
+    "category": FieldMeta(
+        "dim_product",
+        "category",
+        "str",
+        label="品类",
+        aliases=("category", "品类", "类目", "品类结构"),
+    ),
     "brand": FieldMeta("dim_product", "brand", "str", label="品牌", aliases=("brand", "品牌")),
     "unit_price": FieldMeta("dim_product", "unit_price", "float", label="单价"),
     "product_name": FieldMeta("dim_product", "product_name", "str", label="商品名称"),
     # dim_shop
-    "shop_name": FieldMeta("dim_shop", "shop_name", "str", label="门店名称", aliases=("shop_name", "店铺", "门店")),
+    "shop_name": FieldMeta(
+        "dim_shop", "shop_name", "str", label="门店名称", aliases=("shop_name", "店铺", "门店")
+    ),
 }
 
 # 物理表 -> 中文表标签：Web 侧栏分组标题与 Planner 摘要展示用。
