@@ -1228,3 +1228,85 @@ def test_blocked_report_lists_anchor_status(tmp_path, monkeypatch):
     trace = run_agent("帮我看看最近情况", session_id="anchorq")
     assert "未在语义目录中识别到任何指标或维度" in trace.report
     assert "帮我看看最近情况" in trace.report  # 复述原问句
+
+
+# --------------------------------------------------------------------------- #
+# 二期：Grounding 定向重试闭环（重写 1 次 -> 仍超阈值降级确定性渲染）
+# --------------------------------------------------------------------------- #
+def _grounding_retry_plan_payload():
+    return {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "depends_on": [],
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                    "time_filter": {
+                        "range_type": "absolute",
+                        "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
+                    },
+                },
+            },
+            {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+        ],
+    }
+
+
+def test_grounding_retry_success_keeps_llm_report(tmp_path, monkeypatch):
+    """首版报告超阈值 -> 定向重写 grounded => 保留 LLM 报告（二期 RF#2）。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    plan_seen = iter([_grounding_retry_plan_payload()])
+    synth_reports = iter(
+        ["编造报告：转化率高达 42.5%、留存 88.6%、复购 77.3%、曝光 99.2%。", "GMV 为 115.69 万元。"]
+    )
+
+    def _fake_llm_json(llm, system, user):
+        return next(plan_seen)
+
+    synth_calls: list[str | None] = []
+
+    def _fake_synth(state, material, extra_instruction=None):
+        synth_calls.append(extra_instruction)
+        return next(synth_reports)
+
+    monkeypatch.setattr(nodes, "_llm_json", _fake_llm_json)
+    monkeypatch.setattr(nodes, "_synthesize_with_llm", _fake_synth)
+    trace = run_agent("2024年5月GMV是多少", session_id="retryq")
+    assert trace.phase == "done"
+    assert "115.69" in trace.report
+    assert "42.5" not in trace.report
+    assert "数据溯源提示" not in trace.report  # 重写后 grounded，不标注
+    # 重写轮必须携带修正指令（首轮 None、第二轮非 None）
+    assert synth_calls[0] is None
+    assert synth_calls[1] is not None and "数值溯源修正" in synth_calls[1]
+
+
+def test_grounding_retry_exhausted_falls_back_to_deterministic(tmp_path, monkeypatch):
+    """重试后仍超阈值 => 放弃 LLM 报告，降级确定性渲染（二期 RF#2 失败路径）。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    fabricated = "编造报告：转化率高达 42.5%、留存 88.6%、复购 77.3%、曝光 99.2%。"
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: _grounding_retry_plan_payload())
+    synth_calls = iter([fabricated, fabricated])
+
+    def _fake_synth(state, material, extra_instruction=None):
+        return next(synth_calls)
+
+    monkeypatch.setattr(nodes, "_synthesize_with_llm", _fake_synth)
+    trace = run_agent("2024年5月GMV是多少", session_id="retryfail")
+    assert trace.phase == "done"
+    assert "查询答案" in trace.report  # 确定性渲染接管（数据真实）
+    assert "转化率" not in trace.report  # 编造叙事被整体放弃
