@@ -20,3 +20,5 @@
 | 十四期 | 企业级 DataAgent 升级层（`core/`）：StateGraph 六节点编排、沙箱代码解释器、归因技能包（熵下钻 / 分解树 / DTW / Holt-Winters / Shapley）、PII 脱敏与 ParquetRef 数据交换、裸 SQL 网关 | ✅ |
 | 十五期 | 双栏交互式工作台与 SSE 流式编排：九类事件实时推送、任务 DAG 时间线、产物画布、HITL 澄清交互 | ✅ |
 | 十六期 | 多模型供应商网关（`providers/`）：OpenAI Chat / Responses、Anthropic、Gemini 四协议适配，API Key 落盘加密，连通性探测与请求级模型切换 | ✅ |
+| 十七期 | Agent 架构演进（`core/orchestrator/`）：LangGraph 单引擎收敛、interrupt 泛化与 L1-L4 自主性分级（Plan Mode）、Subagent fan-out 预算硬顶 | ✅ |
+| 十八期 | 意图路由收敛与诚实兜底：澄清判定权上收 Planner、兜底准入制（诊断/基数/锚定指标三类直答，其余诚实拒答）、L3 意图-DSL 错位守卫、别名收编语义目录（`FieldMeta.aliases` 单一事实源）、Grounding 定向重试闭环、选项式澄清、答非所问率评测入 CI | ✅ |

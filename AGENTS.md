@@ -139,6 +139,8 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy + 标准�
 - 重规划自愈上下文：编排链路失败回 plan 时，`planner_prompt` 必须注入 `error_context`（最近失败摘要）——严禁让 LLM 盲重试；`error_context=None` 时提示词与旧契约逐字一致；
 - 提交前确保 `black --check .`、`ruff check .`、`python -m pytest -q` 全绿。
 
+- 意图路由与诚实兜底（`core/orchestrator/intent.py` + `nodes.py`，十八期）：兜底准入制——仅诊断/基数/硬锚定指标三类意图可确定性直答（附缺省口径说明），其余意图置 `blocked_reason` 诚实拒答（critic/synthesize 短路，零 LLM 调用）；L3 意图-DSL 错位守卫依据确定性 L1 硬匹配（不信任 LLM 回传意图），CARDINALITY 守卫只限制聚合与投影目标、不限制过滤条件；Grounding 数值溯源重试上限 1 次、仍超阈值必须降级确定性渲染；意图词表以 `semantic/catalog` 的 `FieldMeta.aliases` 为单一事实源——新增字段时别名随登记自动生效，严禁在 intent.py 维护字面词表；选项式澄清经 `clarification_options` 状态字段透传（前端已消费）；指标词表的新增/修改必须同步登记 `semantic.json` 或内置 `COLUMNS` 并补意图评测用例；
+
 ## 评审落盘规范（Review Archive）
 
 - 任何评审（PR 评审、代码审计、生产就绪度评审、安全评审等）的落盘文件**必须统一输出到 `docs/reviews/`**，严禁散落在项目根目录或其他目录；

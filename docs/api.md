@@ -59,7 +59,7 @@ curl -X POST http://127.0.0.1:8000/api/query \
 | `step_start` | `step_id / step_title` | 图节点进度指示 |
 | `tool_start` / `tool_end` | `tool: {name, input, output, duration_ms, error}` | 工具手风琴（DSL/沙箱代码展开） |
 | `reflection` | `reflection: {observation, decision, reason}` | 反思/自愈节点 |
-| `hitl_request` | `hitl: {question, resume_token}` | 澄清交互卡（可点击答复） |
+| `hitl_request` | `hitl: {question, options, resume_token}` | 澄清交互卡（`options` 为候选口径 pill 按钮，点击即答复；自由输入兜底） |
 | `artifact_emit` | `artifact: {type, title, content}` | 产物入账（报告/图表/代码/数据表，顶部 Tab 徽标计数，随会话绑定持久化） |
 | `done` / `error` | `report` / `error` | 终态收尾（状态灯复位） |
 
