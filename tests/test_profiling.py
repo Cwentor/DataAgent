@@ -81,20 +81,39 @@ def test_profile_enum_values_uses_cache(mem_conn):
 
 
 def test_schema_digest_injects_enum_values():
-    """schema_digest 注入枚举值：行尾附"可取值:"清单。"""
+    """schema_digest 注入枚举值：行尾附"可取值:"清单；中文标签以"逻辑名: 中文"前缀注入。"""
     digest = schema_digest({"province": ["上海", "广东"], "gmv": ["不应出现"]})
-    line = next((ln for ln in digest.splitlines() if ln.startswith("- province ")), "")
+    line = next((ln for ln in digest.splitlines() if ln.startswith("- province")), "")
+    assert line.startswith("- province: 省份 (")
     assert "可取值: 上海|广东" in line
     # gmv 是数值字段：不在注入集时无"可取值"标记
-    gmv_line = next((ln for ln in digest.splitlines() if ln.startswith("- gmv ")), "")
+    gmv_line = next((ln for ln in digest.splitlines() if ln.startswith("- gmv")), "")
     assert "可取值" not in gmv_line
 
 
 def test_schema_digest_without_enum_values_unchanged():
-    """schema_digest 缺省（None）：与旧契约输出一致（无"可取值"标记）。"""
+    """schema_digest 缺省（None）：无"可取值"标记；带中文标签的新格式逐字段注入。"""
     digest = schema_digest()
     assert "可取值" not in digest
     assert digest.startswith("- ")
+    assert "- order_amount: 订单金额 (fact_orders.order_amount, float)" in digest
+
+
+def test_schema_digest_label_none_keeps_legacy_format():
+    """label 为 None 的字段保持旧格式逐字输出（向后兼容契约）。"""
+    from semantic.catalog import FieldMeta
+    from semantic.catalog_loader import reset_defaults
+
+    try:
+        import semantic.catalog as catalog_mod
+
+        catalog_mod.COLUMNS["legacy_field"] = FieldMeta(
+            "fact_orders", "legacy_col", "float", label=None
+        )
+        digest = schema_digest()
+        assert "- legacy_field (fact_orders.legacy_col, float)" in digest
+    finally:
+        reset_defaults()
 
 
 def test_planner_prompt_carries_enum_values(monkeypatch):

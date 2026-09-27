@@ -18,7 +18,7 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
 
 # 输出契约（必须是且仅是一个 JSON 对象，禁止任何其他文本）
 {
-  "clarification": null | "当问题歧义到无法规划时的一句澄清问题",
+  "clarification": null | "仅当问题歧义到无法选出任何合理默认口径时的一句澄清问题（判定纪律见下节）",
   "steps": [
     {
       "id": "s1",
@@ -30,6 +30,17 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
     }
   ]
 }
+
+# 澄清判定纪律（何时打断用户，何时直接作答）
+- clarification 是最后手段：输出即 HITL 中断、必须等用户答复。仅当问题歧义到
+  **无法选出任何合理默认口径**时才澄清（如"表现怎么样？"连指标都无法锚定）；
+- 以下情形**严禁澄清**，直接规划作答（口径取舍在报告里说明即可）：
+  1. 事实型/元数据型问题（"有多少个省份""有哪些品类""共多少家店铺"）——语义
+     目录可直接回答（如 count_distinct(province)），无需任何补充信息；
+  2. 仅缺时间范围——用 relative 时间过滤锚定数仓数据域内最近完整期，不追问；
+  3. 仅缺维度——标量问题不加维度；趋势/归因问题用候选维度池按信息增益裁决；
+  4. 追问与省略指代——结合会话历史补全后直接规划；
+- 必须澄清时，一次只问一个缺口、问题具体可答，严禁抛"请补充指标与维度"式泛问。
 
 # DSL 契约要点（完整 Schema 见系统注入的语义目录；字段名与结构必须逐字对齐，写错即整计划被拒）
 - metrics: [{"kind": "aggregate", "field": "<语义字段>", "agg": "sum|count|avg|min|max|count_distinct", "alias": "<英文标识符>"}]
@@ -137,6 +148,19 @@ REFLECTOR_SYSTEM = """你是数据分析 Agent 的反思器（Reflector/Critic�
 
 # Few-Shot：诊断式规划的规范输出（注入 Planner 上下文）
 PLANNER_FEWSHOT = """# 示例
+用户: "有多少个省份"（事实型问题：语义目录可直接回答，严禁澄清，也无需时间窗口）
+输出:
+{
+  "clarification": null,
+  "steps": [
+    {"id": "s1", "goal": "统计省份维度的去重取值个数", "kind": "query", "depends_on": [],
+     "dsl": {"metrics": [{"kind": "aggregate", "field": "province", "agg": "count_distinct", "alias": "province_count"}],
+             "dimensions": [], "filters": []},
+     "code": null},
+    {"id": "s2", "goal": "直接报告省份去重计数结果", "kind": "synthesize", "depends_on": ["s1"], "dsl": null, "code": null}
+  ]
+}
+
 用户: "分析一下 2026-08-01 到 2026-08-07 之间 GMV 为什么比上一周下滑，按地区和品类定位原因"
 输出:
 {

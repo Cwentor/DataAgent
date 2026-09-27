@@ -181,7 +181,15 @@ def _build_from_overlay(
         dtype = str(spec.get("dtype", "")) or (
             _map_dtype(physical[table][column]) if physical is not None else "str"
         )
-        columns[str(name)] = FieldMeta(table, column, dtype)
+        # 中文标签：覆写显式声明优先；缺省（或显式 null）回退内置默认文案，
+        # 内置目录也未登记的新字段为 None（消费方回退物理列名）。
+        label_raw = spec.get("label")
+        if label_raw is None:
+            default_meta = _DEFAULT_COLUMNS.get(str(name))
+            label = default_meta.label if default_meta is not None else None
+        else:
+            label = str(label_raw)
+        columns[str(name)] = FieldMeta(table, column, dtype, label=label)
 
     aliases = {str(k): str(v) for k, v in dict(overlay.get("aliases", {})).items()}
     fact_table = str(overlay.get("fact_table", _DEFAULT_FACT_TABLE))
@@ -337,7 +345,8 @@ def main() -> None:
     print(f"逻辑字段 {len(cat.columns)} 个：")
     for name in sorted(cat.columns):
         m = cat.columns[name]
-        print(f"  - {name}: {m.table}.{m.column} ({m.dtype})")
+        label = f" [{m.label}]" if m.label else ""
+        print(f"  - {name}{label}: {m.table}.{m.column} ({m.dtype})")
     print(f"表别名: {cat.aliases}")
     print(f"维度成员词汇表: " f"{ {k: len(v) for k, v in cat.dimension_members.items()} }")
     print(f"维度连接: { {t: (r.join_type, r.on) for t, r in cat.join_rules.items()} }")

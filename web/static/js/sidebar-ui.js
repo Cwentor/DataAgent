@@ -435,13 +435,18 @@
     }
     var html = "";
     data.tables.forEach(function (t) {
+      var tLabel = t.label && t.label !== t.table ? " · " + esc(t.label) : "";
       html += '<div class="schema-table-group">'
-        + '<div class="schema-table-name">▤ ' + esc(t.table)
+        + '<div class="schema-table-name">▤ ' + esc(t.table) + tLabel
         + '<span class="t-count">' + t.fields.length + " 字段</span></div>";
       t.fields.forEach(function (f) {
-        html += '<div class="schema-field">'
+        // 中文标签替代重复的物理列名；物理列名收进悬停 tooltip（逻辑名=物理名时不丢信息）
+        var semantic = f.label
+          ? '<span class="f-label">' + esc(f.label) + "</span>"
+          : '<span class="f-column">' + esc(f.column) + "</span>";
+        html += '<div class="schema-field" title="' + esc(f.column) + '">'
           + '<span class="f-logical">' + esc(f.field) + "</span>"
-          + '<span class="f-column">' + esc(f.column) + "</span>"
+          + semantic
           + '<span class="f-dtype">' + esc(f.dtype) + "</span></div>";
       });
       html += "</div>";
