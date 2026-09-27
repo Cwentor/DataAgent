@@ -65,3 +65,21 @@ def test_capability_catalog_lines():
     assert any("province" in line and "省份" in line for line in lines)
     assert any("order_amount" in line for line in lines)
     assert any("shop_name" in line for line in lines)  # 店铺维度不遗漏
+
+
+def test_dimension_scoped_metric_query_is_unknown():
+    """复合问句（指标锚+维度限定词）=> UNKNOWN 诚实拒答（终审 Critical #1）。
+
+    回归锚点："海南省的GMV是多少"曾被兜底降维成全域 sum(gmv)——数仓根本
+    没有海南，带着准入制合法性外衣输出错范围数据比拒答严重得多。兜底无法
+    确定性提取维度取值（"海南省"->'海南'），一律拒答留给 LLM 规划。
+    L3 守卫随之不启用（confidence=none），复合问句由 LLM 正确规划。
+    """
+    profile = classify_intent("海南省的GMV是多少")
+    assert profile.intent == IntentType.UNKNOWN
+
+    profile2 = classify_intent("北京的退款金额是多少")
+    assert profile2.intent == IntentType.UNKNOWN
+
+    # 纯指标锚（无维度限定）不受影响
+    assert classify_intent("5月GMV是多少").intent == IntentType.METRIC_SCALAR

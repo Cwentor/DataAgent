@@ -49,6 +49,9 @@ _METRIC_TERMS: tuple[tuple[str, str], ...] = (
 )
 
 # 维度别名词表（自 nodes.py _DIMENSION_TERMS 收编，值=语义字段）。
+# 末段为数仓实际省份取值词根（广东/浙江/…）：用于识别"海南省的GMV"式
+# 维度限定问句（判 UNKNOWN 拒答，终审 Critical #1）——兜底无法确定性
+# 提取全部维度取值，宁拒答不降维成全域聚合。
 DIMENSION_TERMS: dict[str, str] = {
     "province": "province",
     "省份": "province",
@@ -58,6 +61,14 @@ DIMENSION_TERMS: dict[str, str] = {
     "区域": "province",
     "大区": "province",
     "城市": "province",
+    "广东": "province",
+    "浙江": "province",
+    "江苏": "province",
+    "北京": "province",
+    "上海": "province",
+    "四川": "province",
+    "湖北": "province",
+    "山东": "province",
     "category": "category",
     "品类": "category",
     "类目": "category",
@@ -129,6 +140,11 @@ def classify_intent(query: str) -> IntentProfile:
     判定优先级：诊断（触发词+锚点）> 基数（量词+单维度锚+无指标锚）>
     标量指标（指标硬锚）> UNKNOWN。基数判定以指标锚为排除条件——
     "有多少个品类的GMV"（量词+维度+指标锚）是按维度的指标问题而非基数问题。
+
+    复合问句（指标锚+维度限定词共存，如"海南省的GMV"）判 UNKNOWN：
+    兜底无法确定性提取维度取值（"海南省"->'海南'？数仓可能根本没有该
+    取值），降维成全域聚合会输出错范围数据（终审 Critical #1 回归锚点）
+    ——宁可拒答留给 LLM 规划；L3 守卫对 UNKNOWN 不启用，由 LLM 正确处理。
     """
     metrics = _extract_anchors(query, _METRIC_TERMS)
     dims = _extract_anchors(query, DIMENSION_TERMS)
@@ -137,7 +153,7 @@ def classify_intent(query: str) -> IntentProfile:
         return IntentProfile(IntentType.DIAGNOSTIC, metrics + dims, "hard")
     if _is_count_question(query) and not metrics and len(dims) == 1:
         return IntentProfile(IntentType.CARDINALITY, dims, "hard")
-    if metrics and not is_diagnostic:
+    if metrics and not dims and not is_diagnostic:
         return IntentProfile(IntentType.METRIC_SCALAR, metrics, "hard")
     return IntentProfile(IntentType.UNKNOWN, (), "none")
 

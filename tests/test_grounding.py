@@ -29,3 +29,17 @@ def test_collect_allowed_values_from_state():
     # collect_allowed_values 对无 workspace 文件时容忍降级（返回空集不抛错）
     values = collect_allowed_values(state, workspace=None)
     assert isinstance(values, set)
+
+
+def test_date_tokens_are_not_flagged():
+    """报告中的日期（2024年5月 / 2024-05-01）不得计入不可溯源（终审 Important #4）。
+
+    LLM 报告必然引用日期，日期 token 几乎从不在 allowed 集——不排除会
+    造成系统性误报，触发"数据溯源提示"狼来了效应。
+    """
+    allowed = {1156943.73}
+    report = (
+        "2024年5月 GMV 为 115.69 万元（统计窗口 2024-05-01 至 2024-05-15），"
+        "环比基准期为 2024 年 4 月。"
+    )
+    assert grounding_review(report, allowed) == []

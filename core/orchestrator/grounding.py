@@ -13,6 +13,8 @@ from typing import Any
 
 _NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 _UNIT_PATTERN = re.compile(r"\s*(亿元|万元|万|亿|%)")
+# 日期形态剥离：YYYY-MM-DD / YYYY/MM/DD / YYYY年MM月DD日 / YYYY年MM月 等
+_DATE_PATTERN = re.compile(r"\d{4}\s*[-年/]\s*\d{1,2}(?:\s*[-月/]\s*\d{1,2})?\s*日?")
 
 
 def _candidates(number: float, unit: str) -> list[float]:
@@ -32,11 +34,20 @@ def _is_grounded(allowed: set[float], value: float) -> bool:
 
 
 def grounding_review(report: str, allowed: set[float]) -> list[str]:
-    """返回报告中不可溯源的数值 token（原样文本，供报告引用）。"""
+    """返回报告中不可溯源的数值 token（原样文本，供报告引用）。
+
+    日期上下文排除（终审 Important #4）：先剥离 YYYY-MM-DD / YYYY年MM月 等日期
+    形态、再跳过紧邻"年/月/日/季度"的时间 token——LLM 报告必然引用日期，
+    而日期几乎从不在 allowed 集，不排除会造成系统性误报。
+    """
+    text = _DATE_PATTERN.sub(" ", report)
     flagged: list[str] = []
-    for match in _NUMBER_RE.finditer(report):
+    for match in _NUMBER_RE.finditer(text):
         token = match.group(0)
-        unit_match = _UNIT_PATTERN.match(report[match.end() : match.end() + 4])
+        tail = text[match.end() : match.end() + 3]
+        if tail[:1] in ("年", "月", "日", "季") or tail.startswith("季度"):
+            continue  # 时间上下文 token（如"4 月"），非业务数值
+        unit_match = _UNIT_PATTERN.match(text[match.end() : match.end() + 4])
         unit = unit_match.group(1) if unit_match else ""
         try:
             number = float(token.replace(",", ""))

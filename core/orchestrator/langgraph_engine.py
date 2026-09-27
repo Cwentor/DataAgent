@@ -115,11 +115,14 @@ def _plan_gate(state: AgentState) -> AgentState:
     """
     if state.phase == "clarify" and state.clarification:
         resume_value = interrupt({"kind": "clarify", "clarification": state.clarification})
-        # 合并语义逐字对齐 _clarify_gate（user_query 追加"（用户补充：…）"）
+        # 合并语义逐字对齐 _clarify_gate（user_query 追加"（用户补充：…）"）；
+        # plan_steps 必须置空（终审 Important #3）：重规划场景下旧计划会让
+        # 路由/反思拿旧状态行事，用户答复被静默吞掉
         return state.apply(
             user_query=f"{state.user_query}（用户补充：{str(resume_value).strip()}）",
             human_reply=None,
             clarification=None,
+            plan_steps=[],
             phase="plan",
         )
     multi_step = len(state.plan_steps) > 1 or any(s.kind == "analyze" for s in state.plan_steps)
@@ -161,8 +164,21 @@ def _plan_gate(state: AgentState) -> AgentState:
 
 def route_from_plan_gate(state: AgentState) -> Any:
     """plan_gate 条件边路由：approve 交原 route_from_plan；edit 回 plan；
-    reject 收敛；plan 携带 fanout_tasks 时转 fanout_orchestrator 汇聚节点。"""
+    reject 收敛；plan 携带 fanout_tasks 时转 fanout_orchestrator 汇聚节点。
+
+    十八期（终审 Important #3）：clarify resume 后 phase=plan 且 plan_steps
+    空、无 blocked_reason => 直接回 plan 节点重规划。严禁借道 critique——
+    重规划场景下 datasets 已有旧数据，critic 会判三检通过直走 synthesize，
+    静默吞掉用户对澄清的答复并拿旧数据出报告。
+    """
     if state.phase == "plan" and state.plan_edit_instruction:
+        return "plan"
+    if (
+        state.phase == "plan"
+        and not state.plan_steps
+        and not state.blocked_reason
+        and not state.no_data_reason
+    ):
         return "plan"
     if state.phase == "done":
         return "plan_gate_end"

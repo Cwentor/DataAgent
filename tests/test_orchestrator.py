@@ -1072,3 +1072,37 @@ def test_planner_llm_intent_echoed_to_state(monkeypatch):
     )
     state2 = nodes.planner_node(AgentState(user_query="5月GMV是多少"))
     assert state2.intent_type is None
+
+
+def test_planner_blocked_clears_edit_instruction(monkeypatch):
+    """plan_review 修改指令 + 兜底拒答 => 诚实拒答而非无限回环（终审 Important #2）。
+
+    回归锚点：blocked 提前 return 发生在 plan_edit_instruction 清除之前，
+    plan_gate 的 edit 路由会无条件回 plan 形成无限循环，用户看到
+    "迭代步数超限"而非拒答报告。
+    """
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    state = AgentState(user_query="帮我看看最近情况", plan_edit_instruction="改成按品类")
+    out = nodes.planner_node(state)
+    assert out.blocked_reason
+    assert out.plan_edit_instruction is None
+
+
+def test_scalar_answer_includes_default_scope_note(tmp_path, monkeypatch):
+    """缺省口径必须进报告（规格 §3.2；终审 Important #5）。
+
+    兜底 scalar 直答使用缺省时间窗与支付过滤，用户必须能看到口径说明。
+    """
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
+    trace = run_agent("GMV呢？", session_id="scopeq")
+    assert trace.phase == "done"
+    assert "2024-05-01" in trace.report
+    assert "成功支付" in trace.report or "SUCCESS" in trace.report
