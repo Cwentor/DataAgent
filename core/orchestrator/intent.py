@@ -187,16 +187,27 @@ def count_dimension_dsl(query: str) -> dict | None:
 
 
 def capability_catalog_lines() -> list[str]:
-    """拒答报告的能力清单（诚实告知系统边界，含中文 label）。"""
+    """拒答报告的能力清单（诚实告知系统边界，含中文 label）。
+
+    unit_price 单价非金额聚合语义，独立"其他"分组（二期 M4）。
+    """
     from semantic.catalog import COLUMNS, DRILLDOWN_DIM_FIELDS
 
     dim_fields = sorted(set(DRILLDOWN_DIM_FIELDS) | set(DIMENSION_TERMS.values()))
     dims = "、".join(f"{f}（{COLUMNS[f].label or f}）" for f in dim_fields if f in COLUMNS)
     metrics = "、".join(
-        f"{name}（{meta.label or name}）" for name, meta in COLUMNS.items() if meta.dtype == "float"
+        f"{name}（{meta.label or name}）"
+        for name, meta in COLUMNS.items()
+        if meta.dtype == "float" and name != "unit_price"
     )
-    return [
+    others = "、".join(
+        f"{name}（{meta.label or name}）" for name, meta in COLUMNS.items() if name == "unit_price"
+    )
+    lines = [
         f"- 分析维度：{dims}；支持基数探查（如「有多少个省份」）",
         f"- 金额指标：{metrics}",
         "- 计数指标：订单量（order_id）、买家数（user_id）",
     ]
+    if others:
+        lines.append(f"- 其他：{others}")
+    return lines
