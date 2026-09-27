@@ -31,11 +31,9 @@ from agent.time_utils import parse_explicit_time_window
 from audit.logging import get_logger
 from core.orchestrator import events
 from core.orchestrator.intent import (
-    DIMENSION_TERMS as DIMENSION_TERMS,
-)
-from core.orchestrator.intent import (
     IntentType,
     classify_intent,
+    dimension_terms,
 )
 from core.orchestrator.prompts import (
     DEGRADED_SUMMARIZER_SYSTEM,
@@ -64,7 +62,7 @@ logger = get_logger("core.orchestrator")
 # --------------------------------------------------------------------------- #
 # 维度下钻候选（审计修复 M2：杜绝"没问分省却默认走分省"）
 # --------------------------------------------------------------------------- #
-# 维度词 -> 语义字段映射收编至 core.orchestrator.intent（DIMENSION_TERMS，
+# 维度词 -> 语义字段映射收编至 semantic/catalog FieldMeta.aliases（二期，
 # 十八期：意图分类与兜底准入的唯一词源）。
 # 用户未显式指定维度时的候选维度池（有意收窄，与 DRILLDOWN_DIM_FIELDS 同源）：
 # 联合明细同时覆盖 province 与 category，分析层按 info-gain 择优下钻，
@@ -93,11 +91,11 @@ def _explicit_dimensions(query: str) -> list[str]:
     - 泛化的"按维度拆分"（"按维度/分维度"）不锚定具体字段 => 返回空，
       交由分析层在候选池内按信息增益自动下钻；
     - "地区/省份/大区/城市"等词统一归一为 province；"品类/类目"-> category；
-      "品牌"-> brand；"店铺/门店"-> shop_name（词表见 intent.DIMENSION_TERMS）。
+      "品牌"-> brand；"店铺/门店"-> shop_name（词表见 semantic/catalog FieldMeta.aliases）。
     """
     found: list[str] = []
     lowered = query.lower()
-    for term, field in DIMENSION_TERMS.items():
+    for term, field in dimension_terms().items():
         if term in lowered and field not in found:
             found.append(field)
     return found

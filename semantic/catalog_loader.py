@@ -189,7 +189,13 @@ def _build_from_overlay(
             label = default_meta.label if default_meta is not None else None
         else:
             label = str(label_raw)
-        columns[str(name)] = FieldMeta(table, column, dtype, label=label)
+        aliases_raw = spec.get("aliases")
+        if aliases_raw is None:
+            default_meta = _DEFAULT_COLUMNS.get(str(name))
+            aliases = default_meta.aliases if default_meta is not None else ()
+        else:
+            aliases = tuple(str(a) for a in aliases_raw)
+        columns[str(name)] = FieldMeta(table, column, dtype, label=label, aliases=aliases)
 
     aliases = {str(k): str(v) for k, v in dict(overlay.get("aliases", {})).items()}
     fact_table = str(overlay.get("fact_table", _DEFAULT_FACT_TABLE))

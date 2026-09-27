@@ -31,54 +31,36 @@ class IntentProfile:
     confidence: str  # "hard"（词表命中）| "llm"（LLM 判定）| "none"（无锚点）
 
 
-# 指标别名词表：业务词 -> 语义目录字段（长词优先匹配）。
-# 仅收录事实主表（fact_orders/fact_refunds）既有字段；比率/派生指标
-# （退款率/客单价）数仓无现成字段，严禁收录——宁可 UNKNOWN 拒答。
-_METRIC_TERMS: tuple[tuple[str, str], ...] = (
-    ("退款金额", "refund_amount"),
-    ("优惠金额", "discount_amount"),
-    ("折扣金额", "discount_amount"),
-    ("成交金额", "order_amount"),
-    ("订单金额", "order_amount"),
-    ("销售额", "order_amount"),
-    ("gmv", "order_amount"),
-    ("订单量", "order_id"),
-    ("订单数", "order_id"),
-    ("买家数", "user_id"),
-    ("用户数", "user_id"),
-)
+def _build_metric_terms() -> tuple[tuple[str, str], ...]:
+    """从语义目录 FieldMeta.aliases 构建指标词表（数值字段 = int/float）。"""
+    from semantic.catalog import COLUMNS
 
-# 维度别名词表（自 nodes.py _DIMENSION_TERMS 收编，值=语义字段）。
-# 末段为数仓实际省份取值词根（广东/浙江/…）：用于识别"海南省的GMV"式
-# 维度限定问句（判 UNKNOWN 拒答，终审 Critical #1）——兜底无法确定性
-# 提取全部维度取值，宁拒答不降维成全域聚合。
-DIMENSION_TERMS: dict[str, str] = {
-    "province": "province",
-    "省份": "province",
-    "省": "province",
-    "地区": "province",
-    "地域": "province",
-    "区域": "province",
-    "大区": "province",
-    "城市": "province",
-    "广东": "province",
-    "浙江": "province",
-    "江苏": "province",
-    "北京": "province",
-    "上海": "province",
-    "四川": "province",
-    "湖北": "province",
-    "山东": "province",
-    "category": "category",
-    "品类": "category",
-    "类目": "category",
-    "品类结构": "category",
-    "brand": "brand",
-    "品牌": "brand",
-    "店铺": "shop_name",
-    "门店": "shop_name",
-    "shop_name": "shop_name",
-}
+    terms: list[tuple[str, str]] = []
+    for name, meta in COLUMNS.items():
+        if meta.dtype in ("int", "float"):
+            terms.extend((alias, name) for alias in meta.aliases)
+    return tuple(terms)
+
+
+def _build_dimension_terms() -> dict[str, str]:
+    """从语义目录 FieldMeta.aliases 构建维度词表（非数值字段）。
+
+    同名别名先序保留（setdefault），保证词表确定性。
+    """
+    from semantic.catalog import COLUMNS
+
+    terms: dict[str, str] = {}
+    for name, meta in COLUMNS.items():
+        if meta.dtype not in ("int", "float"):
+            for alias in meta.aliases:
+                terms.setdefault(alias, name)
+    return terms
+
+
+def dimension_terms() -> dict[str, str]:
+    """维度词表（动态构建；nodes 的显式维度识别消费）。"""
+    return _build_dimension_terms()
+
 
 _DIAGNOSTIC_TERMS: tuple[str, ...] = (
     "为什么",
@@ -146,8 +128,8 @@ def classify_intent(query: str) -> IntentProfile:
     取值），降维成全域聚合会输出错范围数据（终审 Critical #1 回归锚点）
     ——宁可拒答留给 LLM 规划；L3 守卫对 UNKNOWN 不启用，由 LLM 正确处理。
     """
-    metrics = _extract_anchors(query, _METRIC_TERMS)
-    dims = _extract_anchors(query, DIMENSION_TERMS)
+    metrics = _extract_anchors(query, _build_metric_terms())
+    dims = _extract_anchors(query, _build_dimension_terms())
     is_diagnostic = any(t in query for t in _DIAGNOSTIC_TERMS)
     if is_diagnostic and (metrics or dims):
         return IntentProfile(IntentType.DIAGNOSTIC, metrics + dims, "hard")
@@ -193,7 +175,7 @@ def capability_catalog_lines() -> list[str]:
     """
     from semantic.catalog import COLUMNS, DRILLDOWN_DIM_FIELDS
 
-    dim_fields = sorted(set(DRILLDOWN_DIM_FIELDS) | set(DIMENSION_TERMS.values()))
+    dim_fields = sorted(set(DRILLDOWN_DIM_FIELDS) | set(_build_dimension_terms().values()))
     dims = "、".join(f"{f}（{COLUMNS[f].label or f}）" for f in dim_fields if f in COLUMNS)
     metrics = "、".join(
         f"{name}（{meta.label or name}）"
