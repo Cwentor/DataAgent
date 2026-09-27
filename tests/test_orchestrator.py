@@ -1215,3 +1215,16 @@ def test_code_exec_skipped_when_blocked(tmp_path, monkeypatch):
     assert trace.phase == "done"
     assert "无法作答" in trace.report
     assert sandbox_calls == []  # 拒答路径零沙箱执行
+
+
+def test_blocked_report_lists_anchor_status(tmp_path, monkeypatch):
+    """拒答报告必须写明锚点识别状态（终审 M3，一期规格 §3.4 补齐）。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("帮我看看最近情况", session_id="anchorq")
+    assert "未在语义目录中识别到任何指标或维度" in trace.report
+    assert "帮我看看最近情况" in trace.report  # 复述原问句

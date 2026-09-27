@@ -2110,6 +2110,15 @@ def _cannot_answer_report(state: AgentState) -> str:
 
     lines: list[str] = [f"## 数据说明：{state.user_query}", ""]
     lines.append(f"**本次无法作答：{state.blocked_reason}。**")
+    # 锚点识别状态（二期 M3，一期规格 §3.4 补齐）：让用户知道系统"看懂了什么"
+    profile = classify_intent(state.user_query)
+    if profile.anchor_fields:
+        lines.append(
+            f"已识别锚点：{'、'.join(profile.anchor_fields)}"
+            "（但不足以确定完整查询口径）。"
+        )
+    else:
+        lines.append("未在语义目录中识别到任何指标或维度。")
     lines.append("系统仅在能够确定查询口径时作答——宁可拒答，也不猜测口径给出可能错误的结果。")
     lines.append("")
     lines.append("**当前支持查询的能力清单：**")

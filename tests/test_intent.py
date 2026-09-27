@@ -83,3 +83,11 @@ def test_dimension_scoped_metric_query_is_unknown():
 
     # 纯指标锚（无维度限定）不受影响
     assert classify_intent("5月GMV是多少").intent == IntentType.METRIC_SCALAR
+
+
+def test_capability_catalog_groups_unit_price_separately():
+    """unit_price 单价不属于金额指标（终审 M4）。"""
+    lines = capability_catalog_lines()
+    money_line = next(line for line in lines if line.startswith("- 金额指标"))
+    assert "unit_price" not in money_line
+    assert any("unit_price" in line for line in lines)  # 仍在清单中（其他分组）
