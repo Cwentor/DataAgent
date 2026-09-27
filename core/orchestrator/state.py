@@ -173,6 +173,19 @@ class AgentState(BaseModel):
     artifacts: list[Artifact] = Field(default_factory=list)
     # 报告
     report: str = ""
+    # 诚实兜底（十八期）：意图不可确定时的拒答原因（区别于 no_data_reason 的
+    # 数据缺失语义）；非空时 critic/synthesize 短路直达诚实拒答报告
+    blocked_reason: str | None = Field(
+        default=None, description="无法作答的原因（意图不可确定/意图-DSL 错位）"
+    )
+    # 报告产出方式："llm"（LLM 规划成功）| "heuristic"（兜底接管，报告需降级标注）| "blocked"（拒答）
+    answered_by: str = Field(default="", description="规划产出方式（降级可见化标注依据）")
+    # LLM Planner 回传的意图（仅诊断可观测；L3 守卫不依赖它，用确定性 L1 重判）
+    intent_type: str | None = Field(
+        default=None,
+        description="LLM 回传意图类型（diagnostic/cardinality/metric_scalar/unknown）",
+    )
+    intent_anchors: list[str] = Field(default_factory=list, description="LLM 回传意图锚定字段")
     # 控制与韧性
     phase: Phase = "plan"
     error_context: ErrorContext = Field(default_factory=ErrorContext)
