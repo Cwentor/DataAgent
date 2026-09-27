@@ -509,6 +509,37 @@ def _scalar_dsl(anchors: tuple[str, ...], query: str) -> dict[str, Any] | None:
     }
 
 
+def _intent_dsl_mismatch(query: str, dsl_payload: dict[str, Any]) -> str | None:
+    """L3 意图-DSL 一致性守卫（十八期）。
+
+    判定依据 = intent 模块对 user_query 的确定性 L1 硬匹配（不信任 LLM
+    回传意图）；confidence != hard 时不启用（无判定依据，交由既有契约
+    校验与反思器护栏）。CARDINALITY 只限制聚合与投影目标（metrics 必须
+    且只能是锚定维度上的单一 count_distinct），过滤条件不受限制——
+    "有退款的省份有多少个"的 refund_amount>0 WHERE 合法。
+    """
+    profile = classify_intent(query)
+    if profile.confidence != "hard":
+        return None
+    metrics = [m for m in (dsl_payload.get("metrics") or []) if isinstance(m, dict)]
+    if profile.intent == IntentType.CARDINALITY:
+        if (
+            len(metrics) == 1
+            and metrics[0].get("agg") == "count_distinct"
+            and metrics[0].get("field") in profile.anchor_fields
+        ):
+            return None
+        return "基数类问题的查询目标必须是锚定维度上的 count_distinct 聚合"
+    if profile.intent == IntentType.METRIC_SCALAR:
+        outside = [
+            str(m.get("field")) for m in metrics if m.get("field") not in profile.anchor_fields
+        ]
+        if outside:
+            return f"指标问题锚定 {list(profile.anchor_fields)}，查询出现锚外聚合字段 {outside}"
+        return None
+    return None
+
+
 def _inherit_overview_scope(
     dsl: dict[str, Any], overview_variants: list[dict[str, Any]]
 ) -> tuple[dict[str, Any], list[str]]:
@@ -719,6 +750,18 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
     produced: list[str] = []
     blocked_windows: list[str] = []
     for i, dsl_payload in enumerate(dsl_variants):
+        # L3 意图-DSL 错位守卫（十八期）：拦截即不执行，置拒答原因
+        mismatch = _intent_dsl_mismatch(state.user_query, dsl_payload)
+        if mismatch:
+            state = state.apply(blocked_reason=mismatch, answered_by="blocked")
+            events.emit_tool_end(
+                "futurebi_dsl_query",
+                step.id,
+                ok=False,
+                duration_ms=0.0,
+                error=mismatch,
+            )
+            continue
         name = f"{step.id}_v{i}" if len(dsl_variants) > 1 else step.id
         events.emit_tool_start("futurebi_dsl_query", step.id, {"dataset": name, "dsl": dsl_payload})
         started = time.perf_counter()
@@ -802,8 +845,9 @@ def dsl_query_node(state: AgentState) -> AgentState:
     """取数节点：顺次执行待完成的 query 步骤（需求 §2.A DSLQueryNode）。"""
     updated = state
     for step in [s for s in updated.plan_steps if s.kind == "query" and s.status == "pending"]:
-        if updated.no_data_reason:
-            # 时间域守卫已拦截：域外时段的窗口重取多少次都是必然空集，
+        if updated.no_data_reason or updated.blocked_reason:
+            # 时间域守卫已拦截 / 意图-DSL 错位守卫已拦截：剩余取数无意义
+            # （域外时段重取多少次都是必然空集；错位 DSL 重取只会再次被拦），
             # 跳过剩余取数步骤（标记 done，无产物），交由 critic 短路诚实报告
             updated.plan_steps = [
                 s.model_copy(update={"status": "done"}) if s.id == step.id else s

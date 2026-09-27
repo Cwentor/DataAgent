@@ -909,3 +909,68 @@ def test_run_agent_blocked_report_skips_llm_synthesis(tmp_path, monkeypatch):
     assert trace.phase == "done"
     assert "无法作答" in trace.report
     assert llm_report_calls == []  # 短路实锤：综合层未被触碰
+
+
+def test_intent_dsl_guard_unit():
+    """L3 守卫：基数+金额聚合拦截；合法 WHERE 不受限（Review Focus 2）。"""
+    from core.orchestrator.nodes import _intent_dsl_mismatch
+
+    bad = {
+        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "filters": [],
+    }
+    assert _intent_dsl_mismatch("有多少个省份", bad) is not None
+
+    legal = {
+        "metrics": [
+            {"kind": "aggregate", "field": "province", "agg": "count_distinct", "alias": "province_count"}
+        ],
+        "filters": [{"field": "refund_amount", "operator": "gt", "value": 0}],
+    }
+    assert _intent_dsl_mismatch("有退款的省份有多少个", legal) is None
+
+    metric_bad = {
+        "metrics": [{"kind": "aggregate", "field": "refund_amount", "agg": "sum", "alias": "refund_amount"}],
+        "filters": [],
+    }
+    assert _intent_dsl_mismatch("5月订单量是多少", metric_bad) is not None
+    assert _intent_dsl_mismatch("帮我看看最近情况", bad) is None  # UNKNOWN 不启用守卫
+
+
+def test_run_agent_guard_blocks_llm_misaligned_dsl(tmp_path, monkeypatch):
+    """LLM 规划出'基数意图+金额查询'的错位 DSL => 拦截不执行，拒答报告。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        nodes,
+        "_llm_json",
+        lambda llm, system, user: {
+            "clarification": None,
+            "steps": [
+                {
+                    "id": "s1",
+                    "goal": "取GMV",
+                    "kind": "query",
+                    "depends_on": [],
+                    "dsl": {
+                        "metrics": [
+                            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        ],
+                        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                        "time_filter": {
+                            "range_type": "absolute",
+                            "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
+                        },
+                    },
+                },
+                {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+            ],
+        },
+    )
+    trace = run_agent("有多少个省份", session_id="guardq")
+    assert trace.phase == "done"
+    assert "无法作答" in trace.report
+    assert "万元" not in trace.report
