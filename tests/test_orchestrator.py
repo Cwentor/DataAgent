@@ -1106,3 +1106,112 @@ def test_scalar_answer_includes_default_scope_note(tmp_path, monkeypatch):
     assert trace.phase == "done"
     assert "2024-05-01" in trace.report
     assert "成功支付" in trace.report or "SUCCESS" in trace.report
+
+
+# --------------------------------------------------------------------------- #
+# 二期 M1/M2：守卫审计面完整化 + code_exec 对 blocked 短路
+# --------------------------------------------------------------------------- #
+def test_guard_intercept_full_audit(tmp_path, monkeypatch):
+    """L3 拦截路径审计面完整：tool_start/end 配对、ok=False（终审 M1）。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        nodes,
+        "_llm_json",
+        lambda llm, system, user: {
+            "clarification": None,
+            "steps": [
+                {
+                    "id": "s1",
+                    "goal": "取GMV",
+                    "kind": "query",
+                    "depends_on": [],
+                    "dsl": {
+                        "metrics": [
+                            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        ],
+                        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                        "time_filter": {
+                            "range_type": "absolute",
+                            "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
+                        },
+                    },
+                },
+                {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+            ],
+        },
+    )
+    events: list[dict] = []
+    trace = run_agent("有多少个省份", session_id="guardaudit", on_event=events.append)
+    assert trace.phase == "done"
+    starts = [
+        e
+        for e in events
+        if e["event"] == "tool_start" and e["payload"]["tool"]["name"] == "futurebi_dsl_query"
+    ]
+    ends = [
+        e
+        for e in events
+        if e["event"] == "tool_end" and e["payload"]["tool"]["name"] == "futurebi_dsl_query"
+    ]
+    assert len(starts) == len(ends) == 1  # 配对实锤（此前孤儿 tool_end）
+    assert ends[0]["payload"]["tool"]["error"]
+    # 步骤轨迹 ok=False（此前恒 True）
+    assert all(not s["ok"] for s in trace.steps if s["tool"] == "execute_dsl_query")
+
+
+def test_code_exec_skipped_when_blocked(tmp_path, monkeypatch):
+    """拒答路径零沙箱执行（终审 M2）：blocked 后 analyze 步骤不跑沙箱。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        nodes,
+        "_llm_json",
+        lambda llm, system, user: {
+            "clarification": None,
+            "steps": [
+                {
+                    "id": "s1",
+                    "goal": "取GMV",
+                    "kind": "query",
+                    "depends_on": [],
+                    "dsl": {
+                        "metrics": [
+                            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        ],
+                        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                        "time_filter": {
+                            "range_type": "absolute",
+                            "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
+                        },
+                    },
+                },
+                {
+                    "id": "s2",
+                    "goal": "沙箱分析",
+                    "kind": "analyze",
+                    "depends_on": ["s1"],
+                    "dsl": None,
+                    "code": "save_summary(title='x', metrics={}, table={'columns': [], 'rows': []}, findings=[], extra={})",
+                },
+            ],
+        },
+    )
+    sandbox_calls: list[str] = []
+    original = nodes.run_code
+
+    def _spy(code, workspace, name="code"):
+        sandbox_calls.append(name)
+        return original(code, workspace, name=name)
+
+    monkeypatch.setattr(nodes, "run_code", _spy)
+    trace = run_agent("有多少个省份", session_id="guardskip")
+    assert trace.phase == "done"
+    assert "无法作答" in trace.report
+    assert sandbox_calls == []  # 拒答路径零沙箱执行
