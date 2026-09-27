@@ -53,12 +53,25 @@ def test_agentstate_extra_forbid_unchanged():
 # ---------------------------------------------------------------------------
 
 
-def test_clarify_interrupt_and_resume_roundtrip():
+def test_clarify_interrupt_and_resume_roundtrip(monkeypatch):
     """clarify 中断 -> Command(resume) 恢复：同一原语，gate 节点无副作用。
 
-    触发语料用确定性规则可命中澄清的问题（<12 字符且含指标词，见 clarify_node）。
+    十八期：clarify 唯一来源为 Planner clarification 契约（离线字符规则
+    退役，"什么是销售额？"现为硬锚标量不再澄清）——mock planner 首轮输出
+    clarification、恢复轮产出终态，验证中断-恢复契约与 plan_gate 挂起点
+    （回归锚点：此前 plan→clarify 无图边，clarification 从未真正中断）。
     """
+    import core.orchestrator.langgraph_engine as lge_mod
     from core.orchestrator.langgraph_engine import invoke_langgraph, resume_langgraph
+
+    calls = iter(["clarify", "done"])
+
+    def _planner(state):
+        if next(calls) == "clarify":
+            return state.apply(phase="clarify", clarification="你关注哪个指标？")
+        return state.apply(phase="done", report="恢复后规划完成（mock）")
+
+    monkeypatch.setattr(lge_mod, "planner_node", _planner)
 
     events_seen: list[dict] = []
     state = _minimal_state(user_query="什么是销售额？")
@@ -72,19 +85,6 @@ def test_clarify_interrupt_and_resume_roundtrip():
         thread_id="u1:s1",
         observer=events_seen.append,
     )
-    # clarify 恢复后若产出多步计划，会再遇 plan_review 审批门（M2）——循环批准
-    for _ in range(5):
-        if pending2 is None or pending2.get("kind") != "plan_review":
-            break
-        resumed, pending2 = resume_langgraph(
-            resumed,
-            {
-                "kind": "plan_review",
-                "resume_value": {"action": "approve", "instruction": None},
-            },
-            thread_id="u1:s1",
-            observer=events_seen.append,
-        )
     assert pending2 is None
     assert resumed.phase in {"plan", "query", "analyze", "critique", "synthesize", "done"}
 
@@ -139,12 +139,25 @@ def test_recursion_limit_anchors_termination(monkeypatch):
 
 
 def test_checkpointer_survives_process_restart(tmp_path, monkeypatch):
-    """服务重启后 clarify 挂起仍在：同 thread_id + 同一 sqlite 文件可恢复（Review Focus #5）。"""
+    """服务重启后 clarify 挂起仍在：同 thread_id + 同一 sqlite 文件可恢复（Review Focus #5）。
+
+    十八期：clarify 触发改为 mock planner clarification（见 roundtrip 用例说明）。
+    """
     import sqlite3
 
     from langgraph.checkpoint.sqlite import SqliteSaver
 
+    import core.orchestrator.langgraph_engine as lge_mod
     from core.orchestrator.langgraph_engine import invoke_langgraph, resume_langgraph
+
+    calls = iter(["clarify", "done"])
+
+    def _planner(state):
+        if next(calls) == "clarify":
+            return state.apply(phase="clarify", clarification="你关注哪个指标？")
+        return state.apply(phase="done", report="恢复后规划完成（mock）")
+
+    monkeypatch.setattr(lge_mod, "planner_node", _planner)
 
     db = tmp_path / "ckpt.sqlite"
     saver = SqliteSaver(sqlite3.connect(str(db), check_same_thread=False))
@@ -165,7 +178,7 @@ def test_checkpointer_survives_process_restart(tmp_path, monkeypatch):
         observer=None,
         checkpointer=saver2,
     )
-    # clarify 恢复后产出多步计划 -> 再遇 plan_review 门（M2）：循环批准
+    # clarify 恢复后若产出多步计划，会再遇 plan_review 门（M2）：循环批准
     for _ in range(5):
         if pending2 is None or pending2.get("kind") != "plan_review":
             break

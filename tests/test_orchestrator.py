@@ -988,3 +988,47 @@ def test_heuristic_answer_banner_visible(tmp_path, monkeypatch):
     assert trace.phase == "done"
     assert "查询答案：8" in trace.report
     assert "离线兜底引擎" in trace.report
+
+
+def test_planner_llm_intent_echoed_to_state(monkeypatch):
+    """LLM 回传 intent => 落 state（诊断可观测）；缺失时不阻塞规划。"""
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        nodes,
+        "_llm_json",
+        lambda llm, system, user: {
+            "intent": {"type": "metric_scalar", "anchors": ["order_amount"]},
+            "clarification": None,
+            "steps": [
+                {
+                    "id": "s1",
+                    "goal": "取GMV",
+                    "kind": "query",
+                    "depends_on": [],
+                    "dsl": {
+                        "metrics": [
+                            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        ],
+                        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                        "time_filter": {
+                            "range_type": "absolute",
+                            "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
+                        },
+                    },
+                },
+                {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"], "dsl": None, "code": None},
+            ],
+        },
+    )
+    state = nodes.planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.intent_type == "metric_scalar"
+    assert state.intent_anchors == ["order_amount"]
+    assert state.phase == "query"
+
+    # 无 intent 字段：宽容不阻塞
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: {"clarification": None, "steps": []})
+    state2 = nodes.planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state2.intent_type is None

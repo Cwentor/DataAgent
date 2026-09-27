@@ -350,6 +350,23 @@ def planner_node(state: AgentState) -> AgentState:
             if payload.get("clarification"):
                 return state.apply(phase="clarify", clarification=str(payload["clarification"]))
             steps = _plan_from_llm(payload)
+            # intent 回传（十八期）：仅诊断可观测，宽容消费（缺失/非法不阻塞）；
+            # L3 守卫不依赖它（用 intent 模块确定性重判）
+            intent_payload = payload.get("intent")
+            if isinstance(intent_payload, dict) and intent_payload.get("type") in (
+                "diagnostic",
+                "cardinality",
+                "metric_scalar",
+                "unknown",
+            ):
+                state = state.apply(
+                    intent_type=str(intent_payload["type"]),
+                    intent_anchors=[
+                        str(a)
+                        for a in (intent_payload.get("anchors") or [])
+                        if isinstance(a, str)
+                    ],
+                )
     if steps is None:
         steps = _heuristic_plan(state.user_query)
         planner_used = "heuristic"
