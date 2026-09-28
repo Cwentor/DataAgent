@@ -89,6 +89,9 @@ class UnifiedChatRequest(BaseModel):
     model: str
     temperature: float | None = None
     response_format: ResponseFormat | None = None
+    # 读超时覆盖（秒）：None = 网关默认（settings.PROVIDER_TIMEOUT）；
+    # 报告综合等长文生成调用传更大预算（Task 2 起在适配器内接线生效）
+    timeout: int | None = None
 
 
 class Usage(BaseModel):

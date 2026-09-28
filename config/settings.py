@@ -152,6 +152,12 @@ PROVIDERS_ENC_SECRET: str = os.getenv("PROVIDERS_ENC_SECRET", "")
 # 供应商连通性探测与对话请求的默认超时（秒）
 PROVIDER_TIMEOUT: int = int(os.getenv("PROVIDER_TIMEOUT", "60"))
 
+# 报告综合（Synthesizer）专用读超时（秒）：长文生成耗时 > 常规调用，独立预算；
+# 配置 <=0 视为非法，回落默认 180
+SYNTHESIZER_TIMEOUT: int = int(os.getenv("SYNTHESIZER_TIMEOUT", "180"))
+if SYNTHESIZER_TIMEOUT <= 0:
+    SYNTHESIZER_TIMEOUT = 180
+
 # --------------------------------------------------------------------------- #
 # 审计与结构化日志（P0）—— 见 audit/ 包
 # --------------------------------------------------------------------------- #

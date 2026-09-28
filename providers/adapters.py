@@ -208,6 +208,7 @@ class BaseAdapter(ABC):
         *,
         model: str | None = None,
         json_mode: bool = True,
+        timeout: int | None = None,
     ) -> str:
         """旧形态便捷入口：messages 列表 -> 文本；默认启用 JSON Mode。
 
@@ -217,6 +218,8 @@ class BaseAdapter(ABC):
         温度显式接线 settings.LLM_TEMPERATURE（缺省 0.0）：agent 层全部 LLM
         调用（规划/总结/反思/自愈）的温度由此统一控制，评测确定性锁定
         （eval_runner._lock_determinism）才能真正落到请求层。
+
+        timeout：本次调用读超时覆盖（秒），None 时由适配器回退网关默认。
         """
         from config import settings
 
@@ -226,6 +229,7 @@ class BaseAdapter(ABC):
                 model=model or self.model_id,
                 temperature=settings.LLM_TEMPERATURE,
                 response_format={"type": "json_object"} if json_mode else None,
+                timeout=timeout,
             )
         )
         return resp.content
