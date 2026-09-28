@@ -17,6 +17,11 @@ import pytest
 
 from core.sandbox.api import prepare_workspace, run_code
 from core.sandbox.ast_guard import static_check
+from core.sandbox.backends import (
+    DEFAULT_TIMEOUT_SECONDS,
+    BackendResult,
+    SandboxBackend,
+)
 
 GOOD = """
 df = read_input("sales")
@@ -171,3 +176,102 @@ def test_run_code_echarts_spec_roundtrip(tmp_path):
     result = run_code(code, ws, name="chart")
     assert result.ok, result.error
     assert result.echarts_spec["series"][0]["type"] == "bar"
+
+
+# --------------------------------------------------------------------------- #
+# 后端解析（SANDBOX_BACKEND 配置）：显式传参 > 配置；降级如实留痕
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingBackend(SandboxBackend):
+    """记录型假后端：只验证分发正确性，不写产物（下游协议校验必失败）。"""
+
+    name = "recording"
+
+    def __init__(self):
+        self.called = False
+
+    def is_available(self) -> bool:
+        return True
+
+    def run(
+        self,
+        script_path: Path,
+        workspace: Path,
+        *,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> BackendResult:
+        self.called = True
+        return BackendResult(
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_ms=0.0,
+            backend=self.name,
+            limits_enforced=False,
+        )
+
+
+def test_run_code_explicit_backend_wins(tmp_path):
+    """显式传参优先于 SANDBOX_BACKEND 配置（历史行为逐字不变）。"""
+    ws = _make_workspace(tmp_path)
+    recording = _RecordingBackend()
+    result = run_code("x = 1", ws, backend=recording)
+    assert recording.called
+    assert result.backend == "recording"
+
+
+def test_run_code_backend_config_auto_dispatch(monkeypatch, tmp_path):
+    """SANDBOX_BACKEND=auto 分发到 default_backend() 的探测结果。"""
+    from core.sandbox import api as sandbox_api
+
+    ws = _make_workspace(tmp_path)
+    recording = _RecordingBackend()
+    monkeypatch.setattr("config.settings.SANDBOX_BACKEND", "auto")
+    monkeypatch.setattr(sandbox_api, "default_backend", lambda: recording)
+    result = run_code("x = 1", ws)
+    assert recording.called
+    assert result.backend == "recording"
+
+
+def test_run_code_backend_config_docker_degrades(monkeypatch, tmp_path):
+    """SANDBOX_BACKEND=docker 但 Docker 不可用：如实降级子进程（不静默）。"""
+    from core.sandbox.backends import DockerBackend
+
+    ws = _make_workspace(tmp_path)
+    monkeypatch.setattr("config.settings.SANDBOX_BACKEND", "docker")
+    monkeypatch.setattr(DockerBackend, "is_available", lambda self: False)
+    result = run_code("x = 1", ws)
+    assert result.backend == "subprocess"
+
+
+def test_run_code_backend_config_invalid_fails_fast(monkeypatch, tmp_path):
+    """非法 SANDBOX_BACKEND 配置：显式抛错（拒绝猜测，不静默回退）。"""
+    monkeypatch.setattr("config.settings.SANDBOX_BACKEND", "quantum")
+    ws = _make_workspace(tmp_path)
+    with pytest.raises(ValueError):
+        run_code("x = 1", ws)
+
+
+def test_default_backend_cached_and_clearable(monkeypatch):
+    """Docker 探测结果进程级缓存：多次调用仅探测一次，clear 后重新探测。"""
+    from core.sandbox import backends
+
+    calls: list[int] = []
+
+    def _fake_available(self) -> bool:
+        calls.append(1)
+        return False
+
+    monkeypatch.setattr(backends.DockerBackend, "is_available", _fake_available)
+    backends.clear_default_backend_cache()
+    try:
+        b1 = backends.default_backend()
+        b2 = backends.default_backend()
+        assert b1 is b2
+        assert len(calls) == 1
+        backends.clear_default_backend_cache()
+        backends.default_backend()
+        assert len(calls) == 2
+    finally:
+        backends.clear_default_backend_cache()
