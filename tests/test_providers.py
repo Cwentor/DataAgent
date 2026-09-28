@@ -724,3 +724,127 @@ def test_chat_facade_forwards_timeout():
     result = chat_text(_Fake(), [{"role": "user", "content": "x"}], timeout=180)
     assert result == "ok"
     assert seen["timeout"] == 180
+
+
+def _timeout_stub(captured: dict):
+    """捕获 timeout 实参并返回 OpenAI Chat 形态成功响应的 _http_post 替身。"""
+
+    def stub(url, *, payload, headers, timeout, api_key=None):
+        captured["timeout"] = timeout
+        return 200, {}, json.dumps({"choices": [{"message": {"content": "ok"}}]})
+
+    return stub
+
+
+def test_openai_chat_timeout_defaults_to_settings(monkeypatch):
+    from config import settings
+    from providers.adapters import OpenAIChatAdapter
+    from providers.models import UnifiedChatRequest
+
+    captured: dict = {}
+    monkeypatch.setattr(settings, "PROVIDER_TIMEOUT", 61)  # 与硬编码 60 区分
+    monkeypatch.setattr("providers.adapters._http_post", _timeout_stub(captured))
+    adapter = OpenAIChatAdapter(_provider(), "m-1")
+    adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1"))
+    assert captured["timeout"] == 61
+
+
+def test_dispatching_chat_text_timeout_end_to_end(monkeypatch, tmp_path):
+    """分发代理全链路：chat_text(timeout=180) 经真实适配器落到 _http_post。"""
+    from providers import factory as factory_mod
+    from providers.context import dispatching_adapter, reset_dispatching_adapter
+
+    store = ProviderStore(tmp_path / "providers.json")
+    store.create_provider(
+        {
+            "id": "primary",
+            "name": "A-Primary",
+            "base_url": "https://primary-gw/v1",
+            "api_key": fake_key("primary"),
+            "models": [{"id": "p-default"}],
+        }
+    )
+    isolated = ProviderFactory(store)
+    monkeypatch.setattr(factory_mod, "_default_factory", isolated)
+    reset_dispatching_adapter()
+    captured: dict = {}
+
+    def spy(url, *, payload, headers, timeout, api_key=None):
+        captured["timeout"] = timeout
+        return 200, {}, json.dumps({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("providers.adapters._http_post", spy)
+    proxy = dispatching_adapter()
+    proxy.chat_text([{"role": "user", "content": "q"}], json_mode=False, timeout=180)
+    assert captured["timeout"] == 180
+
+
+def test_openai_chat_timeout_request_override(monkeypatch):
+    from providers.adapters import OpenAIChatAdapter
+    from providers.models import UnifiedChatRequest
+
+    captured: dict = {}
+    monkeypatch.setattr("providers.adapters._http_post", _timeout_stub(captured))
+    adapter = OpenAIChatAdapter(_provider(), "m-1")
+    adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
+    )
+    assert captured["timeout"] == 180
+
+
+def test_anthropic_chat_timeout_override(monkeypatch):
+    from providers.adapters import AnthropicAdapter
+    from providers.models import UnifiedChatRequest
+
+    captured: dict = {}
+
+    def stub(url, *, payload, headers, timeout, api_key=None):
+        captured["timeout"] = timeout
+        return 200, {}, json.dumps({"content": [{"type": "text", "text": "ok"}]})
+
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = AnthropicAdapter(_provider(), "m-1")
+    adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
+    )
+    assert captured["timeout"] == 180
+
+
+def test_gemini_chat_timeout_override(monkeypatch):
+    from providers.adapters import GeminiAdapter
+    from providers.models import UnifiedChatRequest
+
+    captured: dict = {}
+
+    def stub(url, *, payload, headers, timeout, api_key=None):
+        captured["timeout"] = timeout
+        return 200, {}, json.dumps({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
+
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = GeminiAdapter(_provider(), "m-1")
+    adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
+    )
+    assert captured["timeout"] == 180
+
+
+def test_openai_responses_chat_timeout_override(monkeypatch):
+    from providers.adapters import OpenAIResponsesAdapter
+    from providers.models import UnifiedChatRequest
+
+    captured: dict = {}
+
+    def stub(url, *, payload, headers, timeout, api_key=None):
+        captured["timeout"] = timeout
+        return (
+            200,
+            {},
+            json.dumps({"output": [{"content": [{"type": "output_text", "text": "ok"}]}]}),
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIResponsesAdapter(_provider(), "m-1")
+    adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
+    )
+    assert captured["timeout"] == 180
