@@ -395,6 +395,191 @@ def test_plan_review_edit_branch_replans(monkeypatch):
     assert resumed.phase == "done"
 
 
+def _patch_coded_analyze_plan(monkeypatch):
+    """打桩 planner 产 query + analyze(含 LLM 产码) 计划：高危确认门必触发。
+
+    step.code 非空即"模型生成代码"（启发式模板在 code_exec_node 执行时才
+    生成，步骤 code 字段为空）——风险门判定以此区分两类产码来源。
+    """
+    import core.orchestrator.langgraph_engine as lge_mod
+    from core.orchestrator.state import PlanStep
+
+    steps = [
+        PlanStep(id="p1", goal="取上月销售额", kind="query"),
+        PlanStep(
+            id="p2",
+            goal="环比归因",
+            kind="analyze",
+            depends_on=["p1"],
+            code="import pandas\nsummary = {}",
+        ),
+    ]
+    calls: list[int] = []
+
+    def fake_planner(state):
+        calls.append(1)
+        return state.apply(plan_steps=steps, plan_edit_instruction=None, phase=steps[0].kind)
+
+    monkeypatch.setattr(lge_mod, "planner_node", fake_planner)
+    return calls
+
+
+def test_high_risk_gate_l3_interrupts_and_resumes(monkeypatch):
+    """L3 高危确认：plan_review 批准后，含模型产码的 analyze 步骤再挂高危门，
+    approve 放行执行。L3 = 计划确认 + 高危确认两层审批（规格 §5.2）。"""
+    from core.orchestrator.langgraph_engine import (
+        build_langgraph_app,
+        invoke_langgraph,
+        resume_langgraph,
+    )
+
+    _patch_coded_analyze_plan(monkeypatch)
+    _stub_downstream(monkeypatch)
+    app = build_langgraph_app()
+    state, pending = invoke_langgraph(
+        _minimal_state(user_query="分析上月 GMV 归因", autonomy_level="L3"),
+        thread_id="u1:hrA",
+        observer=None,
+        app=app,
+    )
+    assert pending is not None and pending["kind"] == "plan_review"
+
+    approved_plan, pending1 = resume_langgraph(
+        state,
+        {"kind": "plan_review", "resume_value": {"action": "approve", "instruction": None}},
+        thread_id="u1:hrA",
+        observer=None,
+        app=app,
+    )
+    assert pending1 is not None and pending1["kind"] == "high_risk"
+    assert pending1["steps"] and pending1["steps"][0]["id"] == "p2"
+
+    resumed, pending2 = resume_langgraph(
+        approved_plan,
+        {"kind": "high_risk", "resume_value": {"action": "approve", "instruction": None}},
+        thread_id="u1:hrA",
+        observer=None,
+        app=app,
+    )
+    assert pending2 is None
+    assert resumed.phase == "done"
+    assert resumed.high_risk_approved is True
+
+
+def test_high_risk_gate_l3_reject_terminates_honestly(monkeypatch):
+    """L3 高危确认：reject -> 不执行模型产码，phase=done 诚实报告（严禁落入 analyze）。"""
+    from core.orchestrator.langgraph_engine import (
+        build_langgraph_app,
+        invoke_langgraph,
+        resume_langgraph,
+    )
+
+    _patch_coded_analyze_plan(monkeypatch)
+    analyze_calls: list[int] = []
+
+    def fake_analyze(state):
+        analyze_calls.append(1)
+        done = [
+            s.model_copy(update={"status": "done"}) if s.kind == "analyze" else s
+            for s in state.plan_steps
+        ]
+        return state.apply(plan_steps=done, phase="critique")
+
+    _stub_downstream(monkeypatch)
+    import core.orchestrator.langgraph_engine as lge_mod
+
+    monkeypatch.setattr(lge_mod, "code_exec_node", fake_analyze)
+    app = build_langgraph_app()
+    state, _pending_plan = invoke_langgraph(
+        _minimal_state(user_query="分析上月 GMV 归因", autonomy_level="L3"),
+        thread_id="u1:hrB",
+        observer=None,
+        app=app,
+    )
+    # 先批准计划，随后挂高危门
+    approved_plan, pending1 = resume_langgraph(
+        state,
+        {"kind": "plan_review", "resume_value": {"action": "approve", "instruction": None}},
+        thread_id="u1:hrB",
+        observer=None,
+        app=app,
+    )
+    assert pending1 is not None and pending1["kind"] == "high_risk"
+
+    resumed, pending2 = resume_langgraph(
+        approved_plan,
+        {"kind": "high_risk", "resume_value": {"action": "reject", "instruction": None}},
+        thread_id="u1:hrB",
+        observer=None,
+        app=app,
+    )
+    assert pending2 is None
+    assert resumed.phase == "done"
+    assert "拒绝" in (resumed.report or "")
+    assert analyze_calls == []  # 被拒代码严禁执行
+
+
+def test_high_risk_gate_l2_transparent(monkeypatch):
+    """L2 不受高危门影响：无挂起直达完成（L1/L2 不打断，保持现状）。"""
+    from core.orchestrator.langgraph_engine import (
+        build_langgraph_app,
+        invoke_langgraph,
+        resume_langgraph,
+    )
+
+    _patch_coded_analyze_plan(monkeypatch)
+    _stub_downstream(monkeypatch)
+    app = build_langgraph_app()
+    # L2 会先挂 plan_review；先批准再走完，全程不应出现 high_risk 挂起
+    state, pending = invoke_langgraph(
+        _minimal_state(user_query="分析上月 GMV 归因", autonomy_level="L2"),
+        thread_id="u1:hrC",
+        observer=None,
+        app=app,
+    )
+    assert pending is not None and pending["kind"] == "plan_review"
+    resumed, pending2 = resume_langgraph(
+        state,
+        {"kind": "plan_review", "resume_value": {"action": "approve", "instruction": None}},
+        thread_id="u1:hrC",
+        observer=None,
+        app=app,
+    )
+    assert pending2 is None
+    assert resumed.phase == "done"
+
+
+def test_high_risk_gate_l4_auto_resolves(monkeypatch):
+    """L4 全自动：高危门直通批准，发 auto_resolved 通知事件（降级为通知）。"""
+    from core.orchestrator import events as ev_mod
+    from core.orchestrator.langgraph_engine import build_langgraph_app, invoke_langgraph
+
+    _patch_coded_analyze_plan(monkeypatch)
+    _stub_downstream(monkeypatch)
+    app = build_langgraph_app()
+    events: list[dict] = []
+    # gate 无 _observed 包装（无事件发射纪律），maybe_interrupt 的通知事件走
+    # contextvar——与 run_agent 生产路径一致：调用线程先注册观察者
+    token = ev_mod.set_observer(events.append)
+    try:
+        final, pending = invoke_langgraph(
+            _minimal_state(user_query="分析上月 GMV 归因", autonomy_level="L4"),
+            thread_id="u1:hrD",
+            observer=None,
+            app=app,
+        )
+    finally:
+        ev_mod.reset_observer(token)
+    assert pending is None
+    assert final.phase == "done"
+    auto = [
+        e
+        for e in events
+        if e.get("event") == "hitl_request" and e.get("payload", {}).get("kind") == "high_risk"
+    ]
+    assert auto and auto[0]["payload"]["auto_resolved"] is True
+
+
 def test_route_from_plan_gate_empty_plan_routing():
     """clarify resume 后的直连路由（终审 Important #3）。
 

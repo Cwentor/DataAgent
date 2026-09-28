@@ -405,6 +405,9 @@ def planner_node(state: AgentState) -> AgentState:
         phase="query",
         scratchpad=[f"[planner] {planner_used}"],
         answered_by=planner_used,
+        # 新计划 = 新的执行授权需求：高危确认锚复位（重规划后的 analyze 步骤
+        # 需重新征求 L3 用户批准，严禁复用旧计划的授权放行新代码）
+        high_risk_approved=False,
     )
 
 

@@ -850,6 +850,14 @@
             planSteps: (p.hitl && p.hitl.plan_steps) || [],
             summary: (p.hitl && p.hitl.summary) || ""
           });
+        } else if (p.kind === "high_risk") {
+          // L3 高危确认卡（approve/reject，复用审批卡 data-plan-action 契约）
+          AgentStore.setHitl({ highRisk: true, question: (p.hitl && p.hitl.question) || "", steps: (p.hitl && p.hitl.steps) || [] });
+          AgentStore.pushTimeline({
+            kind: "high_risk",
+            question: (p.hitl && p.hitl.question) || "",
+            steps: (p.hitl && p.hitl.steps) || []
+          });
         } else {
           // kind 缺省回退 clarify 卡（旧服务端兼容）
           AgentStore.setHitl({

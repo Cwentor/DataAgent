@@ -107,6 +107,20 @@ class AgentRun:
                         "resume_token": token,
                     },
                 }
+            elif state.phase == "high_risk":
+                # L3 高危确认：沙箱代码执行确认卡（approve/reject，复用审批卡契约）
+                payload = {
+                    "kind": "high_risk",
+                    "hitl": {
+                        "question": "分析步骤将执行由模型生成的代码（沙箱隔离运行），是否确认执行？",
+                        "steps": [
+                            {"id": s.id, "goal": s.goal}
+                            for s in state.plan_steps
+                            if s.kind == "analyze" and s.status == "pending" and s.code
+                        ],
+                        "resume_token": token,
+                    },
+                }
             else:
                 payload = {
                     "kind": "clarify",

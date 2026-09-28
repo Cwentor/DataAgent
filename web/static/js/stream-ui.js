@@ -17,7 +17,7 @@
   var TOOL_LABELS = AgentProtocol.TOOL_LABELS;
   var VIRTUALIZE_THRESHOLD = 50; // 超过该条数后启用窗口化（规格：>50 步虚拟化）
   var BUFFER = 6;                // 视口上下各多渲染的条目数
-  var EST_H = { user: 44, plan: 150, tool: 46, reflection: 36, hitl: 150, plan_review: 190, manifest: 90, done: 52, error: 44, interrupt: 48 };
+  var EST_H = { user: 44, plan: 150, tool: 46, reflection: 36, hitl: 150, plan_review: 190, high_risk: 170, manifest: 90, done: 52, error: 44, interrupt: 48 };
 
   var TOOL_BADGES = {
     futurebi_dsl_query: { cls: "dsl", text: "DSL" },
@@ -139,6 +139,39 @@
       list.appendChild(li);
     });
     card.appendChild(list);
+    return card;
+  }
+
+    function elHighRisk(item) {
+    var card = document.createElement("div");
+    // 复用 plan-review-card class：bindHitlCard 按 data-plan-action 契约绑定按钮
+    card.className = "hitl-card plan-review-card high-risk-card";
+    var head = document.createElement("div");
+    head.className = "hitl-q";
+    head.textContent = "⚠ 高危操作确认：" + (item.question || "将执行模型生成的代码");
+    card.appendChild(head);
+    var list = document.createElement("ul");
+    list.className = "plan-steps";
+    (item.steps || []).forEach(function (step) {
+      var li = document.createElement("li");
+      li.textContent = "[analyze] " + (step.goal || step.id || "");
+      list.appendChild(li);
+    });
+    card.appendChild(list);
+    var actions = document.createElement("div");
+    actions.className = "hitl-options";
+    [
+      { action: "approve", text: "确认执行" },
+      { action: "reject", text: "拒绝" }
+    ].forEach(function (a) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "hitl-pill";
+      btn.setAttribute("data-plan-action", a.action);
+      btn.textContent = a.text;
+      actions.appendChild(btn);
+    });
+    card.appendChild(actions);
     return card;
   }
 
@@ -401,6 +434,7 @@
     if (item.kind === "reflection") { return elReflection(item); }
     if (item.kind === "hitl") { return elHitl(item); }
     if (item.kind === "plan_review") { return elPlanReview(item); }
+    if (item.kind === "high_risk") { return elHighRisk(item); }
     if (item.kind === "manifest") { return elManifest(item); }
     if (item.kind === "done") { return elDone(item); }
     if (item.kind === "error") { return elError(item); }

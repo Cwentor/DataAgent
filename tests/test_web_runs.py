@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from core.orchestrator.state import AgentState, PlanStep
 from web.runs import AgentRun, RunRegistry
 
 
@@ -318,3 +319,34 @@ def test_concurrent_append_thread_safe():
     assert seqs == sorted(seqs)
     assert len(set(seqs)) == len(seqs)
     assert seqs[0] == 1 and seqs[-1] == 800
+
+
+def test_set_paused_high_risk_payload():
+    """L3 高危确认挂起：hitl_request 带 kind=high_risk + 待确认产码步骤 + resume_token。"""
+    run = AgentRun("run-hr", "alice", "webui:t1")
+    state = AgentState(
+        user_query="分析上月 GMV 归因",
+        session_id="s1",
+        turn_id="t1",
+        phase="high_risk",
+        autonomy_level="L3",
+        plan_steps=[
+            PlanStep(id="p1", goal="取数", kind="query", status="done"),
+            PlanStep(
+                id="p2",
+                goal="环比归因",
+                kind="analyze",
+                status="pending",
+                code="import pandas",
+            ),
+        ],
+    )
+    run.set_paused(state, "hitl-test-token")
+    with run._cond:
+        events = [e for _, e in run._events if e["event"] == "hitl_request"]
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["kind"] == "high_risk"
+    hitl = payload["hitl"]
+    assert hitl["resume_token"] == "hitl-test-token"
+    assert [s["id"] for s in hitl["steps"]] == ["p2"]  # 仅含 pending 的产码步骤

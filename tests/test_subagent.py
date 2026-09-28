@@ -97,3 +97,37 @@ def test_subagent_budget_hard_cap(monkeypatch):
     )
     report = run_subagent(task, thread_id="u1:s1:sub:t5", observer=None)
     assert report.status == "timeout"
+
+
+def test_task_allows_builtin_capability_run_code():
+    """内置能力名 run_code 属于合法白名单（沙箱代码执行可在任务卡授权）。"""
+    task = SubagentTask(task_id="t6", goal="g", allowed_tools=["run_code"])
+    assert task.allowed_tools == ["run_code"]
+
+
+def test_allowed_tools_gates_query_steps(monkeypatch):
+    """白名单不含查询能力：query 步骤执行路径被裁剪，findings 如实披露拒绝原因。"""
+    monkeypatch.setattr("config.settings.LLM_API_KEY", "")
+    task = SubagentTask(
+        task_id="t7",
+        goal="2024年6月成功订单的总销售额(GMV)是多少？",
+        allowed_tools=["run_code"],
+        budget=SubagentBudget(max_steps=8, timeout_seconds=120),
+    )
+    report = run_subagent(task, thread_id="u1:s1:sub:t7", observer=None)
+    assert report.status in {"done", "failed", "timeout"}
+    assert any("未授权" in f and "已跳过" in f for f in report.findings)
+
+
+def test_allowed_tools_with_query_capability_executes(monkeypatch):
+    """白名单含查询类工具：query 步骤正常放行，findings 不含数据查询拒绝披露。"""
+    monkeypatch.setattr("config.settings.LLM_API_KEY", "")
+    task = SubagentTask(
+        task_id="t8",
+        goal="2024年6月成功订单的总销售额(GMV)是多少？",
+        allowed_tools=["query_metric"],
+        budget=SubagentBudget(max_steps=8, timeout_seconds=120),
+    )
+    report = run_subagent(task, thread_id="u1:s1:sub:t8", observer=None)
+    assert report.status in {"done", "failed", "timeout"}
+    assert not any("未授权数据查询" in f for f in report.findings)
