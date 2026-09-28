@@ -40,7 +40,7 @@ Responses、Anthropic Messages），经 `web.service.run_query` 携带 `provider
 
 ## CI
 
-`.github/workflows/ci.yml` 在 push 与 pull request 中运行：
+`.github/workflows/ci.yml` 在 push（master）、pull request 与每日定时中运行：
 
 - black 格式检查与 ruff 静态检查；
 - pytest 全量测试；

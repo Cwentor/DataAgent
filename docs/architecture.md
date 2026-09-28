@@ -7,7 +7,7 @@ DataAgent 在"受控 DSL → 确定性 SQL"核心链路之上，叠加图式编�
 ```mermaid
 flowchart LR
     U[用户自然语言] --> WEB[Agent 对话流工作台 / SSE 流式]
-    WEB --> ORCH{编排器<br>StateGraph 六节点}
+    WEB --> ORCH{编排器<br>LangGraph 六节点}
     ORCH -->|规划 + 枚举 profiling| AG[意图路由 +<br>LLM / 启发式 Agent]
     ORCH -->|取数| QRY[受控查询链路<br>执行前审计 + 结果断言]
     ORCH -->|分析| SBX[沙箱代码解释器]
@@ -42,7 +42,7 @@ flowchart LR
 | GuardrailAgent | 执行前安全与执行计划审计 | 裸 SQL 网关四层防线 + 执行前静态审计（笛卡尔积/只读结构 REJECTED、无界输出 WARNING）+ EXPLAIN ANALYZE 扫描熔断 | `core/retrieval/guardrails.py`、`exec/audit.py`、`exec/guards.py` |
 | DataQAAgent | 结果断言与数据质量质检 | 四类确定性质检（空结果/NULL 率/负值/维度唯一性），双取数链路同源 | `core/retrieval/quality.py`、`tools/builtins/_query_core.py` |
 | VizAgent | 图表渲染与叙事 | 确定性图表推荐（number/line/bar/pie/pivot/table + ECharts option 契约）+ 商业分析师四段式报告 | `present/viz.py`、`core/orchestrator/nodes.py`（synthesize） |
-| Orchestrator | Chain-of-Delegation 主编排 | StateGraph 条件边（chain 委托）+ critic 重规划 ≤3（evaluator-optimizer 有界修复）+ clarify HITL 检查点 + 事件总线审计轨迹 | `core/orchestrator/` |
+| Orchestrator | Chain-of-Delegation 主编排 | LangGraph 条件边（chain 委托）+ critic 重规划 ≤3（evaluator-optimizer 有界修复）+ interrupt 泛化审批门（clarify / plan_review）+ L1-L4 自主性分级 + Subagent fan-out + 事件总线审计轨迹 | `core/orchestrator/` |
 
 ## 分层职能架构图
 
@@ -93,7 +93,7 @@ flowchart TB
 
     subgraph L7[存储与沙箱层]
         DB[(DuckDB 数仓)]
-        SBX2[沙箱代码解释器<br>AST 守卫 + 限权 runner<br>Docker / 子进程后端]
+        SBX2[沙箱代码解释器<br>AST 守卫 + 限权 runner<br>子进程默认 / Docker 可插拔]
         PQ[(ParquetRef<br>workspace/inputs)]
     end
 
@@ -174,7 +174,7 @@ flowchart LR
 - **执行前审计门**：编译产物 SQL 在执行前经静态审计（笛卡尔积 / 只读结构 REJECTED 熔断、无界输出 WARNING 轨迹）——审计作为编译器不变式防御，REJECTED 原因进入自愈上下文。
 - **结果断言层**：执行后、展示前对原始结果做四类确定性质检，发现随 ParquetRef 审计面全链路可见（事件 / critic / 报告 / 日志），不自动改写路由。
 - **受控自愈**：编译/执行报错与审计拒绝喂回重写（web 链路 ≤ `SQL_SELF_HEAL_MAX_RETRIES`，编排链路重规划 ≤3）；重规划时错误上下文注入 Planner——自愈是针对性修正而非盲重试。
-- **沙箱隔离**：沙箱代码解释器经 AST 静态守卫 + 限权 runner（模块白名单 import、workspace 受限 open）+ 可插拔后端（Docker `--net=none --cap-drop=ALL` 强隔离 / 子进程兜底）执行；取数结果 PII 脱敏后物化为 ParquetRef（sha256 可审计），沙箱零网络、零 DB socket，聚合矩阵 ≤100 行防数据外泄。
+- **沙箱隔离**：沙箱代码解释器经 AST 静态守卫 + 限权 runner（模块白名单 import、workspace 受限 open）+ 可插拔后端（默认子进程，可插拔 Docker `--net=none --cap-drop=ALL` 强隔离）执行；取数结果 PII 脱敏后物化为 ParquetRef（sha256 可审计），沙箱零网络、零 DB socket，聚合矩阵 ≤100 行防数据外泄。
 - **可追溯交付**：查询结果同时提供 DSL、SQL、中文解释、可视化建议、审计记录与数据质检发现。
 
 ## 技术栈
@@ -184,11 +184,11 @@ flowchart LR
 | 语言 | Python 3.11+（项目环境使用 Python 3.12） |
 | 数据校验 | Pydantic V2 |
 | 本地数仓 | DuckDB |
-| 图式编排 | StateGraph 六节点（条件边 + HITL 中断恢复） |
+| 图式编排 | LangGraph 单引擎（十七期 M4 收敛）：六节点 + interrupt 泛化 + checkpointer（`ORCHESTRATOR_CHECKPOINT_DB` 可选 SQLite 落盘） |
 | 静态审计 | sqlglot AST（只读结构 / 笛卡尔积 / 无界输出） |
-| 沙箱后端 | Docker 强隔离 / 子进程兜底（可插拔） |
+| 沙箱后端 | 子进程默认 + Docker 强隔离可插拔（`--net=none --cap-drop=ALL`） |
 | 模型接入 | 多供应商网关：OpenAI Chat / Responses、Anthropic、Gemini 协议适配 |
-| Web | Python 标准库 `http.server` + 原生 JS Agent 对话流工作台（vendored ECharts / PrismJS，零前端框架） |
+| Web | FastAPI + uvicorn（十七期 M4 单引擎收敛）+ 原生 JS Agent 对话流工作台（vendored ECharts / PrismJS，零前端框架） |
 | 质量 | pytest、black、ruff、Golden Dataset |
 
 ## 全链路能力
@@ -198,7 +198,7 @@ flowchart LR
 | 语义 | 聚合、比率、时间过滤、窗口指标、日期补零、分组 Top-N | `semantic/` |
 | Agent | LLM / 启发式双路径、意图路由、RAG、澄清与多轮槽位回填、观察驱动重规划、对比分解综合、反思层、自愈错误上下文注入 | `agent/` |
 | 诚实兜底 | 意图分类器（`FieldMeta.aliases` 词表硬匹配）、兜底准入制与诚实拒答、L3 意图-DSL 错位守卫、Grounding 定向重试闭环（重写 1 次 → 降级确定性渲染）、选项式澄清 | `core/orchestrator/intent.py`、`grounding.py`、`nodes.py` |
-| 编排 | StateGraph 六节点、步骤 DAG 计划、HITL 澄清中断恢复、反思重规划 ≤3 次自愈（错误上下文感知）、九类 SSE 事件 | `core/orchestrator/` |
+| 编排 | LangGraph 单引擎六节点、步骤 DAG 计划、interrupt 泛化（clarify / plan_review / high_risk 审批门）、L1-L4 自主性分级（L3 含沙箱代码执行高危确认）、Subagent fan-out（预算硬顶 + 工具白名单执行路径裁剪）、反思重规划 ≤3 次自愈（错误上下文感知）、checkpointer 可选落盘、九类 SSE 事件 | `core/orchestrator/` |
 | 取数 | DSL 管道 typed Tool 化、PII 脱敏（列名启发式 + 值形态正则）、ParquetRef 物化（audit 审计面）、裸 SQL 网关守卫、动态 profiling（低基数字段枚举值） | `core/retrieval/` |
 | 质检 | DataQA 四类结果断言（空结果 / NULL 率 / 负值 / 维度唯一性），编排与 web 双链路同源，发现分级留痕 | `core/retrieval/quality.py` |
 | 执行前审计 | 笛卡尔积 / 只读结构 REJECTED 熔断、无界输出 WARNING 轨迹（GuardrailAgent 角色） | `exec/audit.py` |

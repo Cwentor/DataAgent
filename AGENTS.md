@@ -81,18 +81,22 @@ python -m web.server 8000
 ```
 semantic/   语义目录 + DSL 契约（Single Source of Truth）
 compiler/   DSL -> SQL 确定性编译器
-agent/      NL -> DSL Agent（LLM + 启发式兜底）
-exec/       SQL 执行层（P0/P1 资源治理：执行前审计门 / 超时取消 / 扫描行数熔断 / LIMIT 硬上限）
-eval/       Golden 评测骨架与用例
+agent/      NL -> DSL Agent（LLM + 启发式兜底 + 意图路由 + 多轮记忆 + 多工具调度）
+exec/       SQL 执行层（P0/P1 资源治理：执行前审计门 / 超时取消 / 扫描行数熔断 / LIMIT 硬上限 /
+            只读连接池 / 查询结果缓存）
+eval/       Golden 评测骨架与用例（oracle / agent 双模式）+ 意图路由评测（intent_eval）
 mock/       确定性 mock 数仓（DuckDB）
 present/    展示层（解释 + 可视化推荐）
-security/   权限控制（表级/列级/行级 RLS）
+security/   权限控制（表级/列级/行级 RLS + 生成前作用域收窄）
+auth/       统一身份认证（JWT + Session + 登录限流）
+audit/      审计快照 + 结构化日志 + 可观测性指标（/api/metrics）
+persistence/ 可选 SQLite KV 状态外置（Session / 澄清槽位 / 限流共享）
 core/       Data Agent 核心（企业级升级层，见下方四包说明）
 providers/  多模型供应商网关（四协议适配 / API Key 加密存储 / 连通性探测）
-config/     全局配置
+config/     全局配置（settings.py + semantic.json + policies.json + providers.json）
 tests/      单元测试
 tools/      生产工具包（工具注册中心、内置工具等）
-web/        Web 可视化 UI（service + server + static 前端）
+web/        Web 服务与工作台（FastAPI 服务 + service 编排链路 + static 前端）
 ```
 
 ### core/ 四包（Data Agent 升级层）
@@ -104,18 +108,22 @@ core/retrieval/     检索门面：DSL 管道 typed Tool 化（execute_dsl_query
                     DataQA 结果断言（空结果 / NULL 率 / 负值 / 维度唯一性，
                     发现随 ParquetRef.audit 输出，编排与 web 双链路同源）
 core/orchestrator/  图式编排（LangGraph 单引擎，M4 收敛）：六节点 + interrupt 泛化
-                    （clarify/plan_review 审批门）+ L1-L4 自主性分级 +
-                    Subagent fan-out（受限任务卡 + 四节点子图 + 预算硬顶）+
-                    反思重规划 ≤3 次自愈 + 自愈错误上下文注入 Planner；
-                    Planner/Coder/Reflector 提示词与 Few-Shot
+                    （clarify/plan_review/high_risk 审批门）+ L1-L4 自主性分级
+                    （L3 = 计划确认 + 沙箱代码执行高危确认；L1 step_confirm 逐节点
+                    确认未落地）+ Subagent fan-out（受限任务卡 + 工具白名单执行路径
+                    裁剪 + 四节点子图 + 预算硬顶）+ 反思重规划 ≤3 次自愈 +
+                    自愈错误上下文注入 Planner；Planner/Coder/Reflector 提示词与
+                    Few-Shot
 core/sandbox/       沙箱代码解释器：AST 静态守卫 + 限权 runner（模块白名单 import +
-                    workspace 受限 open）+ 可插拔后端（Docker 强隔离 / 子进程兜底）
+                    workspace 受限 open）+ 可插拔后端（SANDBOX_BACKEND 配置：默认
+                    subprocess / auto 探测 Docker 优先 / docker 显式强隔离）
 core/skills/        归因技能包：熵下钻 / 指标分解树（乘法对数链式 + 加法）/
                     DTW / Holt-Winters 异常检测 / Shapley 值归因
 ```
 
 依赖方向铁律：orchestrator -> retrieval / sandbox / skills / agent；retrieval 不依赖
-orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy + 标准库。
+orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas + 标准库（pandas 属
+开发依赖，随沙箱数值栈一并安装）。
 
 ## 语言与交互铁律 (Strict Language & Output Rules)
 
@@ -133,7 +141,7 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy + 标准�
 - 所有新增逻辑字段必须登记在 `semantic/catalog.py` 的 `COLUMNS` 白名单，否则编译器拒绝；
 - DSL 模型一律 `extra="forbid"`，Agent 只能产出契约内字段；
 - 评测锚点 `AS_OF_DATE = 2024-06-30`、随机种子 42，保证确定性可复现；
-- DSL 进阶语义：窗口指标 `WindowMetric`（cumsum/moving_avg，需时间维度）、日期补零 `fill_gaps`（需时间维度+明确时间窗口，仅 day/month）、分组 `TopN`（ROW_NUMBER 分区过滤）；编译器对 comparison / top_n / fill_gaps / window 的互斥组合显式抛 `CompileError`；
+- DSL 进阶语义：窗口指标 `WindowMetric`（cumsum/moving_avg，需时间维度）、日期补零 `fill_gaps`（需时间维度+明确时间窗口，支持 day/week/month/quarter）、分组 `TopN`（ROW_NUMBER 分区过滤）；编译器对 comparison / top_n / fill_gaps / window 的互斥组合显式抛 `CompileError`；
 - SQL 执行层（`exec/`）：statement_timeout 用线程看门狗 + `conn.interrupt()` 取消；扫描行数上限用 `EXPLAIN ANALYZE` 预检熔断；LIMIT 硬上限对返回行数做防御性熔断；执行前审计门（`exec/audit.py`）对编译产物做静态审计——笛卡尔积 / 只读结构违规 REJECTED 熔断（`GuardrailRejected`，拒绝原因可自愈）、无界输出 WARNING（真实边界由返回行数硬上限承担，勿升级为 REJECTED）；编译/引擎精确报错会喂回 LLM 重写 DSL 自愈（至少 1 次，`SQL_SELF_HEAL_MAX_RETRIES`），确定性兜底模式下透传原始报错；
 - 结果断言层（`core/retrieval/quality.py`）：执行后、导出前四类确定性质检（空结果 / NULL 率 / 非负指标负值 / 聚合维度组合唯一性），发现随 `ParquetRef.audit`（{guard, qa}）全链路可见（SSE 事件 / critic / 报告质检小节 / 分级日志），不自动否决执行；ratio/window 派生指标不做负值断言；
 - 重规划自愈上下文：编排链路失败回 plan 时，`planner_prompt` 必须注入 `error_context`（最近失败摘要）——严禁让 LLM 盲重试；`error_context=None` 时提示词与旧契约逐字一致；

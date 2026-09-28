@@ -17,12 +17,16 @@ python -m web.server 8000
 | `/api/auth/login` | POST | 用户名/口令换取 JWT 与 Session |
 | `/api/auth/logout` | POST | 吊销服务端 Session |
 | `/api/auth/me` | GET | 返回当前身份 |
-| `/api/query` | POST | 执行受保护的数据查询 |
-| `/api/agent/run` | POST | Data Agent 同步编排（多步分析 + 沙箱 + HITL 恢复） |
+| `/api/query` | POST | 执行受保护的数据查询（支持 `provider_id` / `model_id` 请求级切模型） |
+| `/api/query/async` | POST | 异步提交查询（202 + task_id，线程池执行） |
+| `/api/tasks/{task_id}` | GET | 异步任务状态快照（属主校验 fail-closed，admin 全局可见） |
+| `/api/export/{export_id}` | GET | 导出文件下载（属主校验 + RFC 5987 中文文件名） |
+| `/api/agent/run` | POST | Data Agent 同步编排（多步分析 + 沙箱 + HITL 挂起返回 resume_token，属主绑定） |
+| `/api/v1/agent/runs/{run_id}` | GET | 编排 run 状态快照（轮询；响应剥离 resume_token） |
 | `/api/v1/agent/chat/stream` | GET | Data Agent SSE 流式编排（AgentStreamEvent 事件流） |
 | `/api/settings/providers` | GET / POST | 模型供应商列表（不含 api_key）与创建自定义供应商 |
-| `/api/settings/providers/<id>` | PUT / DELETE | 更新（空 Key 保留原值）与删除（预置供应商拒绝） |
-| `/api/settings/providers/test` | POST | 连通性探测（极小 ping 请求，返回 HTTP 200 + 延时） |
+| `/api/settings/providers/<id>` | PUT / DELETE | 更新（空 Key 保留原值）与删除供应商 |
+| `/api/settings/providers/test` | POST | 连通性探测（极小 ping 请求，业务失败以 HTTP 200 + `success=false` 返回） |
 | `/api/settings/providers/<id>/reveal` | POST | 查看已保存的真实 API Key（显式动作，记审计日志） |
 | `/api/schema/summary` | GET | 语义目录摘要：按物理表分组的可查询字段清单（知识上下文） |
 | `/static/` | GET | Agent 对话流工作台前端（侧边栏会话历史 + 单列对话 + 顶部 Tab 产物视图） |
@@ -59,18 +63,21 @@ curl -X POST http://127.0.0.1:8000/api/query \
 | `step_start` | `step_id / step_title` | 图节点进度指示 |
 | `tool_start` / `tool_end` | `tool: {name, input, output, duration_ms, error}` | 工具手风琴（DSL/沙箱代码展开） |
 | `reflection` | `reflection: {observation, decision, reason}` | 反思/自愈节点 |
-| `hitl_request` | `hitl: {question, options, resume_token}` | 澄清交互卡（`options` 为候选口径 pill 按钮，点击即答复；自由输入兜底） |
+| `hitl_request` | `hitl: {kind, question, options, resume_token}` | `kind=clarify` 澄清交互卡（`options` 为候选口径 pill 按钮，点击即答复；自由输入兜底）；`kind=plan_review` 计划审批卡（批准 / 拒绝 / 附修改指令重规划） |
 | `artifact_emit` | `artifact: {type, title, content}` | 产物入账（报告/图表/代码/数据表，顶部 Tab 徽标计数，随会话绑定持久化） |
 | `done` / `error` | `report` / `error` | 终态收尾（状态灯复位） |
 
-查询参数：`query`（必填）、`human_reply` + `resume_token`（HITL 恢复）、
-`provider_id` + `model_id`（请求级模型切换）。鉴权与 `/api/query` 一致
+查询参数（三种调用形态）：新提问 `query`（必填）+ `thread`（会话线程）+
+`autonomy_level`（L1 每步确认 / L2 计划确认 / L3 高危确认 / L4 全自动）；游标重放
+`run_id` + `after`（断线重连按 seq 续播）；HITL 恢复 `resume_token` + `human_reply`
+（澄清答复）或 `resume_token` + `action=approve|edit|reject` + `instruction`（计划审批，
+edit 须附修改指令）；请求级模型切换 `provider_id` + `model_id`。鉴权与 `/api/query` 一致
 （Bearer JWT / 会话 Cookie）；编排异常收敛为 `error` 事件，不中断 HTTP 流。
 
 ## 模型供应商管理
 
-`/api/settings/providers` 系列端点用于管理工作台的多模型供应商（预置智谱 / OpenAI /
-Anthropic / Gemini，支持 OpenAI Chat、OpenAI Responses、Anthropic、Gemini 四种协议适配）。
+`/api/settings/providers` 系列端点用于管理工作台的多模型供应商（无预置条目，全部由用户
+添加；支持 OpenAI Chat、OpenAI Responses、Anthropic 三种协议，适配层另含 Gemini 协议）。
 设计约束：
 
 - API Key 落盘加密存储（`providers/crypto.py`，Encrypt-then-MAC），列表/详情响应**完全不含

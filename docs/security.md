@@ -5,10 +5,10 @@ DataAgent 采用“生成前约束 + 生成后校验 + 执行层防护”的纵�
 ## 身份认证
 
 - 用户口令使用 PBKDF2-SHA256 哈希并进行恒定时间比对。
-- JWT 使用 HS256，校验签名、过期时间、issuer、audience 与 not-before。
-- Token 只携带用户名 `sub`，principal 与 role 不由客户端声明。
+- JWT 使用 HS256，校验签名、过期时间、issuer、audience、not-before 与 jti。
+- Token 只携带用户名 `sub`，principal 与 role 不由客户端声明，principal 永远由服务端身份映射决定。
 - Session 支持进程内存储，也可通过 `AUTH_SESSION_DB` 使用 SQLite 共享存储。
-- 登录失败按用户名与 IP 进行指数退避限流。
+- 登录失败按用户名与 IP 进行指数退避限流，限流状态可经 `STATE_STORE_DB` 落盘（多 worker 一致）。
 
 ## 数据权限
 
