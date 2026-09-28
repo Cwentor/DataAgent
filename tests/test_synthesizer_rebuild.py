@@ -486,3 +486,59 @@ def test_region_attribution_math_matches_template_logic():
     top = out["items"][0]
     assert top["dimension"] == "北京"
     assert abs(top["share"]) == pytest.approx(8 / 9, abs=0.01)  # 下滑贡献为负份额
+
+
+# --------------------------------------------------------------------------- #
+# 2026-09 报告叙述化：LLM 综合失败 => 降级可见（禁止静默落兜底）
+# --------------------------------------------------------------------------- #
+class _TimeoutLLM:
+    """模拟网关读超时的 LLM 桩（ProviderTimeoutError 为网关标准错误）。"""
+
+    def chat(self, messages):
+        from providers import ProviderTimeoutError
+
+        raise ProviderTimeoutError("请求超时: The read operation timed out")
+
+
+def test_synthesize_timeout_falls_back_with_banner(tmp_path, monkeypatch):
+    """LLM 综合超时 => 兜底报告头部带降级标注与失败原因，数值仍人读渲染。"""
+    from config import settings
+    from core.orchestrator import nodes as orch_nodes
+    from core.orchestrator.nodes import synthesize_node
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(orch_nodes, "_resolve_llm", lambda: _TimeoutLLM())
+    out = synthesize_node(_summary_state(tmp_path))
+    assert "本次报告由确定性模板生成" in out.report
+    assert "ProviderTimeoutError" in out.report
+    assert "66.93 万元" in out.report  # 兜底渲染仍走人读格式
+
+
+def test_synthesize_no_llm_means_no_banner(tmp_path, monkeypatch):
+    """LLM 未配置（离线常态）=> 不打降级标注（未尝试综合不算失败）。"""
+    from config import settings
+    from core.orchestrator import nodes as orch_nodes
+    from core.orchestrator.nodes import synthesize_node
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(orch_nodes, "_resolve_llm", lambda: None)
+    out = synthesize_node(_summary_state(tmp_path))
+    assert "本次报告由确定性模板生成" not in out.report
+    assert "66.93 万元" in out.report
+
+
+def test_synthesize_llm_contract_output_marks_banner(tmp_path, monkeypatch):
+    """LLM 回吐反契约 JSON => 同样视为综合失败，兜底报告带标注。"""
+    import json as _json
+
+    from config import settings
+    from core.orchestrator import nodes as orch_nodes
+    from core.orchestrator.nodes import synthesize_node
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    raw = _json.dumps({"baseline": 669300.0, "current": 616800.0}, ensure_ascii=False)
+    monkeypatch.setattr(orch_nodes, "_resolve_llm", lambda: _FakeLLM(raw))
+    out = synthesize_node(_summary_state(tmp_path))
+    assert "本次报告由确定性模板生成" in out.report
+    assert "反契约" in out.report
+    assert '{"baseline"' not in out.report
