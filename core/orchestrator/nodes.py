@@ -2028,11 +2028,12 @@ def _render_table(table: dict[str, Any], *, limit: int = 10, currency: bool = Tr
 
     - list 行：按 columns 顺序逐列渲染（分省归因矩阵）；dict 行：按 columns
       取键渲染（驱动因子分解）；畸形行（str/None 等非容器）直接跳过；
-    - 单元格按列名分类：比率列（pct/rate/share/ratio/gain）百分比化；
+    - 单元格容器值（dict/list/tuple）一律先经 _metric_human 容器守卫折叠/
+      展开，严禁 repr 直出（Task 6 收尾修复，先于列名分类生效）；标量再按
+      列名分类：比率列（pct/rate/share/ratio/gain）百分比化；
       ``currency=True`` 金额列（gmv/aov/amount/revenue/baseline/current/
       delta/value）万元化；``currency=False`` 计数列（orders/buyers/count/
-      users/quantity/qty）原值渲染；其余列数值两位舍入、非数值原样，
-      容器值经 _metric_human 容器守卫折叠（严禁 repr 直出）；
+      users/quantity/qty）原值渲染；其余列数值两位舍入、非数值原样；
     - 畸形单元格值同样折叠为明细占位，不崩溃、不 dump。
     """
     rows = table.get("rows") or []
@@ -2049,7 +2050,12 @@ def _render_table(table: dict[str, Any], *, limit: int = 10, currency: bool = Tr
             continue  # 畸形行（str/None 等）：跳过，严禁逐字符拆解
         cells: list[str] = []
         for c, v in zip(cols, values, strict=False):  # 行长不齐时容忍截断
-            if _is_ratio_key(c):
+            # 容器守卫先于比率/金额/计数分类（复用 _metric_human 既有守卫
+            # 语义，depth=1 表格单元格）：堵死 _fmt_pct/_fmt_wan/_fmt_count
+            # str 兜底对容器值 repr 直出的残余路径（Task 6 收尾修复）
+            if isinstance(v, (dict, list, tuple)):
+                cells.append(_metric_human(v, c, depth=1))
+            elif _is_ratio_key(c):
                 cells.append(_fmt_pct(v))
             elif currency and any(t in c.lower() for t in _MONEY_TOKENS):
                 cells.append(_fmt_wan(v))
