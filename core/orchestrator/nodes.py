@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import date
 from typing import Any
@@ -1803,34 +1804,33 @@ def _dataset_analyst_markdown(
     return "\n".join(lines), artifact
 
 
-def _summary_analyst_markdown(summary: dict[str, Any]) -> list[str]:
-    """沙箱 summary -> 分析师叙述（数值万元/百分比化，禁 raw dict 直出）。
+def _summary_analyst_markdown(
+    summary: dict[str, Any], state: AgentState | None = None
+) -> list[str]:
+    """沙箱 summary -> 分析师叙述（数值人读化，禁 raw dict 直出）。
 
-    table 行按首列是因子名（factor）还是维度取值自动分流渲染：
-    - factor 形态 => 驱动因子小节（值为比值/人数，不做万元换算）；
-    - 其余 => 维度归因矩阵小节（baseline/current/delta 按万元）。
+    2026-09 报告叙述化修复：
+    - 小节标题人读化（_section_title：中文直用 / 英文 id 回退步骤 goal）；
+    - metrics 嵌套结构（dict/list）一律表格化渲染，严禁 repr 直出；
+    - 数值三分格式化（比率百分比 / 计数原值 / 金额万元，未知数值舍入）。
+    顶层 table 行按首列是因子名（factor）还是维度取值自动分流渲染；
     extra.gain_table（维度信息增益全景）另起小节渲染。
     """
     lines: list[str] = []
-    title = summary.get("title", "")
-    findings = summary.get("findings", [])
-    metrics = summary.get("metrics", {})
-    lines.append(f"### {title}" if title else "### 归因结论")
+    findings = summary.get("findings") or []
+    metrics = summary.get("metrics") or {}
+    lines.append(f"### {_section_title(summary, state)}")
     for f in findings:
         lines.append(f"- {f}")
     if metrics:
-        rendered = "；".join(
-            f"{k} = {_metric_human(v, k)}" if isinstance(v, (int, float)) else f"{k} = {v}"
-            for k, v in metrics.items()
-        )
-        lines.append(f"- 关键指标：{rendered}")
+        lines.extend(_metrics_lines(metrics))
     table = summary.get("table") or {}
     columns = [str(c) for c in (table.get("columns") or [])]
     if columns and columns[0] == "factor":
         lines.append("")
         lines.append("**驱动因子分解（GMV = 买家数 × 人均订单数 × 客单价）**")
         lines.extend(_render_table(table, limit=10, currency=False))
-    else:
+    elif columns:
         lines.extend(_render_table(table, limit=10))
     gain_table = (summary.get("extra") or {}).get("gain_table") or {}
     if gain_table.get("rows"):
@@ -1840,18 +1840,161 @@ def _summary_analyst_markdown(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
-# 非金额指标键名（订单量/人数等计数类）——严禁按万元换算
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _section_title(summary: dict[str, Any], state: AgentState | None = None) -> str:
+    """小节标题人读化三级回退：
+
+    1. title 含中文 => 直接使用（内置模板/Coder 守约场景）；
+    2. title 为英文（step.id 或 Coder 自拟）=> 按 id 匹配计划步骤取中文 goal；
+    3. 仍无法确定 => "归因分析（<原 title>）"（保留可追溯性）；空 => "归因分析"。
+    """
+    title = str(summary.get("title") or "").strip()
+    if title and _CJK_RE.search(title):
+        return title
+    if title and state is not None:
+        for step in state.plan_steps:
+            if step.id == title and (step.goal or "").strip():
+                return step.goal.strip()
+    return f"归因分析（{title}）" if title else "归因分析"
+
+
+def _metrics_lines(metrics: dict[str, Any]) -> list[str]:
+    """metrics -> 人读行：标量单行；dict 值合并对比表；list 值表格化。
+
+    严禁任何嵌套结构 repr 直出（2026-09 报告叙述化修复根因项）。
+    """
+    lines: list[str] = []
+    scalars: dict[str, Any] = {}
+    dicts: dict[str, dict[str, Any]] = {}
+    lists: dict[str, list[Any]] = {}
+    for key, val in metrics.items():
+        if isinstance(val, dict):
+            dicts[key] = val
+        elif isinstance(val, list):
+            lists[key] = val
+        else:
+            scalars[key] = val
+    if scalars:
+        rendered = "；".join(
+            f"{_metric_label(k)} = {_metric_human(v, k)}" for k, v in scalars.items()
+        )
+        lines.append(f"- 关键指标：{rendered}")
+    if dicts:
+        # 同构 dict 值（week1/week2 形态）合并为对比表：行=组名、列=子键并集
+        union: list[str] = []
+        for d in dicts.values():
+            for k in d:
+                if k not in union:
+                    union.append(k)
+        header = ["组"] + [_metric_label(c) for c in union]
+        lines.append("")
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("|" + "|".join([" --- "] * len(header)) + "|")
+        for group, d in dicts.items():
+            cells = [_metric_label(group)] + [
+                _metric_human(d[c], c) if c in d else "—" for c in union
+            ]
+            lines.append("| " + " | ".join(str(x) for x in cells) + " |")
+    for name, rows in lists.items():
+        dict_rows = [r for r in rows if isinstance(r, dict)]
+        if dict_rows:
+            union = []
+            for r in dict_rows:
+                for k in r:
+                    if k not in union:
+                        union.append(k)
+            lines.append("")
+            lines.append(f"**{_metric_label(name)}**")
+            lines.append("| " + " | ".join(_metric_label(c) for c in union) + " |")
+            lines.append("|" + "|".join([" --- "] * len(union)) + "|")
+            for r in dict_rows[:10]:
+                cells = [_metric_human(r[c], c) for c in union if c in r]
+                lines.append("| " + " | ".join(str(x) for x in cells) + " |")
+            if len(dict_rows) > 10:
+                lines.append(f"（仅列示前 10 行，共 {len(dict_rows)} 行）")
+        elif rows:
+            lines.append(f"- {_metric_label(name)}：{'、'.join(str(x) for x in rows)}")
+    return lines
+
+
+# 指标渲染分类 token（键/列名小写包含匹配；判定顺序：比率 -> 计数 -> 金额）。
+# 2026-09 报告叙述化修复：此前仅排除计数键，比率键 gmv_change_pct 被误转
+# "万元"（-0.00 万元）；未知数值键一律舍入原样，严禁臆断单位。
+_RATIO_TOKENS = ("pct", "rate", "share", "ratio", "gain")
 _COUNT_METRIC_KEYS = ("orders", "buyers", "count", "users", "quantity", "qty")
+_MONEY_TOKENS = ("gmv", "aov", "amount", "revenue", "baseline", "current", "delta", "value")
+
+# 高频指标键 -> 中文标签（渲染层兜底映射；语义目录 COLUMNS 能命中的优先查目录）
+_METRIC_LABELS: dict[str, str] = {
+    "baseline": "基期",
+    "current": "现期",
+    "delta": "变化量",
+    "gmv": "GMV",
+    "orders": "订单数",
+    "buyers": "买家数",
+    "orders_per_buyer": "人均订单数",
+    "aov": "客单价",
+    "gmv_change_pct": "GMV 环比",
+    "change_rate": "变化率",
+    "share": "贡献占比",
+    "contribution_share": "贡献占比",
+    "volume_vs_price": "量价定性",
+    "week1": "第 1 周",
+    "week2": "第 2 周",
+    "factor": "因子",
+    "province": "省份",
+    "log_decomp": "对数贡献分解",
+}
+
+
+def _metric_label(key: str) -> str:
+    """指标键 -> 中文标签：语义目录命中优先，渲染层映射兜底，未知键原样。"""
+    try:
+        from semantic.catalog import COLUMNS
+
+        meta = COLUMNS.get(key)
+        if meta is not None and meta.label:
+            return meta.label
+    except Exception:  # 目录不可用不阻断渲染
+        pass
+    return _METRIC_LABELS.get(key, key)
+
+
+def _is_ratio_key(key: str) -> bool:
+    """键/列名是否为比率类（pct/rate/share/ratio/gain）。"""
+    lowered = str(key).lower()
+    return any(token in lowered for token in _RATIO_TOKENS)
+
+
+def _fmt_count(value: Any) -> str:
+    """计数值渲染：整数值不带小数，浮点保留两位去尾零，非数值原样。"""
+    try:
+        fval = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if fval.is_integer():
+        return str(int(fval))
+    return f"{fval:.2f}".rstrip("0").rstrip(".")
 
 
 def _metric_human(value: Any, key: str = "") -> str:
-    """指标值人读化：计数类指标保留原值（可带小数），金额类转万元。"""
-    if any(token in key.lower() for token in _COUNT_METRIC_KEYS):
-        try:
-            return f"{float(value):.2f}".rstrip("0").rstrip(".")
-        except (TypeError, ValueError):
-            return str(value)
-    return _fmt_wan(value)
+    """指标值人读化：比率百分比化、计数原值、金额万元化、未知数值舍入原样。
+
+    key 为空或未命中任何分类 token 时：数值按两位舍入输出（不带单位），
+    字符串原样——宁可无单位，不可错单位。
+    """
+    if _is_ratio_key(key):
+        return _fmt_pct(value)
+    lowered = str(key).lower()
+    if any(token in lowered for token in _COUNT_METRIC_KEYS):
+        return _fmt_count(value)
+    if any(token in lowered for token in _MONEY_TOKENS):
+        return _fmt_wan(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _fmt_count(value)
+    return str(value)
 
 
 def _render_table(table: dict[str, Any], *, limit: int = 10, currency: bool = True) -> list[str]:
@@ -1872,16 +2015,21 @@ def _render_table(table: dict[str, Any], *, limit: int = 10, currency: bool = Tr
     for row in rows[:limit]:
         if isinstance(row, dict):
             values = [row.get(c) for c in cols]
-        else:
+        elif isinstance(row, (list, tuple)):
             values = list(row)
+        else:
+            continue  # 畸形行（str/None 等）：跳过，严禁逐字符拆解
         cells: list[str] = []
         for c, v in zip(cols, values, strict=False):  # 行长不齐时容忍截断
-            if c in ("share", "change_rate"):
+            if _is_ratio_key(c):
                 cells.append(_fmt_pct(v))
-            elif currency and c in ("baseline", "current", "delta", "value", "gmv"):
+            elif currency and any(t in c.lower() for t in _MONEY_TOKENS):
                 cells.append(_fmt_wan(v))
+            elif not currency and any(t in c.lower() for t in _COUNT_METRIC_KEYS):
+                cells.append(_fmt_count(v))
             else:
-                cells.append(str(v))
+                # currency=True 未知列 / currency=False 其余列：浮点舍入原样
+                cells.append(_fmt_count(v) if isinstance(v, (int, float)) else str(v))
         lines.append("| " + " | ".join(cells) + " |")
     if len(rows) > limit:
         lines.append(f"（仅列示前 {limit} 行，共 {len(rows)} 行）")
@@ -2322,7 +2470,15 @@ def synthesize_node(state: AgentState) -> AgentState:
     lines.append(f"## 分析报告：{state.user_query}")
     lines.append("")
     for summary in deduped_summaries:
-        lines.extend(_summary_analyst_markdown(summary))
+        try:
+            lines.extend(_summary_analyst_markdown(summary, state))
+        except Exception as exc:  # 单产物渲染失败不拖垮整份报告，严禁回退 raw dump
+            logger.warning(
+                "summary 产物渲染失败，小节降级",
+                extra={"error": f"{type(exc).__name__}: {exc}"[:200]},
+            )
+            lines.append("### 归因分析")
+            lines.append("- （该分析产物无法渲染，原始文件已留存工作区）")
         lines.append("")
         lines.append("")
     for artifact in state.artifacts:
