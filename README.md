@@ -53,7 +53,7 @@
 - **对话式体验**：意图路由、多轮指代继承（"那华南呢？"）、口径澄清与槽位回填、多工具编排
 - **观察驱动重规划**：执行后把调度轨迹喂回规划器继续决策（继续查 / 作答 / 反问 / 终止），受 Max Steps 硬预算约束；对比型问题自动分解为多次单实体查询并跨步对比作答；反思层在调度终止后自检结果充分性（必要时受控追加一次查询）
 - **企业级 Data Agent（core/ 升级层）**：
-  - **图式编排**：StateGraph 六节点（澄清 HITL → 规划 → 受控取数 → 沙箱分析 → 反思重规划 → 综合报告），计划为步骤 DAG，受控自愈 ≤3 次；重规划时错误上下文注入 Planner——自愈是针对性修正而非盲重试
+  - **图式编排**：LangGraph 单引擎六节点（澄清 HITL → 规划 → 受控取数 → 沙箱分析 → 反思重规划 → 综合报告），计划为步骤 DAG，interrupt 泛化审批门（clarify / plan_review / high_risk——L3 对沙箱执行模型产码二次确认），受控自愈 ≤3 次；重规划时错误上下文注入 Planner——自愈是针对性修正而非盲重试
   - **GuardrailAgent 执行前审计**：编译产物 SQL 经 sqlglot AST 静态审计——笛卡尔积（逗号/CROSS/无 ON JOIN）与只读结构违规 **REJECTED 执行前熔断**（拒绝原因进入自愈上下文），无界输出 WARNING 审计轨迹；结构化裁决（check/severity/message/suggestion）
   - **DataQAAgent 结果断言**：空结果 / NULL 率 / 非负指标负值 / 聚合维度组合唯一性四类确定性质检，编排与 web 双取数链路同源；发现随 `ParquetRef.audit` 经 SSE 事件、critic 反思视野、报告"数据质检"小节与结构化日志全链路可见（不误杀不吞错）
   - **SchemaAgent 动态 profiling**：低基数（≤30）字符串字段实际取值探查并注入规划上下文（"可取值: a|b|c"），Planner 不再臆造过滤字面值；进程级缓存 + 失败降级，离线环境零副作用
@@ -71,15 +71,18 @@
     reflection / hitl_request / artifact_emit / done / error 九类事件实时推送，异常收敛为 error 事件不崩流）
   - **Agent 对话流工作台**：中央主对话页以 Agent 对话流承载全过程——用户气泡、
     任务计划（DAG 步骤清单 + 进度）、工具调用（DSL/沙箱时间线活动行，点击展开契约/代码/输出）、
-    反思自愈节点、HITL 澄清交互卡、完成/错误摘要，>50 步自动切换窗口化虚拟渲染
+    反思自愈节点、HITL 澄清交互卡（候选口径 pill 按钮点击即答复 / 计划审批卡支持批准、
+    拒绝、附带修改指令重规划）、完成/错误摘要，>50 步自动切换窗口化虚拟渲染
     （事件数据全量保留、DOM 仅渲染可视窗口），底部输入条内置模型选择器随时切换供应商模型；
     左侧边栏承载视图切换（执行报告 / ECharts 交互图表 / 沙箱代码与输出 / 数据审计表 +
-    Markdown/HTML 导出经侧边栏切换查看）、会话历史、知识目录（`/api/schema/summary`
+    Markdown/HTML 导出经侧边栏切换查看）、自主性分级选择（L1 每步确认 / L2 计划确认 /
+    L3 高危确认 / L4 全自动，按会话持久化随流上送）、会话历史、知识目录（`/api/schema/summary`
     语义目录字段清单）与设置/用户中心，零前端框架（原生 JS + vendored ECharts/PrismJS）
-- **多模型供应商网关（providers/）**：智谱 / OpenAI / Anthropic / Gemini 预置供应商，
-  OpenAI Chat、OpenAI Responses、Anthropic、Gemini 四协议适配与 JSON Mode 抹平；API Key
-  落盘加密存储、列表响应零密钥回传，工作台设置页可视化 CRUD + 连通性探测，SSE 编排支持
-  请求级 `provider_id` / `model_id` 模型切换
+- **多模型供应商网关（providers/）**：OpenAI Chat、OpenAI Responses、Anthropic、Gemini
+  四协议适配与 JSON Mode 抹平（控制面支持前三种协议的可视化配置，Gemini 协议适配层就绪）；
+  API Key 落盘加密存储、列表响应零密钥回传，工作台设置页可视化 CRUD + 连通性探测
+  （供应商全部由用户添加，无预置条目），SSE 编排支持请求级 `provider_id` / `model_id`
+  模型切换
 - **可解释交付**：DSL → 中文话术 + 图表自适应推荐，零前端框架
 - **可观测**：全链路审计快照、结构化 JSON 日志（request_id 贯穿，error=熔断/审计拒绝/额度耗尽、warning=可自愈/降级、info=流程转折）、QPS/分位数指标、DataQA 质检发现分级采集
 
@@ -149,7 +152,7 @@ LLM_MODEL=gpt-4o-mini
 QUERY_TIMEOUT_MS=30000         # 语句超时（毫秒）
 MAX_SCAN_ROWS=10000000         # 扫描行数熔断上限
 MAX_RESULT_ROWS=20000          # 返回行数硬上限
-SQL_SELF_HEAL_MAX_RETRIES=1    # SQL 自愈重试次数
+SQL_SELF_HEAL_MAX_RETRIES=3    # SQL 自愈重试次数（默认 3）
 
 # 认证（生产环境必须配置）
 AUTH_ENABLED=1
@@ -166,8 +169,8 @@ AUTH_STRICT=1                  # 严格生产安全模式
 > ```
 
 > **多供应商管理**：除 `.env` 单供应商接入外，亦可在 Web 工作台「设置」中可视化配置多个
-> 模型供应商（预置智谱 / OpenAI / Anthropic / Gemini，Key 加密存储），编排请求支持请求级
-> 模型切换。详见 [环境配置](docs/configuration.md) 与 [API 参考](docs/api.md)。
+> 模型供应商（支持 OpenAI Chat / Responses、Anthropic 协议，Key 加密存储），编排请求支持
+> 请求级模型切换。详见 [环境配置](docs/configuration.md) 与 [API 参考](docs/api.md)。
 
 ### 五、启动服务
 
@@ -271,7 +274,7 @@ DataAgent/
 ├── semantic/     # 语义层：受限 DSL 契约 + 数据驱动字段目录
 ├── agent/        # NL -> DSL：LLM / 启发式双路径、意图路由、RAG、多轮记忆、重规划与反思
 ├── core/         # Data Agent 升级层：retrieval 门面（typed Tool + PII 脱敏 + 裸 SQL 网关 +
-│                 # 动态 profiling + DataQA 结果断言）、orchestrator（StateGraph 六节点编排 +
+│                 # 动态 profiling + DataQA 结果断言）、orchestrator（LangGraph 六节点编排 +
 │                 # 重规划错误上下文）、sandbox（AST 守卫 + 限权 runner + Docker/子进程后端）、
 │                 # skills（熵下钻 / 分解树 / DTW / HW / Shapley）
 ├── providers/    # 多模型供应商网关：四协议适配 / API Key 加密存储 / 连通性探测
@@ -306,7 +309,7 @@ DataAgent/
 | 归因技能 `core/skills/` | 熵下钻 / 指标分解树 / DTW / Holt-Winters / Shapley，仅依赖 numpy + 标准库 | 零重型科学计算栈；全部与已知解析解对拍保证正确性 |
 | 权限与认证 `security/` `auth/` | 表 / 列 / 行级 RLS（配置驱动）+ 自研 JWT（HMAC-SHA256 签名 + 恒定时间比较）+ PBKDF2 密码哈希 | 全部标准库实现（零 pyjwt / cryptography 依赖）；生成前作用域收窄 + 生成后策略校验构成双防线 |
 | 模型网关 `providers/` | 四协议适配（OpenAI Chat / Responses、Anthropic、Gemini）+ JSON Mode 抹平 + 自研 Key 加密（HMAC-SHA256 密钥派生 + 流加密 + 篡改校验标签） | 一套契约抹平供应商差异；Key 落盘加密、列表零回传，SSE 编排支持请求级模型切换免重启 |
-| Web 层 `web/` | 标准库 `http.server`（`ThreadingHTTPServer`）+ 原生 JS 零前端框架 + vendored ECharts / PrismJS + SSE 流式 | 零 Web 框架、零前端构建链；>50 步窗口化虚拟渲染保证长会话流畅 |
+| Web 层 `web/` | FastAPI + uvicorn 服务层（十七期 M4 单引擎收敛，依赖精确 pin）+ 原生 JS 零前端框架 + vendored ECharts / PrismJS + SSE 流式 | 服务层借力成熟框架的并发与 SSE 原语并精确 pin + 全量回归门；前端零构建链，>50 步窗口化虚拟渲染保证长会话流畅 |
 | 数仓 `mock/` | DuckDB 确定性数仓（`AS_OF_DATE=2024-06-30`、随机种子 42） | 嵌入式零部署；评测与演示完全可复现 |
 | 评测 `eval/` | Golden Dataset（25 用例，oracle / agent 双模式）+ 意图路由评测（8 用例行为断言）+ 确定性锚点 | 同一份数据同时考核编译器上限（oracle）与端到端正确率（agent）；答非所问率与虚构风险进 CI 持续监控 |
 | 质量保障 `tests/` | pytest（678 用例）+ black + ruff + CI | 契约 / 编译 / 审计 / 自愈 / 可观测全路径回归覆盖 |

@@ -10,7 +10,8 @@
 
 数据驱动（P0-2）：本文件的默认目录只是"内置回退"。生产启动时由
 semantic.catalog_loader.refresh_catalog() 从 DuckDB information_schema 元数据 +
-config/semantic.yaml 覆写重建目录（改配置即可新增表/字段，不再需要改 Python）。
+config/semantic.json 覆写重建目录（YAML 亦兼容；改配置即可新增表/字段，
+不再需要改 Python）。
 compiler / guard 一律通过 `catalog.XXX` 动态读取本模块当前状态。
 """
 

@@ -1,4 +1,4 @@
-"""DataAgent Web UI 服务（零依赖，标准库 http.server）+ 统一身份认证网关（P0）。
+"""DataAgent Web UI 服务（FastAPI + uvicorn，十七期 M4 单引擎收敛）+ 统一身份认证网关。
 
 用法:
     python -m web.server [端口]     # 默认 8000
@@ -17,9 +17,15 @@
 
 受保护路由:
     POST /api/query     -> 完整链路（需 Bearer JWT 或会话）
+    POST /api/query/async -> 异步提交查询（202 + task_id）
+    GET  /api/tasks/<task_id> -> 异步任务快照（属主校验 fail-closed）
+    GET  /api/export/<export_id> -> 导出文件下载（属主校验）
+    POST /api/agent/run -> 同步编排（HITL 挂起返回 resume_token，属主绑定）
+    GET  /api/metrics   -> 进程内可观测指标快照
+    GET  /api/schema/summary -> 语义目录摘要（知识上下文）
     GET/POST /api/settings/providers        -> 供应商列表 / 创建自定义（协议限白名单，响应不含 api_key）
-    PUT/DELETE /api/settings/providers/<id> -> 供应商更新 / 删除（预置供应商拒绝删除）
-    POST /api/settings/providers/test       -> 连通性探测（极小 ping 文本，返回延时）
+    PUT/DELETE /api/settings/providers/<id> -> 供应商更新 / 删除（无预置条目）
+    POST /api/settings/providers/test       -> 连通性探测（极小 ping 文本，业务失败 HTTP 200 + success=false）
     POST /api/settings/providers/<id>/reveal -> 查看已保存 API Key（显式动作，记审计）
 
 P0 安全约束（网关层强制）：
