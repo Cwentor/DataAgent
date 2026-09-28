@@ -1894,7 +1894,7 @@ def _metrics_lines(metrics: dict[str, Any]) -> list[str]:
         lines.append("|" + "|".join([" --- "] * len(header)) + "|")
         for group, d in dicts.items():
             cells = [_metric_label(group)] + [
-                _metric_human(d[c], c) if c in d else "—" for c in union
+                _metric_human(d[c], c, depth=1) if c in d else "—" for c in union
             ]
             lines.append("| " + " | ".join(str(x) for x in cells) + " |")
     for name, rows in lists.items():
@@ -1910,12 +1910,20 @@ def _metrics_lines(metrics: dict[str, Any]) -> list[str]:
             lines.append("| " + " | ".join(_metric_label(c) for c in union) + " |")
             lines.append("|" + "|".join([" --- "] * len(union)) + "|")
             for r in dict_rows[:10]:
-                cells = [_metric_human(r[c], c) for c in union if c in r]
+                # 缺列单元格统一 "—" 占位，保证单元格数恒等于列数不错位
+                cells = [_metric_human(r[c], c, depth=1) if c in r else "—" for c in union]
                 lines.append("| " + " | ".join(str(x) for x in cells) + " |")
             if len(dict_rows) > 10:
                 lines.append(f"（仅列示前 10 行，共 {len(dict_rows)} 行）")
         elif rows:
-            lines.append(f"- {_metric_label(name)}：{'、'.join(str(x) for x in rows)}")
+            # 全非 dict 行：容器元素（list/tuple/dict）折叠为明细占位，严禁 str 直出
+            rendered: list[str] = []
+            for item in rows:
+                if isinstance(item, (list, tuple, dict)):
+                    rendered.append(f"（共 {len(item)} 项明细）")
+                else:
+                    rendered.append(str(item))
+            lines.append(f"- {_metric_label(name)}：{'、'.join(rendered)}")
     return lines
 
 
@@ -1979,12 +1987,30 @@ def _fmt_count(value: Any) -> str:
     return f"{fval:.2f}".rstrip("0").rstrip(".")
 
 
-def _metric_human(value: Any, key: str = "") -> str:
+def _metric_human(value: Any, key: str = "", depth: int = 0) -> str:
     """指标值人读化：比率百分比化、计数原值、金额万元化、未知数值舍入原样。
 
     key 为空或未命中任何分类 token 时：数值按两位舍入输出（不带单位），
     字符串原样——宁可无单位，不可错单位。
+
+    depth：嵌套展开深度（0 = 顶层标量行，1 = 表格单元格 / 一层展开内部）。
+    容器守卫置于 key 分类之前：list/tuple 值一律折叠为"（共 N 项明细）"；
+    dict 值在 depth < 2 时展开一层键值文本（键经 _metric_label 中文化、
+    值递归 depth+1 渲染），depth >= 2 折叠为"（嵌套明细）"——任何 key
+    分类下严禁 dict/list/tuple repr 直出（2026-09 修复轮 Important #1，
+    否则 _fmt_wan/_fmt_pct/_fmt_count 的 str 兜底会对容器值 repr）。
     """
+    # 容器守卫：先于比率/计数/金额分类，堵死容器值落入 str 兜底的残余路径
+    if isinstance(value, (list, tuple)):
+        return f"（共 {len(value)} 项明细）"
+    if isinstance(value, dict):
+        if depth >= 2:
+            return "（嵌套明细）"
+        inner = "；".join(
+            f"{_metric_label(str(k))} {_metric_human(v, str(k), depth + 1)}"
+            for k, v in value.items()
+        )
+        return f"（{inner}）" if inner else "（无明细）"
     if _is_ratio_key(key):
         return _fmt_pct(value)
     lowered = str(key).lower()
@@ -2000,12 +2026,14 @@ def _metric_human(value: Any, key: str = "") -> str:
 def _render_table(table: dict[str, Any], *, limit: int = 10, currency: bool = True) -> list[str]:
     """把 summary table 渲染为 Markdown 表格（兼容 list 行与 dict 行两种形态）。
 
-    - list 行：按 columns 顺序逐列渲染（分省归因矩阵）；
-    - dict 行：按 columns 取键渲染（驱动因子分解）；
-    - ``currency=True``（金额矩阵）：baseline/current/delta/value/gmv 按万元；
-      ``currency=False``（因子矩阵，值为人数/比值）：数值原样渲染，
-      否则"买家数 11 人"会被误写成"0.00 万元"；
-    - share/change_rate 一律百分比，其余（factor/province 等）原样。
+    - list 行：按 columns 顺序逐列渲染（分省归因矩阵）；dict 行：按 columns
+      取键渲染（驱动因子分解）；畸形行（str/None 等非容器）直接跳过；
+    - 单元格按列名分类：比率列（pct/rate/share/ratio/gain）百分比化；
+      ``currency=True`` 金额列（gmv/aov/amount/revenue/baseline/current/
+      delta/value）万元化；``currency=False`` 计数列（orders/buyers/count/
+      users/quantity/qty）原值渲染；其余列数值两位舍入、非数值原样，
+      容器值经 _metric_human 容器守卫折叠（严禁 repr 直出）；
+    - 畸形单元格值同样折叠为明细占位，不崩溃、不 dump。
     """
     rows = table.get("rows") or []
     cols = [str(c) for c in (table.get("columns") or [])]
@@ -2028,8 +2056,12 @@ def _render_table(table: dict[str, Any], *, limit: int = 10, currency: bool = Tr
             elif not currency and any(t in c.lower() for t in _COUNT_METRIC_KEYS):
                 cells.append(_fmt_count(v))
             else:
-                # currency=True 未知列 / currency=False 其余列：浮点舍入原样
-                cells.append(_fmt_count(v) if isinstance(v, (int, float)) else str(v))
+                # currency=True 未知列 / currency=False 其余列：数值两位舍入，
+                # 字符串原样；容器值经 _metric_human 容器守卫折叠（禁 repr）
+                if isinstance(v, (dict, list, tuple)):
+                    cells.append(_metric_human(v, c, depth=1))
+                else:
+                    cells.append(_fmt_count(v) if isinstance(v, (int, float)) else str(v))
         lines.append("| " + " | ".join(cells) + " |")
     if len(rows) > limit:
         lines.append(f"（仅列示前 {limit} 行，共 {len(rows)} 行）")
