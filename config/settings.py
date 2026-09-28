@@ -124,6 +124,13 @@ SUBAGENT_MAX_PARALLEL: int = int(os.getenv("SUBAGENT_MAX_PARALLEL", "4"))
 # critique 充分性不足时的重派上限（规格 §6.4：≤1 轮，不无限重试）
 SUBAGENT_REDISPATCH_MAX: int = int(os.getenv("SUBAGENT_REDISPATCH_MAX", "1"))
 
+# --------------------------------------------------------------------------- #
+# 沙箱代码解释器执行后端 —— 见 core/sandbox/
+# --------------------------------------------------------------------------- #
+# subprocess（默认）：恒用子进程，零部署；auto：Docker 优先探测（结果进程级缓存），
+# 不可用回退子进程；docker：显式要求容器强隔离，环境不可用时如实降级子进程并留日志
+SANDBOX_BACKEND: str = os.getenv("SANDBOX_BACKEND", "subprocess")
+
 
 # --------------------------------------------------------------------------- #
 # 意图路由与决策中心（Intent Router & Decision Engine）—— 见 agent/router/

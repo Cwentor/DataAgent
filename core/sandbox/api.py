@@ -23,7 +23,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.sandbox.ast_guard import static_check
-from core.sandbox.backends import DEFAULT_TIMEOUT_SECONDS, SandboxBackend, SubprocessBackend
+from core.sandbox.backends import (
+    DEFAULT_TIMEOUT_SECONDS,
+    DockerBackend,
+    SandboxBackend,
+    SubprocessBackend,
+    default_backend,
+)
 
 # 聚合矩阵行数上限（需求 §3.3：强制聚合，杜绝海量原始行回流）
 MAX_SUMMARY_ROWS = 100
@@ -76,6 +82,34 @@ def _script_ok_name(name: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name))
 
 
+def _resolve_default_backend() -> SandboxBackend:
+    """按 SANDBOX_BACKEND 配置解析默认后端（run_code 未显式传参时）。
+
+    - ``subprocess``（默认）：恒用子进程，零部署、行为与历史版本逐字一致；
+    - ``auto``：Docker 优先探测（结果进程级缓存），不可用回退子进程；
+    - ``docker``：显式要求容器强隔离，环境不可用时如实降级子进程并留警告日志
+      （不静默——降级事实通过日志与 SandboxResult.backend 可见）。
+    """
+    from config import settings
+
+    mode = str(settings.SANDBOX_BACKEND)
+    if mode == "subprocess":
+        return SubprocessBackend()
+    if mode == "auto":
+        return default_backend()
+    if mode == "docker":
+        docker = DockerBackend()
+        if docker.is_available():
+            return docker
+        from audit.logging import get_logger
+
+        get_logger(__name__).warning(
+            "SANDBOX_BACKEND=docker 但 Docker 不可用，本次沙箱执行降级为子进程后端"
+        )
+        return SubprocessBackend()
+    raise ValueError(f"非法 SANDBOX_BACKEND 配置: {mode!r}（可选 subprocess/auto/docker）")
+
+
 def run_code(
     code: str,
     workspace: Path | str,
@@ -115,8 +149,8 @@ def run_code(
         raise RuntimeError("runner 占位符替换失败")
     script_path.write_text(script, encoding="utf-8")
 
-    # 2) 后端执行
-    backend = backend or SubprocessBackend()
+    # 2) 后端执行（显式传参优先；否则按 SANDBOX_BACKEND 配置解析默认后端）
+    backend = backend or _resolve_default_backend()
     result = backend.run(script_path, ws, timeout_seconds=timeout_seconds)
 
     # 3) 产物协议校验

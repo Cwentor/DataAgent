@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -236,12 +237,32 @@ class DockerBackend(SandboxBackend):
         )
 
 
+# 默认后端探测缓存：Docker 探测要 spawn 子进程（image inspect 最长 10s 超时），
+# 结果进程内缓存复用，避免 run_code 每次执行的重复探测开销。
+_default_backend_cache: SandboxBackend | None = None
+_default_backend_lock = threading.Lock()
+
+
 def default_backend() -> SandboxBackend:
-    """默认后端选择：Docker 可用则容器强隔离，否则本地子进程兜底。"""
-    docker = DockerBackend()
-    if docker.is_available():
-        return docker
-    return SubprocessBackend()
+    """默认后端选择（进程级缓存）：Docker 可用则容器强隔离，否则本地子进程。
+
+    显式更换后端请直接向 run_code 传参；探测缓存可用
+    ``clear_default_backend_cache()`` 复位（测试 / Docker 环境热变更后）。
+    """
+    global _default_backend_cache
+    if _default_backend_cache is None:
+        with _default_backend_lock:
+            if _default_backend_cache is None:
+                docker = DockerBackend()
+                _default_backend_cache = docker if docker.is_available() else SubprocessBackend()
+    return _default_backend_cache
+
+
+def clear_default_backend_cache() -> None:
+    """复位默认后端探测缓存（下一次 default_backend() 重新探测）。"""
+    global _default_backend_cache
+    with _default_backend_lock:
+        _default_backend_cache = None
 
 
 __all__ = [
@@ -250,5 +271,6 @@ __all__ = [
     "DockerBackend",
     "SandboxBackend",
     "SubprocessBackend",
+    "clear_default_backend_cache",
     "default_backend",
 ]
