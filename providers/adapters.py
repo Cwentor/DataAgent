@@ -285,7 +285,11 @@ class OpenAIChatAdapter(BaseAdapter):
             "messages": messages,
             "temperature": request.temperature if request.temperature is not None else 0.0,
         }
-        status, _, raw = self._post(base_payload, want_json=want_json)
+        from config import settings
+
+        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
+        timeout = request.timeout or settings.PROVIDER_TIMEOUT
+        status, _, raw = self._post(base_payload, want_json=want_json, timeout=timeout)
         try:
             data = json.loads(raw)
             content = data["choices"][0]["message"]["content"]
@@ -295,7 +299,12 @@ class OpenAIChatAdapter(BaseAdapter):
             raise ProtocolError(f"Chat Completions 响应解析失败（HTTP {status}）: {exc}") from exc
 
     def _post(
-        self, payload: dict[str, Any], *, want_json: bool, attempt_native: bool = True
+        self,
+        payload: dict[str, Any],
+        *,
+        want_json: bool,
+        timeout: int,
+        attempt_native: bool = True,
     ) -> tuple[int, dict[str, str], str]:
         """发送请求；JSON 原生参数被拒（400）时去掉后重试一次（仅留 Prompt 约束）。"""
         body: dict[str, Any] = payload
@@ -306,7 +315,7 @@ class OpenAIChatAdapter(BaseAdapter):
         if self.provider.api_key:
             headers["Authorization"] = f"Bearer {self.provider.api_key}"
         try:
-            return _http_post(url, payload=body, headers=headers, timeout=60, api_key=None)
+            return _http_post(url, payload=body, headers=headers, timeout=timeout, api_key=None)
         except ProviderError as exc:
             if (
                 want_json
@@ -316,11 +325,15 @@ class OpenAIChatAdapter(BaseAdapter):
                 and any(h in str(exc).lower() for h in _UNSUPPORTED_JSON_HINTS)
             ):
                 # 模型/中转不支持 response_format -> 降级：仅保留 Prompt 约束重试
-                return self._post(payload, want_json=want_json, attempt_native=False)
+                return self._post(
+                    payload, want_json=want_json, timeout=timeout, attempt_native=False
+                )
             raise
 
     def test_connection(self) -> TestConnectionResult:
         """发送极小 ping 文本，验证 HTTP 200 与延时。"""
+        from config import settings
+
         started = time.perf_counter()
         try:
             payload = {
@@ -328,7 +341,7 @@ class OpenAIChatAdapter(BaseAdapter):
                 "messages": [{"role": "user", "content": "ping"}],
                 "max_tokens": 1,
             }
-            status, _, _ = self._post(payload, want_json=False)
+            status, _, _ = self._post(payload, want_json=False, timeout=settings.PROVIDER_TIMEOUT)
             return TestConnectionResult(
                 success=status == 200, latency_ms=round((time.perf_counter() - started) * 1000.0, 1)
             )
@@ -396,7 +409,11 @@ class OpenAIResponsesAdapter(BaseAdapter):
             "input": input_blocks,
             "temperature": request.temperature if request.temperature is not None else 0.0,
         }
-        status, _, raw = self._post(payload, want_json=want_json)
+        from config import settings
+
+        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
+        timeout = request.timeout or settings.PROVIDER_TIMEOUT
+        status, _, raw = self._post(payload, want_json=want_json, timeout=timeout)
         try:
             data = json.loads(raw)
             parts: list[str] = []
@@ -412,7 +429,12 @@ class OpenAIResponsesAdapter(BaseAdapter):
             raise ProtocolError(f"Responses API 响应解析失败（HTTP {status}）: {exc}") from exc
 
     def _post(
-        self, payload: dict[str, Any], *, want_json: bool, attempt_native: bool = True
+        self,
+        payload: dict[str, Any],
+        *,
+        want_json: bool,
+        timeout: int,
+        attempt_native: bool = True,
     ) -> tuple[int, dict[str, str], str]:
         """发送请求；原生 JSON 参数被拒（400）时降级重试（同 OpenAIChatAdapter）。"""
         body: dict[str, Any] = payload
@@ -423,7 +445,7 @@ class OpenAIResponsesAdapter(BaseAdapter):
         if self.provider.api_key:
             headers["Authorization"] = f"Bearer {self.provider.api_key}"
         try:
-            return _http_post(url, payload=body, headers=headers, timeout=60, api_key=None)
+            return _http_post(url, payload=body, headers=headers, timeout=timeout, api_key=None)
         except ProviderError as exc:
             if (
                 want_json
@@ -432,11 +454,15 @@ class OpenAIResponsesAdapter(BaseAdapter):
                 and exc.code == "provider_error"
                 and any(h in str(exc).lower() for h in _UNSUPPORTED_JSON_HINTS)
             ):
-                return self._post(payload, want_json=want_json, attempt_native=False)
+                return self._post(
+                    payload, want_json=want_json, timeout=timeout, attempt_native=False
+                )
             raise
 
     def test_connection(self) -> TestConnectionResult:
         """发送极小 ping 文本，验证 HTTP 200 与延时。"""
+        from config import settings
+
         started = time.perf_counter()
         try:
             payload = {
@@ -444,7 +470,7 @@ class OpenAIResponsesAdapter(BaseAdapter):
                 "input": [{"role": "user", "content": "ping"}],
                 "max_output_tokens": 1,
             }
-            status, _, _ = self._post(payload, want_json=False)
+            status, _, _ = self._post(payload, want_json=False, timeout=settings.PROVIDER_TIMEOUT)
             return TestConnectionResult(
                 success=status == 200, latency_ms=round((time.perf_counter() - started) * 1000.0, 1)
             )
@@ -522,7 +548,11 @@ class AnthropicAdapter(BaseAdapter):
         if self.provider.api_key:
             headers["x-api-key"] = self.provider.api_key
             headers["anthropic-version"] = "2023-06-01"
-        status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=60)
+        from config import settings
+
+        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
+        timeout = request.timeout or settings.PROVIDER_TIMEOUT
+        status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=timeout)
         try:
             data = json.loads(raw)
             parts = [
@@ -557,6 +587,8 @@ class AnthropicAdapter(BaseAdapter):
 
     def test_connection(self) -> TestConnectionResult:
         """发送极小 ping 文本，验证 HTTP 200 与延时。"""
+        from config import settings
+
         started = time.perf_counter()
         try:
             payload = {
@@ -569,7 +601,9 @@ class AnthropicAdapter(BaseAdapter):
             if self.provider.api_key:
                 headers["x-api-key"] = self.provider.api_key
                 headers["anthropic-version"] = "2023-06-01"
-            status, _, _ = _http_post(url, payload=payload, headers=headers, timeout=60)
+            status, _, _ = _http_post(
+                url, payload=payload, headers=headers, timeout=settings.PROVIDER_TIMEOUT
+            )
             return TestConnectionResult(
                 success=status == 200, latency_ms=round((time.perf_counter() - started) * 1000.0, 1)
             )
@@ -621,7 +655,11 @@ class GeminiAdapter(BaseAdapter):
         headers = {**self._build_headers()}
         if self.provider.api_key:
             headers["x-goog-api-key"] = self.provider.api_key
-        status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=60)
+        from config import settings
+
+        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
+        timeout = request.timeout or settings.PROVIDER_TIMEOUT
+        status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=timeout)
         try:
             data = json.loads(raw)
             candidates = data.get("candidates") or []
@@ -655,6 +693,8 @@ class GeminiAdapter(BaseAdapter):
 
     def test_connection(self) -> TestConnectionResult:
         """发送极小 ping 文本，验证 HTTP 200 与延时。"""
+        from config import settings
+
         started = time.perf_counter()
         try:
             payload = {
@@ -665,7 +705,9 @@ class GeminiAdapter(BaseAdapter):
             headers = {**self._build_headers()}
             if self.provider.api_key:
                 headers["x-goog-api-key"] = self.provider.api_key
-            status, _, _ = _http_post(url, payload=payload, headers=headers, timeout=60)
+            status, _, _ = _http_post(
+                url, payload=payload, headers=headers, timeout=settings.PROVIDER_TIMEOUT
+            )
             return TestConnectionResult(
                 success=status == 200, latency_ms=round((time.perf_counter() - started) * 1000.0, 1)
             )
