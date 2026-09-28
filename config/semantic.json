@@ -5,7 +5,8 @@
     "fact_orders": "f",
     "fact_refunds": "r",
     "dim_user": "u",
-    "dim_product": "p"
+    "dim_product": "p",
+    "dim_shop": "s"
   },
   "fields": {
     "order_id": { "table": "fact_orders", "column": "order_id", "dtype": "int", "label": "订单ID" },
@@ -24,11 +25,15 @@
     "register_time": { "table": "dim_user", "column": "register_time", "dtype": "timestamp", "label": "注册时间" },
     "category": { "table": "dim_product", "column": "category", "dtype": "str", "label": "品类" },
     "brand": { "table": "dim_product", "column": "brand", "dtype": "str", "label": "品牌" },
-    "unit_price": { "table": "dim_product", "column": "unit_price", "dtype": "float", "label": "单价" }
+    "unit_price": { "table": "dim_product", "column": "unit_price", "dtype": "float", "label": "单价" },
+    "product_name": { "table": "dim_product", "column": "product_name", "dtype": "str", "label": "商品名称" },
+    "shop_id": { "table": "fact_orders", "column": "shop_id", "dtype": "int", "label": "门店ID" },
+    "shop_name": { "table": "dim_shop", "column": "shop_name", "dtype": "str", "label": "门店名称" }
   },
   "join_rules": {
     "dim_user": { "type": "inner", "on": [["user_id", "user_id"]] },
-    "dim_product": { "type": "inner", "on": [["product_id", "product_id"]] }
+    "dim_product": { "type": "inner", "on": [["product_id", "product_id"]] },
+    "dim_shop": { "type": "inner", "on": [["shop_id", "shop_id"]] }
   },
   "fact_join_rules": {
     "fact_refunds": { "type": "left", "on": [["order_id", "order_id"]] }
