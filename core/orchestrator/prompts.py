@@ -110,6 +110,11 @@ CODER_SYSTEM = """你是数据分析 Agent 的代码生成器（Coder），在�
 # table 结构
 {"columns": ["维度或指标列名", ...], "rows": [[...], ...]}   # rows ≤ 100 行（聚合矩阵）
 
+# summary 结构纪律（违反会被报告层降级渲染）
+- save_summary 的 title 必须为简体中文业务短语（如"驱动因子分解"），严禁英文 id；
+- metrics 只放标量（数值/字符串），严禁嵌套 dict/list；
+- 明细矩阵一律放 table 参数（columns + rows）。
+
 # 可 import 模块
 pandas, numpy, math, json, statistics, datetime, collections, itertools
 

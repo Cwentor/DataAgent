@@ -542,3 +542,12 @@ def test_synthesize_llm_contract_output_marks_banner(tmp_path, monkeypatch):
     assert "本次报告由确定性模板生成" in out.report
     assert "反契约" in out.report
     assert '{"baseline"' not in out.report
+
+
+def test_coder_prompt_summary_discipline():
+    """Coder 提示词必须约束 summary 结构：中文 title、metrics 标量化。"""
+    from core.orchestrator.prompts import CODER_SYSTEM
+
+    assert "title 必须为简体中文业务短语" in CODER_SYSTEM
+    assert "metrics 只放标量" in CODER_SYSTEM
+    assert "明细矩阵一律放 table 参数" in CODER_SYSTEM
