@@ -168,6 +168,51 @@ def _plan_gate(state: AgentState) -> AgentState:
     return state.apply(plan_reviewed=True)
 
 
+def _risk_gate(state: AgentState) -> AgentState:
+    """高危确认门（L3，规格 §5.2）：即将执行沙箱代码（analyze 步骤含 LLM 产码）
+    时挂起等待用户批准；L4 经 maybe_interrupt 直通（发 auto_resolved 通知事件）；
+    L1/L2 不打断（保持现状，step_confirm 逐节点确认未实现，文档如实标注）。
+
+    高危操作定义：编排链路中唯一的"执行模型生成代码"环节。确定性模板产码
+    （code 为空）不属于高危，不打断。gate 无 LLM 调用、无事件发射——
+    resume 会从头重执行本节点。
+    """
+    if state.autonomy_level not in {"L3", "L4"} or state.high_risk_approved:
+        return state
+    if not state.plan_steps or state.phase in {"done", "clarify", "high_risk"}:
+        return state
+    risky = [
+        s for s in state.plan_steps if s.kind == "analyze" and s.status == "pending" and s.code
+    ]
+    if not risky:
+        return state
+    resume = maybe_interrupt(
+        state,
+        {
+            "kind": "high_risk",
+            "question": "分析步骤将执行由模型生成的代码（沙箱隔离运行），是否确认执行？",
+            "steps": [{"id": s.id, "goal": s.goal} for s in risky],
+        },
+        trigger="high_risk",
+    )
+    if resume.get("action") == "reject":
+        # 诚实终止：不产出分析结论，原因可见（与 plan_review reject 同语义）
+        return state.apply(
+            phase="done",
+            no_data_reason="用户拒绝了沙箱代码执行，分析未完成",
+            report="用户拒绝了沙箱代码执行，本次未执行模型生成代码、未产出分析结论。",
+        )
+    return state.apply(high_risk_approved=True)
+
+
+def route_from_risk_gate(state: AgentState) -> Any:
+    """risk_gate 条件边路由：reject 置 phase=done 直接收敛（严禁落入 analyze
+    执行被拒代码）；其余（approve / L4 直通 / 非 L3 透传）进入沙箱分析。"""
+    if state.phase == "done":
+        return "plan_gate_end"
+    return "analyze"
+
+
 def route_from_plan_gate(state: AgentState) -> Any:
     """plan_gate 条件边路由：approve 交原 route_from_plan；edit 回 plan；
     reject 收敛；plan 携带 fanout_tasks 时转 fanout_orchestrator 汇聚节点。
@@ -339,6 +384,7 @@ def _compile(checkpointer: Any) -> Any:
     g.add_conditional_edges("clarify_gate", route_from_clarify, {"plan": "plan"})
     g.add_node("plan_gate", _plan_gate)
     g.add_node("plan_gate_end", lambda s: s)
+    g.add_node("risk_gate", _risk_gate)
     g.add_node("fanout_orchestrator", _fanout_orchestrator)
     g.add_edge("fanout_orchestrator", "critique")
     g.add_edge("plan", "plan_gate")
@@ -347,7 +393,7 @@ def _compile(checkpointer: Any) -> Any:
         route_from_plan_gate,
         {
             "query": "query",
-            "analyze": "analyze",
+            "analyze": "risk_gate",
             "critique": "critique",
             "plan": "plan",
             "plan_gate_end": "plan_gate_end",
@@ -355,7 +401,12 @@ def _compile(checkpointer: Any) -> Any:
         },
     )
     g.add_edge("plan_gate_end", END)
-    g.add_edge("query", "analyze")
+    g.add_edge("query", "risk_gate")
+    g.add_conditional_edges(
+        "risk_gate",
+        route_from_risk_gate,
+        {"analyze": "analyze", "plan_gate_end": "plan_gate_end"},
+    )
     g.add_edge("analyze", "critique")
     g.add_conditional_edges(
         "critique", route_from_critic, {"plan": "plan", "synthesize": "synthesize"}

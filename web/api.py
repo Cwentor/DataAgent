@@ -554,8 +554,8 @@ async def post_agent_run(request: Request) -> Response:
             "owner": ctx.username,
             "state": result.model_dump(mode="json"),
         }
-        # M2/M4：挂起相位按真实值返回（clarify | plan_review），
-        # plan_review 附带步骤 DAG 供审批卡渲染
+        # M2/M4：挂起相位按真实值返回（clarify | plan_review | high_risk），
+        # plan_review 附带步骤 DAG、high_risk 附带待确认的分析步骤
         payload = {
             "phase": result.phase,
             "resume_token": token,
@@ -564,6 +564,12 @@ async def post_agent_run(request: Request) -> Response:
         if result.phase == "plan_review":
             payload["plan_steps"] = [step.model_dump(mode="json") for step in result.plan_steps]
             payload["summary"] = result.plan_steps[0].goal if result.plan_steps else ""
+        elif result.phase == "high_risk":
+            payload["steps"] = [
+                {"id": s.id, "goal": s.goal}
+                for s in result.plan_steps
+                if s.kind == "analyze" and s.status == "pending" and s.code
+            ]
         else:
             payload["clarification"] = result.clarification
         return Response(

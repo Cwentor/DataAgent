@@ -171,7 +171,7 @@ def run_agent(
         if token is not None:
             events.reset_observer(token)
 
-    if final.phase in {"clarify", "plan_review"}:
+    if final.phase in {"clarify", "plan_review", "high_risk"}:
         # HITL：返回挂起中间态（调用方展示卡片 -> 收集答复/动作 -> 再次调用）
         return final
 
@@ -273,8 +273,8 @@ def _run_agent_langgraph_path(
             return resume_state.apply(
                 phase="done", report=(resume_state.report or "") + _guard_report
             )
-        if pending and pending.get("kind") == "plan_review":
-            return final.apply(phase="plan_review")
+        if pending and pending.get("kind") in {"plan_review", "high_risk"}:
+            return final.apply(phase=str(pending.get("kind")))
         return final
 
     state = AgentState(
@@ -297,9 +297,9 @@ def _run_agent_langgraph_path(
             extra={"error": f"recursion_limit={settings.ORCHESTRATOR_RECURSION_LIMIT}"},
         )
         return state.apply(phase="done", report=(state.report or "") + _guard_report)
-    if pending and pending.get("kind") == "plan_review":
-        # plan_review 挂起：与 clarify 共用 AgentState pause 契约
-        return final.apply(phase="plan_review")
+    if pending and pending.get("kind") in {"plan_review", "high_risk"}:
+        # HITL 挂起：与 clarify 共用 AgentState pause 契约（相位按挂起门类型区分）
+        return final.apply(phase=str(pending.get("kind")))
     return final
 
 

@@ -29,12 +29,18 @@ def _default_autonomy() -> str:
 # 自愈重试上限（需求：max 3 retries）
 MAX_RETRIES = 3
 
+# 子任务卡内置能力名：不属于 tools.registry 注册中心、但可在子图执行路径上
+# 被白名单裁剪的编排内置能力（沙箱代码执行）。allowed_tools 合法名 =
+# registry 工具名 + 本集合（query/analyze 步骤的能力归并见 subagent.py）。
+BUILTIN_CAPABILITIES = frozenset({"run_code"})
+
 # 工具轨迹 token 预算（估算：1 token ≈ 4 字符）
 TOOL_HISTORY_BUDGET_CHARS = 60_000
 
 Phase = Literal[
     "clarify",  # 需要澄清（HITL 中断）
     "plan_review",  # 分析计划待审批（HITL 中断，M2 Plan Mode）
+    "high_risk",  # 沙箱代码执行待确认（HITL 中断，L3 高危确认）
     "plan",  # 规划 / 重规划
     "query",  # DSL 取数
     "analyze",  # 沙箱分析
@@ -92,7 +98,11 @@ class SubagentTask(BaseModel):
     budget: SubagentBudget = Field(default_factory=SubagentBudget)
 
     def model_post_init(self, __context: Any) -> None:
-        unknown = set(self.allowed_tools) - set(default_registry().tool_names())
+        unknown = (
+            set(self.allowed_tools)
+            - set(default_registry().tool_names())
+            - set(BUILTIN_CAPABILITIES)
+        )
         if unknown:
             raise ValueError(f"allowed_tools 越过注册中心白名单: {sorted(unknown)}")
 
@@ -212,6 +222,9 @@ class AgentState(BaseModel):
     # L2 语义锚（规格 §5.2"仅 plan 后审批一次"）：本轮已审批即置位，
     # 自愈驱动的重规划不再打断用户（否则审批循环不收敛，实测踩坑）
     plan_reviewed: bool = False
+    # L3 高危确认锚：用户已批准本轮沙箱代码执行（analyze 步骤含 LLM 产码）。
+    # planner 每次产出新计划时复位（新计划 = 新的执行授权需求）
+    high_risk_approved: bool = False
     # 上次因 LLM 反思触发重规划时的产物进展指纹（重规划无进展护栏）：
     # 指纹不变说明重规划未带来任何新数据/新分析，必须停止空转。
     last_replan_fingerprint: str = ""
