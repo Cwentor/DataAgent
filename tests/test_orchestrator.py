@@ -1301,7 +1301,8 @@ def test_grounding_retry_success_keeps_llm_report(tmp_path, monkeypatch):
 
     def _fake_synth(state, material, extra_instruction=None):
         synth_calls.append(extra_instruction)
-        return next(synth_reports)
+        # 新契约：_synthesize_with_llm 返回 (报告, 失败原因)
+        return next(synth_reports), None
 
     monkeypatch.setattr(nodes, "_llm_json", _fake_llm_json)
     monkeypatch.setattr(nodes, "_synthesize_with_llm", _fake_synth)
@@ -1329,7 +1330,9 @@ def test_grounding_retry_exhausted_falls_back_to_deterministic(tmp_path, monkeyp
     synth_calls = iter([fabricated, fabricated])
 
     def _fake_synth(state, material, extra_instruction=None):
-        return next(synth_calls)
+        # 新契约：_synthesize_with_llm 返回 (报告, 失败原因)；grounding 失败由
+        # 节点内 grounding_review 判定，桩侧只承诺"LLM 调用本身成功"
+        return next(synth_calls), None
 
     monkeypatch.setattr(nodes, "_synthesize_with_llm", _fake_synth)
     trace = run_agent("2024年5月GMV是多少", session_id="retryfail")
@@ -1420,7 +1423,8 @@ def test_grounding_retry_residual_still_flagged(tmp_path, monkeypatch):
         return next(plan_seen)
 
     def _fake_synth(state, material, extra_instruction=None):
-        return next(synth_reports)
+        # 新契约：_synthesize_with_llm 返回 (报告, 失败原因)
+        return next(synth_reports), None
 
     monkeypatch.setattr(nodes, "_llm_json", _fake_llm_json)
     monkeypatch.setattr(nodes, "_synthesize_with_llm", _fake_synth)

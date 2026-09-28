@@ -1890,15 +1890,25 @@ def _render_table(table: dict[str, Any], *, limit: int = 10, currency: bool = Tr
 
 def _synthesize_with_llm(
     state: AgentState, material: str, extra_instruction: str | None = None
-) -> str | None:
-    """LLM 商业分析师综合（审计修复 R1）；失败返回 None 走确定性兜底。
+) -> tuple[str | None, str | None]:
+    """LLM 商业分析师综合（审计修复 R1）；失败返回 (None, 失败原因) 走确定性兜底。
 
+    返回 (report, failure_reason)：
+    - 成功 => (报告文本, None)；
+    - LLM 未配置 => (None, None)——离线/测试为常态，不计为降级；
+    - 调用失败/空输出/反契约 => (None, 原因摘要)——原因用于兜底报告
+      头部的降级标注（降级不可静默，2026-09 报告叙述化修复）。
+
+    读超时使用 SYNTHESIZER_TIMEOUT 专用预算：报告为长文生成，
+    常规 60s 网关默认会误杀（根因见设计文档）。
     ``extra_instruction``：Grounding 定向重写的修正指令（二期）——拼在
     user_prompt 末尾，仅约束本次调用。
     """
+    from config import settings
+
     llm = _resolve_llm()
     if llm is None:
-        return None
+        return None, None
     user_prompt = (
         f"# 用户问题\n{state.user_query}\n\n# 上游分析材料（唯一数据事实来源）\n{material}\n\n"
         "# 现在，按四段式结构输出最终分析报告（Markdown）。"
@@ -1916,23 +1926,25 @@ def _synthesize_with_llm(
                 {"role": "user", "content": user_prompt},
             ],
             json_mode=False,
+            timeout=settings.SYNTHESIZER_TIMEOUT,
         )
     except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"[:200]
         logger.warning(
             "LLM 商业分析师综合失败，走确定性分析师兜底",
-            extra={"error": f"{type(exc).__name__}: {exc}"[:500]},
+            extra={"error": reason},
         )
-        return None
+        return None, reason
     if not text or not text.strip():
         logger.warning("LLM 商业分析师综合返回空文本，走确定性分析师兜底")
-        return None
+        return None, "空输出"
     stripped = text.strip()
     # 反契约输出防御：LLM 若仍回 JSON（被 extract_json 成功解析），视为失败走兜底
     if stripped.startswith("{") or stripped.startswith("["):
         if extract_json(stripped) is not None:
             logger.warning("LLM 综合输出反契约（JSON 形态），走确定性分析师兜底")
-            return None
-    return stripped
+            return None, "输出反契约（JSON 形态）"
+    return stripped, None
 
 
 def _degraded_report(state: AgentState) -> str:
@@ -1956,6 +1968,7 @@ def _degraded_report(state: AgentState) -> str:
         )
         try:
             from agent.agent import extract_json
+            from config import settings
             from providers import chat_text
 
             text = chat_text(
@@ -1965,6 +1978,7 @@ def _degraded_report(state: AgentState) -> str:
                     {"role": "user", "content": user_prompt},
                 ],
                 json_mode=False,
+                timeout=settings.SYNTHESIZER_TIMEOUT,
             )
             stripped = (text or "").strip()
             if stripped and not (
@@ -2233,10 +2247,11 @@ def synthesize_node(state: AgentState) -> AgentState:
 
     # LLM 商业分析师综合（R1）；素材 = 去重后的 summary 产物 + 数据集预览
     llm_report: str | None = None
+    synthesize_failure: str | None = None
     if deduped_summaries or state.datasets:
         material = _analysis_material(state, include_trace=bool(state.error_context.errors))
         if material:
-            llm_report = _synthesize_with_llm(state, material)
+            llm_report, synthesize_failure = _synthesize_with_llm(state, material)
             if llm_report:
                 # Grounding 定向重试闭环（二期）：不可溯源超阈值 => 携修正指令
                 # 重写 1 次；仍超阈值 => 放弃 LLM 叙事，降级确定性渲染
@@ -2258,7 +2273,7 @@ def synthesize_node(state: AgentState) -> AgentState:
                         "重写报告：仅允许引用素材中出现过的数值及其万元/百分比换算；"
                         "素材中没有的数据必须如实写明「未获取到」。"
                     )
-                    retry_report = _synthesize_with_llm(
+                    retry_report, _retry_reason = _synthesize_with_llm(
                         state, material, extra_instruction=retry_instruction
                     )
                     retry_ok = False
@@ -2281,6 +2296,7 @@ def synthesize_node(state: AgentState) -> AgentState:
                             extra={"error": str(ungrounded[:10])[:400]},
                         )
                         llm_report = None
+                        synthesize_failure = "数值溯源重写后仍超阈值"
 
     if llm_report:
         report = _degradation_banner(state) + llm_report
@@ -2295,6 +2311,13 @@ def synthesize_node(state: AgentState) -> AgentState:
     banner = _degradation_banner(state)
     if banner:
         lines.append(banner.rstrip("\n"))
+        lines.append("")
+    # 降级不可静默：曾尝试 LLM 综合且失败时，头部明示渲染方式与原因
+    if synthesize_failure:
+        lines.append(
+            "> ⚠️ **本次报告由确定性模板生成**：LLM 商业分析师综合不可用"
+            f"（原因：{synthesize_failure}）。以下数值均来自真实查询结果，叙述深度有限。"
+        )
         lines.append("")
     lines.append(f"## 分析报告：{state.user_query}")
     lines.append("")
