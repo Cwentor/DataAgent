@@ -65,6 +65,7 @@ def chat_text(
     *,
     model: str | None = None,
     json_mode: bool = True,
+    timeout: int | None = None,
 ) -> str:
     """统一对话入口，三形态透明分发：
 
@@ -72,14 +73,17 @@ def chat_text(
     - 请求感知分发代理（``DispatchingAdapter``）按请求上下文转发真实适配器；
     - 旧形态 client（测试桩 / 既有 OpenAICompatClient）走 ``chat(messages) -> str``。
 
+    timeout：本次调用读超时覆盖（秒），None 时适配器回退网关默认
+    （settings.PROVIDER_TIMEOUT）；报告综合等长文生成调用传更大预算。
+
     该辅助函数使 agent 层既有调用点（LLMNL2DSL / LLMPlanner 等）无需关心
     客户端形态即可透明接入 Model Provider 网关；JSON Mode 默认开启，保证
     NL -> DSL 链路的结构化输出约束在协议层得到抹平保障。
     """
-    if isinstance(client, BaseAdapter):
-        return client.chat_text(messages, model=model, json_mode=json_mode)
-    if isinstance(client, DispatchingAdapter):
-        return client.chat_text(messages, model=model, json_mode=json_mode)
+    if hasattr(client, "chat_text"):
+        # 适配器（BaseAdapter）与分发代理（DispatchingAdapter）均为 chat_text 形态；
+        # 鸭子类型分发使测试桩等纯 chat_text 形态同样获得 timeout 透传
+        return client.chat_text(messages, model=model, json_mode=json_mode, timeout=timeout)
     return client.chat(messages)
 
 

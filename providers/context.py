@@ -67,9 +67,12 @@ class DispatchingAdapter:
         *,
         model: str | None = None,
         json_mode: bool = True,
+        timeout: int | None = None,
     ) -> str:
         """兼容旧形态便捷入口：转发到当前请求的真实适配器。"""
-        return self._resolve(model).chat_text(messages, model=model, json_mode=json_mode)
+        return self._resolve(model).chat_text(
+            messages, model=model, json_mode=json_mode, timeout=timeout
+        )
 
     def chat(self, request: Any) -> Any:
         """兼容 UnifiedChatRequest 直调形态：转发到当前请求的真实适配器。"""

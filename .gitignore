@@ -76,3 +76,6 @@ logs/
 .mimosa/
 
 .plan-ledger/
+
+# --- 计划工作台账（dev-executing-plans）---
+.plan-work/

@@ -680,3 +680,47 @@ def test_providers_http_api_flow(tmp_path, monkeypatch):
         server.server_close()
         reset_default_provider_store(None)
         reset_provider_factory(None)
+
+
+# --------------------------------------------------------------------------- #
+# 超时透传（2026-09 报告叙述化修复）
+# --------------------------------------------------------------------------- #
+def test_unified_chat_request_accepts_timeout():
+    from providers.models import UnifiedChatRequest
+
+    req = UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
+    assert req.timeout == 180
+    default = UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1")
+    assert default.timeout is None
+
+
+def test_base_adapter_chat_text_carries_timeout(monkeypatch):
+    from providers.adapters import OpenAIChatAdapter
+    from providers.models import UnifiedChatResponse
+
+    seen: dict = {}
+
+    def fake_chat(self, request):
+        seen["timeout"] = request.timeout
+        return UnifiedChatResponse(content="ok")
+
+    monkeypatch.setattr(OpenAIChatAdapter, "chat", fake_chat)
+    adapter = OpenAIChatAdapter(_provider(), "m-1")
+    text = adapter.chat_text([{"role": "user", "content": "hi"}], json_mode=False, timeout=180)
+    assert text == "ok"
+    assert seen["timeout"] == 180
+
+
+def test_chat_facade_forwards_timeout():
+    from providers import chat_text
+
+    seen: dict = {}
+
+    class _Fake:
+        def chat_text(self, messages, *, model=None, json_mode=True, timeout=None):
+            seen["timeout"] = timeout
+            return "ok"
+
+    result = chat_text(_Fake(), [{"role": "user", "content": "x"}], timeout=180)
+    assert result == "ok"
+    assert seen["timeout"] == 180
