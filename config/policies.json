@@ -5,10 +5,10 @@
   },
   "policies": {
     "admin": {
-      "allowed_tables": ["fact_orders", "fact_refunds", "dim_user", "dim_product"]
+      "allowed_tables": ["fact_orders", "fact_refunds", "dim_user", "dim_product", "dim_shop"]
     },
     "analyst": {
-      "allowed_tables": ["fact_orders", "fact_refunds", "dim_user", "dim_product"],
+      "allowed_tables": ["fact_orders", "fact_refunds", "dim_user", "dim_product", "dim_shop"],
       "row_filters": [
         { "field": "province", "operator": "in", "param": "principal.provinces" }
       ]

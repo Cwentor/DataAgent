@@ -170,8 +170,16 @@ def test_dimension_members_loaded_from_warehouse(conn):
         for r in conn.execute('SELECT DISTINCT "category" FROM "dim_product" ORDER BY 1').fetchall()
     ]
     assert members["category"] == tuple(db_categories)
-    # dim 表全部 str 字段均被覆盖（brand/gender 自动纳入，无需声明）
-    assert set(members) == {"province", "gender", "category", "brand"}
+    # dim 表全部 str 字段均被覆盖（brand/gender 自动纳入，无需声明；
+    # 默认覆写补齐 dim_shop/product_name 后，shop_name/product_name 同样自动纳入）
+    assert set(members) == {
+        "province",
+        "gender",
+        "category",
+        "brand",
+        "shop_name",
+        "product_name",
+    }
 
 
 def test_refresh_catalog_syncs_dimension_members_globals(conn):
@@ -242,3 +250,31 @@ def test_loader_aliases_fallback_and_override(conn, tmp_path):
     )
     cat2 = build_catalog(conn=conn, overlay_path=p)
     assert cat2.columns["order_amount"].aliases == ("gmv", "自定义别名")
+
+
+def test_project_default_overlay_keeps_shop_visible(conn):
+    """项目默认覆写（config/semantic.json）必须与内置目录口径一致：dim_shop 全链路可用。
+
+    回归背景：overlay 是整体替换而非合并，配置曾遗漏 dim_shop 导致服务启动后
+    店铺字段/意图词在 web 链路消失（内置目录口径与 web 口径分裂、无测试覆盖）。
+    """
+    # 不传 overlay_path => 走默认 config/semantic.json（与 web 启动 refresh_catalog 同源）
+    cat = build_catalog(conn=conn)
+    for field in ("shop_id", "shop_name", "product_name"):
+        assert field in cat.columns, f"默认覆写遗漏逻辑字段 {field}"
+    assert cat.aliases.get("dim_shop") == "s"
+    assert cat.join_rules["dim_shop"].join_type == "inner"
+    assert cat.columns["shop_name"].label == "门店名称"
+    assert "店铺" in cat.columns["shop_name"].aliases
+
+    refresh_catalog(conn=conn)
+    try:
+        dsl = QueryDSL(
+            metrics=[AggregateMetric(field="order_amount", agg=AggFunc.SUM, alias="gmv")],
+            dimensions=[Dimension(field="shop_name")],
+        )
+        sql = compile_sql(dsl)
+        assert "JOIN dim_shop s ON s.shop_id = f.shop_id" in sql
+        assert "GROUP BY s.shop_name" in sql
+    finally:
+        reset_defaults()
