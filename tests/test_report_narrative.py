@@ -145,3 +145,111 @@ def test_malformed_summary_degrades_without_crash(tmp_path, monkeypatch):
     report = _render_report(monkeypatch, tmp_path, state)
     assert "只有一条结论" in report
     assert "{" not in report  # 不 dump
+
+
+# --------------------------------------------------------------------------- #
+# 修复轮（评审 Important #1 + Minor #2/#4）
+# --------------------------------------------------------------------------- #
+def test_nested_containers_never_repr_dump(tmp_path, monkeypatch):
+    """二层嵌套 dict 与 list-of-list 严禁 repr 直出（修复轮 Important #1）。"""
+    state = AgentState(
+        session_id="nar3",
+        turn_id="t1",
+        trace_id="tr3",
+        user_query="嵌套结构渲染",
+        artifacts=[
+            Artifact(
+                kind="summary",
+                name="s1",
+                payload={
+                    "summary": {
+                        "title": "嵌套结构",
+                        "findings": ["存在二层嵌套与配对列表"],
+                        "metrics": {
+                            "extra_stat": {"week1": {"gmv": 1.0, "inner": {"a": 1}}},
+                            "pairs": [["A", 1], ["B", 2]],
+                        },
+                        "table": {
+                            "columns": ["dim", "payload"],
+                            "rows": [{"dim": "北京", "payload": ["x", "y"]}],
+                        },
+                    }
+                },
+            )
+        ],
+    )
+    report = _render_report(monkeypatch, tmp_path, state)
+    assert "{'" not in report  # 禁 dict repr（单引号形态）
+    assert "['" not in report  # 禁 list repr
+    assert '{"' not in report  # 禁 dict repr（双引号形态）
+    assert "（嵌套明细）" in report  # depth >= 2 折叠
+    assert "（共 2 项明细）" in report  # list 值折叠（pairs 与 table 单元格）
+
+
+def test_metric_human_nested_depth_semantics():
+    """_metric_human 容器守卫与 depth 语义（修复轮 Important #1）。"""
+    from core.orchestrator.nodes import _metric_human
+
+    assert _metric_human([1, 2, 3], "") == "（共 3 项明细）"
+    assert _metric_human(("a", "b"), "pair") == "（共 2 项明细）"
+    assert _metric_human({"gmv": 1.0}, "") == "（GMV 0.00 万元）"
+    # depth 耗尽：二层以下折叠，键值经 _metric_label 中文化
+    assert _metric_human({"a": 1}, "", depth=2) == "（嵌套明细）"
+    assert (
+        _metric_human({"week1": {"inner": {"a": 1}}}, "extra_stat")
+        == "（第 1 周 （inner （嵌套明细）））"
+    )
+
+
+def test_list_dict_table_missing_cell_placeholder(tmp_path, monkeypatch):
+    """list[dict] 行缺列 => 缺失单元格渲染为 — 占位对齐（修复轮 Minor #2）。"""
+    state = AgentState(
+        session_id="nar4",
+        turn_id="t1",
+        trace_id="tr4",
+        user_query="缺列表格渲染",
+        artifacts=[
+            Artifact(
+                kind="summary",
+                name="s1",
+                payload={
+                    "summary": {
+                        "title": "缺列表格",
+                        "findings": [],
+                        "metrics": {
+                            "region_rows": [
+                                {"province": "北京", "gmv_delta": -107150.97},
+                                {"province": "湖北"},
+                            ]
+                        },
+                        "table": {},
+                    }
+                },
+            )
+        ],
+    )
+    report = _render_report(monkeypatch, tmp_path, state)
+    assert "| — |" in report  # 缺失单元格占位
+    assert "| 湖北 | — |" in report  # 第二行缺 gmv_delta 列，占位对齐
+
+
+def test_render_isolation_degrades_section_on_crash(tmp_path, monkeypatch):
+    """单 summary 渲染抛错 => 小节降级占位、整体不抛（修复轮 Minor #4）。"""
+    from core.orchestrator import nodes as orch_nodes
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    state = AgentState(
+        session_id="nar5",
+        turn_id="t1",
+        trace_id="tr5",
+        user_query="渲染隔离",
+        artifacts=[
+            Artifact(kind="summary", name="s1", payload={"summary": {"title": "会炸的小节"}})
+        ],
+    )
+    monkeypatch.setattr(orch_nodes, "_summary_analyst_markdown", _boom)
+    report = _render_report(monkeypatch, tmp_path, state)
+    assert "### 归因分析" in report
+    assert "（该分析产物无法渲染，原始文件已留存工作区）" in report
