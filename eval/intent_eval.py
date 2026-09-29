@@ -5,7 +5,9 @@
 - metric_wan_answer => 报告含"查询答案："且金额万元化（金额类锚点直答）；
 - multi_metric  => 单数据集多列呈现：计数列名（order_id_count）进报告表格
   列头，无"无法作答"（多锚不丢锚）；
-- refusal => 报告含"无法作答"（诚实拒答 + 能力清单）。
+- refusal => 报告含"无法作答"（诚实拒答 + 能力清单）；2026-09 分层降级起，
+  LLM 失联时枚举未命中的筛选取值走选项式澄清挂起（零查询/零 LLM/无报告），
+  与 blocked 拒答同属"不答非所问"的诚实不产出终态，同样判 PASS。
 
 用法：
     python -m mock.init_duckdb   # 若数仓文件不存在
@@ -54,6 +56,16 @@ def main() -> int:
             ok = trace.phase == "done" and "order_id_count" in report and "无法作答" not in report
         elif expect == "refusal":
             ok = trace.phase == "done" and "无法作答" in report and "万元" not in report
+            # 2026-09 分层降级：枚举未命中的筛选取值（如数仓无"海南"）=>
+            # 选项式澄清挂起（设计 Review Focus #2：严禁自动猜测条件）。
+            # 该终态零查询、零 LLM、无报告，与 blocked 拒答同属诚实不产出，
+            # 达成 golden refusal 的根本意图（不答非所问、不编造口径）。
+            ok = ok or (
+                trace.phase == "clarify"
+                and bool(trace.clarification)
+                and not trace.plan_steps
+                and not report
+            )
         status = "PASS" if ok else "FAIL"
         print(f"[{status}] {question} (expect={expect})")
         if not ok:
