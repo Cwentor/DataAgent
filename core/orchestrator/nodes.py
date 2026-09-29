@@ -2584,7 +2584,12 @@ def _cannot_answer_report(state: AgentState) -> str:
 
 
 def _degradation_banner(state: AgentState) -> str:
-    """兜底接管的降级标注（十八期：降级不可静默）。"""
+    """兜底接管的降级标注（十八期：降级不可静默；2026-09 分层降级扩展）。"""
+    if state.answered_by == "degraded_confirmed":
+        return (
+            "> ⚠️ **本次报告由降级模式生成**（AI 规划暂不可用）：查询条件为规则推断"
+            "并经人工确认，未经 LLM 完整语义理解。\n\n"
+        )
     if state.answered_by != "heuristic":
         return ""
     return (

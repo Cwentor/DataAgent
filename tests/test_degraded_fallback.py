@@ -219,3 +219,73 @@ def test_planner_clarify_first_round_emits_options(monkeypatch, tmp_path):
     assert out.clarification
     assert out.clarification_options
     assert out.clarification_rounds == 1
+
+
+# --------------------------------------------------------------------------- #
+# 降级水印：degraded_confirmed 与 heuristic 文案区分
+# --------------------------------------------------------------------------- #
+def test_degradation_banner_distinguishes_confirmed():
+    """degraded_confirmed 水印明示"条件经人工确认"；heuristic 保持原文案。"""
+    from core.orchestrator.nodes import _degradation_banner
+    from core.orchestrator.state import AgentState
+
+    state = AgentState(
+        session_id="wm",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="x",
+        answered_by="degraded_confirmed",
+    )
+    banner = _degradation_banner(state)
+    assert "降级模式" in banner and "人工确认" in banner
+    heuristic_state = AgentState(
+        session_id="wm2",
+        turn_id="t1",
+        trace_id="tr2",
+        user_query="x",
+        answered_by="heuristic",
+    )
+    assert "离线兜底引擎" in _degradation_banner(heuristic_state)
+
+
+def test_degraded_plan_reject_emits_event(monkeypatch):
+    """降级计划被用户拒绝 => 发射 degrade/rejected 事件（可观测埋点）。
+
+    实际签名 ``_plan_gate(state)`` 单参数（中断经 maybe_interrupt/interrupt
+    完成），以桩替身模拟用户在 plan_review 审批卡上选择"拒绝"。
+    """
+    from core.orchestrator import events as orch_events
+    from core.orchestrator import langgraph_engine
+    from core.orchestrator.langgraph_engine import _plan_gate
+    from core.orchestrator.state import AgentState, PlanStep
+
+    seen: list[tuple[str, dict]] = []
+    orig = orch_events.emit_event
+
+    def spy(event: str, payload: dict) -> None:
+        seen.append((event, payload))
+        orig(event, payload)
+
+    # langgraph_engine 以 `from core.orchestrator import events` 引用，
+    # patch events 模块属性即可覆盖其调用点
+    monkeypatch.setattr(orch_events, "emit_event", spy)
+    monkeypatch.setattr(
+        langgraph_engine,
+        "maybe_interrupt",
+        lambda state, payload, *, trigger: {"action": "reject", "instruction": None},
+    )
+    state = AgentState(
+        session_id="rj",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="海南省的GMV",
+        answered_by="degraded_confirmed",
+        plan_steps=[
+            PlanStep(id="s1", goal="按确认条件查询GMV", kind="query"),
+            PlanStep(id="s2", goal="汇总作答", kind="synthesize", depends_on=["s1"]),
+        ],
+        phase="query",
+    )
+    out = _plan_gate(state)
+    assert out.phase == "done"
+    assert any(e == "degrade" and p.get("outcome") == "rejected" for e, p in seen)
