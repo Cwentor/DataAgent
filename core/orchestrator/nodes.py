@@ -2625,8 +2625,13 @@ def _cannot_answer_report(state: AgentState) -> str:
     return "\n".join(lines)
 
 
-def _degradation_banner(state: AgentState) -> str:
-    """兜底接管的降级标注（十八期：降级不可静默；2026-09 分层降级扩展）。"""
+def _degradation_banner(state: AgentState, synth_llm_used: bool = False) -> str:
+    """兜底接管的降级标注（十八期：降级不可静默；2026-09 分层降级扩展）。
+
+    synth_llm_used：综合层本次是否由 LLM 产出叙述。规划降级 ≠ 报告离线
+    生成——heuristic 规划 + LLM 综合成功时必须明示"计划离线、叙述由 AI
+    生成"（2026-09-29 用户反馈：旧文案让人误以为整份报告都是离线拼装）。
+    """
     if state.answered_by == "degraded_confirmed":
         return (
             "> ⚠️ **本次报告由降级模式生成**（AI 规划暂不可用）：查询条件为规则推断"
@@ -2641,9 +2646,14 @@ def _degradation_banner(state: AgentState) -> str:
         )
     if state.answered_by != "heuristic":
         return ""
+    if synth_llm_used:
+        return (
+            "> ⚠️ **本次分析计划由离线规则引擎生成**（LLM 规划暂不可用），"
+            "分析口径来自预置模板；报告叙述由 AI 综合生成，数值均经溯源校验。\n\n"
+        )
     return (
         "> ⚠️ **本次回答由离线兜底引擎生成**（LLM 规划不可用），"
-        "口径为确定性规则匹配结果，仅供参考。\n\n"
+        "分析口径与报告均为确定性规则结果，仅供参考。\n\n"
     )
 
 
@@ -2773,7 +2783,8 @@ def synthesize_node(state: AgentState) -> AgentState:
                         synthesize_failure = "数值溯源重写后仍超阈值"
 
     if llm_report:
-        report = _degradation_banner(state) + llm_report
+        # LLM 综合成功：水印明示"计划离线、叙述由 AI 生成"（措辞精确化）
+        report = _degradation_banner(state, synth_llm_used=True) + llm_report
         events.emit_event(
             events.EVENT_ARTIFACT_EMIT,
             {"artifact": {"type": "markdown_report", "title": "分析报告", "content": report}},
@@ -2782,7 +2793,7 @@ def synthesize_node(state: AgentState) -> AgentState:
 
     # ---- 确定性分析师兜底（无 LLM / LLM 输出反契约）---- #
     lines: list[str] = []
-    banner = _degradation_banner(state)
+    banner = _degradation_banner(state, synth_llm_used=False)
     if banner:
         lines.append(banner.rstrip("\n"))
         lines.append("")

@@ -551,3 +551,57 @@ def test_coder_prompt_summary_discipline():
     assert "title 必须为简体中文业务短语" in CODER_SYSTEM
     assert "metrics 只放标量" in CODER_SYSTEM
     assert "明细矩阵一律放 table 参数" in CODER_SYSTEM
+
+
+# --------------------------------------------------------------------------- #
+# 降级标注文案精确化（2026-09）：规划层降级 ≠ 报告离线生成，按综合层实际结果措辞
+# --------------------------------------------------------------------------- #
+def test_degradation_banner_llm_synth_succeeded():
+    """规划降级 + LLM 综合成功 => 明示"计划离线、叙述由 AI 生成"。"""
+    from core.orchestrator.nodes import _degradation_banner
+    from core.orchestrator.state import AgentState
+
+    state = AgentState(
+        session_id="b1",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="x",
+        answered_by="heuristic",
+    )
+    banner = _degradation_banner(state, synth_llm_used=True)
+    assert "计划由离线规则引擎生成" in banner
+    assert "报告叙述由 AI 综合生成" in banner
+    assert "溯源校验" in banner
+    assert "仅供参考" not in banner  # 不得再暗示整份报告是离线拼装
+
+
+def test_degradation_banner_deterministic_synth():
+    """规划降级 + 综合亦为确定性 => 明示"计划与报告均为确定性结果"。"""
+    from core.orchestrator.nodes import _degradation_banner
+    from core.orchestrator.state import AgentState
+
+    state = AgentState(
+        session_id="b2",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="x",
+        answered_by="heuristic",
+    )
+    banner = _degradation_banner(state, synth_llm_used=False)
+    assert "确定性" in banner and "仅供参考" in banner
+
+
+def test_degradation_banner_default_keeps_backcompat():
+    """默认参数（未传综合状态）保持可调用，按确定性措辞输出。"""
+    from core.orchestrator.nodes import _degradation_banner
+    from core.orchestrator.state import AgentState
+
+    state = AgentState(
+        session_id="b3",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="x",
+        answered_by="heuristic",
+    )
+    assert "确定性" in _degradation_banner(state)
+    assert _degradation_banner(state) == _degradation_banner(state, synth_llm_used=False)
