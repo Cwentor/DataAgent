@@ -47,7 +47,7 @@ LLM 不可用（429 限流/失联）时系统能力断崖式下跌：`planner_no
 
 - **单一候选口径**（指标+时间+筛选均可确定）→ 产出降级计划 → **plan_review 审批卡**（既有 interrupt 机制），卡上标注"⚠️ AI 规划暂不可用：以下查询条件为规则推断，请确认"——批准执行 / 修改输入补充条件（既有修改指令闭环）/ 拒绝终止；
 - **候选歧义**（筛选值多候选或缺失）→ **选项式澄清**（既有 `clarification_options` 机制）：列出候选口径或请求补充；用户回答后经 `human_reply` 合并（clarify_node 既有结构）重新弱解析，唯一化后进审批卡；
-- 澄清后仍无法唯一化 → 二轮澄清（上限 1 次）→ 仍不行回落 NOT_EXIST 拒答（不无限循环）；轮次计数由 state 新增字段 `clarification_rounds` 承载（clarify_node 合并 human_reply 时递增，planner 消费判定超限）；
+- 澄清后仍无法唯一化 → **单轮澄清 + 二次解析，仍歧义即拒答（防循环）**，回落 NOT_EXIST 拒答（不无限循环）；轮次计数由 state 新增字段 `clarification_rounds` 承载（planner 澄清挂起时递增，`_plan_gate` resume 合并答复时再递增，planner 消费判定超限）；用户点选澄清选项（回执"维度=值"形态）经 `_degraded_parse` 补充段解析采纳为**已确认筛选条件**（白名单第②类"用户确认内容"），二次解析直接唯一化进审批卡——label 需经维度词表反查命中且 value 精确命中枚举，否则忽略补充（宁缺毋滥）；
 - 前端零改动：审批卡与选项澄清组件均已存在并被消费。
 
 ### 3.4 429 退避重试（providers 网关层）
@@ -58,8 +58,8 @@ LLM 不可用（429 限流/失联）时系统能力断崖式下跌：`planner_no
 
 ### 3.5 降级水印与可观测
 
-- `answered_by` 新增取值 `degraded_confirmed`（弱解析计划经用户批准后）；`_degradation_banner` 增加对应文案："⚠️ 本次报告由降级模式生成（AI 规划暂不可用）：查询条件为规则推断并经人工确认，未经 LLM 完整语义理解"；现有 heuristic banner 与综合降级标注保留；
-- 埋点（复用 audit/metrics 指标框架）：`degrade_parse_hit`（弱解析命中）/ `degrade_confirmed`（用户确认执行）/ `degrade_rejected`（用户拒绝或回落拒答）三个计数器。
+- `answered_by` 新增取值：`degraded_confirmed`（L1-L3 弱解析计划经 plan_review 人工批准）；`degraded_auto`（L4 全自动，计划经 `maybe_interrupt` 自动批准直通、**未经人工确认**，水印必须如实区分——诚实铁律）；`_degradation_banner` 对应两套文案——confirmed："⚠️ 本次报告由降级模式生成（AI 规划暂不可用）：查询条件为规则推断并经人工确认，未经 LLM 完整语义理解"；auto："⚠️ 本次报告由降级模式生成（AI 规划暂不可用）：查询条件为规则推断，当前为全自动审批模式、未经人工确认，请谨慎采信"；现有 heuristic banner 与综合降级标注保留；
+- 埋点（复用 audit/metrics 指标框架）：`MetricsRegistry.record_degrade(outcome)` 三计数器——`parse_hit`（弱解析/澄清命中，planner plan 与 clarify 首轮分支打点）/ `confirmed`（降级计划获批准执行，`_plan_gate` approve 分支打点，L4 自动批准同口径计入）/ `rejected`（用户拒绝或回落拒答，`_plan_gate` reject 分支与 planner 两处拒答打点），随 `GET /api/metrics` 以 `degrade_outcomes` 导出；事件侧 `emit_event("degrade", {outcome})` 双写（parse_hit/rejected），前端 `web/static/js/protocol.js` 的 `AgentEventType` 白名单纳入 `degrade`（SSE 帧不再被静默丢弃）。
 
 ### 3.6 数据流（修复后）
 
@@ -84,7 +84,7 @@ LLM 不可用（429 限流/失联）时系统能力断崖式下跌：`planner_no
 - 429 重试仍失败 → 正常进入模板/弱解析/拒答分流（与现状一致，只是多两次机会）；
 - 弱解析 DSL 构造失败（跨表混合锚等，`_scalar_dsl` 既有 None 语义）→ 回落 NOT_EXIST 拒答；
 - 用户拒绝降级计划 → 终止本轮（phase=done，如实告知），不自动改猜条件；
-- 二轮澄清后仍歧义 → NOT_EXIST 拒答（防循环，plan_edit_instruction 同类防循环经验）；
+- 澄清后二次解析仍歧义 → NOT_EXIST 拒答（防循环，plan_edit_instruction 同类防循环经验）；
 - 审计门/编译器对降级 DSL 一视同仁（违规照样 REJECTED，拒绝原因可自愈——降级模式无 LLM 自愈，直接回落拒答）。
 
 ## 5. 测试与验收
