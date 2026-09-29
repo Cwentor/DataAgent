@@ -848,3 +848,64 @@ def test_openai_responses_chat_timeout_override(monkeypatch):
         UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
     )
     assert captured["timeout"] == 180
+
+
+# --------------------------------------------------------------------------- #
+# 429 限流退避重试（2026-09 分层降级兜底：LLM_MAX_RETRIES 死配置接线）
+# --------------------------------------------------------------------------- #
+def test_chat_facade_retries_on_rate_limit(monkeypatch):
+    """第一次 429、第二次成功 => 门面自动重试并返回结果。"""
+    from config import settings
+    from providers import RateLimitError, chat_text
+
+    monkeypatch.setattr(settings, "LLM_MAX_RETRIES", 2)
+    monkeypatch.setattr("providers.time.sleep", lambda _s: None)
+    calls: list[int] = []
+
+    class _Flaky:
+        def chat_text(self, messages, *, model=None, json_mode=True, timeout=None):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RateLimitError("配额超限或请求过于频繁（HTTP 429）")
+            return "ok"
+
+    assert chat_text(_Flaky(), [{"role": "user", "content": "x"}]) == "ok"
+    assert len(calls) == 2
+
+
+def test_chat_facade_rate_limit_exhausted_raises(monkeypatch):
+    """重试耗尽仍 429 => 原样抛出（调用方走各自兜底）。"""
+    from config import settings
+    from providers import RateLimitError, chat_text
+
+    monkeypatch.setattr(settings, "LLM_MAX_RETRIES", 1)
+    monkeypatch.setattr("providers.time.sleep", lambda _s: None)
+    calls: list[int] = []
+
+    class _Always429:
+        def chat_text(self, messages, *, model=None, json_mode=True, timeout=None):
+            calls.append(1)
+            raise RateLimitError("429")
+
+    with pytest.raises(RateLimitError):
+        chat_text(_Always429(), [{"role": "user", "content": "x"}])
+    assert len(calls) == 2  # 首调 + 1 次重试
+
+
+def test_chat_facade_no_retry_on_other_errors(monkeypatch):
+    """非 429 异常（如 ProviderError）不重试，直接抛出。"""
+    from config import settings
+    from providers import ProviderError, chat_text
+
+    monkeypatch.setattr(settings, "LLM_MAX_RETRIES", 2)
+    monkeypatch.setattr("providers.time.sleep", lambda _s: None)
+    calls: list[int] = []
+
+    class _Broken:
+        def chat_text(self, messages, *, model=None, json_mode=True, timeout=None):
+            calls.append(1)
+            raise ProviderError("网络请求失败")
+
+    with pytest.raises(ProviderError):
+        chat_text(_Broken(), [{"role": "user", "content": "x"}])
+    assert len(calls) == 1

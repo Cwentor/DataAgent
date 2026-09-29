@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from providers.adapters import (
@@ -59,6 +60,22 @@ from providers.store import (
 )
 
 
+def _chat_dispatch(
+    client: Any,
+    messages: list[dict[str, str]],
+    *,
+    model: str | None,
+    json_mode: bool,
+    timeout: int | None,
+) -> str:
+    """单次分发（不重试）：三形态透明分发的原有逻辑。"""
+    if hasattr(client, "chat_text"):
+        # 适配器（BaseAdapter）与分发代理（DispatchingAdapter）均为 chat_text 形态；
+        # 鸭子类型分发使测试桩等纯 chat_text 形态同样获得 timeout 透传
+        return client.chat_text(messages, model=model, json_mode=json_mode, timeout=timeout)
+    return client.chat(messages)
+
+
 def chat_text(
     client: Any,
     messages: list[dict[str, str]],
@@ -67,7 +84,7 @@ def chat_text(
     json_mode: bool = True,
     timeout: int | None = None,
 ) -> str:
-    """统一对话入口，三形态透明分发：
+    """统一对话入口，三形态透明分发（429 限流自动退避重试）：
 
     - Model Provider 适配器（``BaseAdapter``）走 UnifiedChatRequest 统一接口；
     - 请求感知分发代理（``DispatchingAdapter``）按请求上下文转发真实适配器；
@@ -76,15 +93,23 @@ def chat_text(
     timeout：本次调用读超时覆盖（秒），None 时适配器回退网关默认
     （settings.PROVIDER_TIMEOUT）；报告综合等长文生成调用传更大预算。
 
-    该辅助函数使 agent 层既有调用点（LLMNL2DSL / LLMPlanner 等）无需关心
-    客户端形态即可透明接入 Model Provider 网关；JSON Mode 默认开启，保证
-    NL -> DSL 链路的结构化输出约束在协议层得到抹平保障。
+    429 限流（RateLimitError）按 LLM_MAX_RETRIES（封顶 2，短退避 1s/3s）
+    自动重试——共享中转的间歇性限流不应直接打穿为降级；其他异常不重试。
     """
-    if hasattr(client, "chat_text"):
-        # 适配器（BaseAdapter）与分发代理（DispatchingAdapter）均为 chat_text 形态；
-        # 鸭子类型分发使测试桩等纯 chat_text 形态同样获得 timeout 透传
-        return client.chat_text(messages, model=model, json_mode=json_mode, timeout=timeout)
-    return client.chat(messages)
+    from config import settings
+
+    attempts = max(0, min(int(settings.LLM_MAX_RETRIES), 2))
+    delays = (1.0, 3.0)
+    for attempt in range(attempts + 1):
+        try:
+            return _chat_dispatch(
+                client, messages, model=model, json_mode=json_mode, timeout=timeout
+            )
+        except RateLimitError:
+            if attempt >= attempts:
+                raise
+            time.sleep(delays[min(attempt, len(delays) - 1)])
+    raise RateLimitError("重试循环异常退出（不可达防御分支）")
 
 
 __all__ = [
