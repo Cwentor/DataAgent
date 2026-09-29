@@ -152,6 +152,9 @@ def _plan_gate(state: AgentState) -> AgentState:
         trigger="plan_review",
     )
     if resume.get("action") == "reject":
+        if state.answered_by == "degraded_confirmed":
+            # 降级可观测：用户拒绝降级推断计划（设计 §3.5 degrade_rejected）
+            events.emit_event("degrade", {"outcome": "rejected", "query": state.user_query[:200]})
         # 规格 §5.1 ③：终止并如实报告，不产出
         return state.apply(
             phase="done",
