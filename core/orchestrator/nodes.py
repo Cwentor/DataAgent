@@ -32,6 +32,7 @@ from agent.time_utils import parse_explicit_time_window
 from audit.logging import get_logger
 from core.orchestrator import events
 from core.orchestrator.intent import (
+    IntentProfile,
     IntentType,
     classify_intent,
     dimension_terms,
@@ -271,6 +272,138 @@ def _diagnostic_plan_steps(query: str) -> list[PlanStep]:
             depends_on=["s2", "s3"],
         ),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# 分层降级兜底（2026-09）：UNKNOWN 二次判定与弱解析（设计 §3.1-3.3）
+# --------------------------------------------------------------------------- #
+# 分组提示词根："{词根}{维度别名}"形态（"各省份/按省份/每个省份"）判分组用法
+_GROUP_HINT_TOKENS: tuple[str, ...] = ("各", "按", "每个", "分", "所有")
+# 缺省查询窗口（与 _scalar_dsl 同锚；报告侧由 _default_scope_note 明示口径）
+_DEGRADE_DEFAULT_WINDOW = {"start": "2024-05-01", "end": "2024-05-15"}
+
+
+def _wants_grouping(query: str, dim: str) -> bool:
+    """判定维度在问题中是否为分组用法（"各省份的 GMV"）而非筛选（"海南省的 GMV"）。"""
+    for alias, field in dimension_terms().items():
+        if field != dim:
+            continue
+        if any(f"{token}{alias}" in query for token in _GROUP_HINT_TOKENS):
+            return True
+    return False
+
+
+def _degraded_parse(
+    query: str, profile: IntentProfile, enum_values: dict[str, list[str]] | None
+) -> tuple[str, Any]:
+    """UNKNOWN 二次判定（分层降级兜底）。
+
+    输入为 classify_intent 的确定性画像（不信任 LLM 回传意图）。返回 (mode, payload)：
+    - ("not_exist", reason)：无指标锚 / 仅维度锚 / 跨表混合锚 => NOT_EXIST 拒答
+      （语义不存在，宁拒不错）；
+    - ("plan", steps)：唯一候选口径 => 降级计划（query+synthesize 两步结构，
+      严禁 analyze——禁多步组合是结构约束而非提示词约束）；
+    - ("clarify", (question, options))：筛选值多候选或缺失 => 选项式澄清
+      （用户回答经 human_reply 合并后重新解析，唯一化后进 plan_review）。
+
+    筛选条件来源白名单（强制）：显式时间解析 / 用户确认内容 / 枚举值精确命中
+    （数据真实存在不算猜）；枚举未命中的取值一律留白交用户确认。
+    """
+    # 复合问句（指标锚+维度限定共存）判 UNKNOWN 时 anchor_fields 为空
+    # （intent.py 契约，见 classify_intent 复合问句注释），而弱解析的主要
+    # 来源正是此类问句——按同一词表对 query 确定性重提取锚点（与 L1 硬
+    # 匹配同源，非猜测）；profile 已携带锚点（METRIC_SCALAR 等）时直通。
+    if not profile.anchor_fields:
+        from core.orchestrator.intent import _build_metric_terms, _extract_anchors
+
+        metrics = _extract_anchors(query, _build_metric_terms())
+        dims = _extract_anchors(query, dimension_terms())
+        profile = IntentProfile(profile.intent, metrics + dims, profile.confidence)
+    metrics_anchors = tuple(a for a in profile.anchor_fields if a in _SCALAR_FIELD_AGG)
+    if not metrics_anchors:
+        dim_only = [a for a in profile.anchor_fields if a in dimension_terms()]
+        if dim_only:
+            labels = "、".join(_dimension_label(d) for d in dim_only)
+            return (
+                "not_exist",
+                f"识别到维度【{labels}】但未识别到任何可查询指标，无法构造查询",
+            )
+        return ("not_exist", "无法从语义目录识别问题意图（未命中任何指标/维度锚点）")
+    tables = {_SCALAR_ANCHOR_TABLE[a] for a in metrics_anchors}
+    if len(tables) > 1:
+        return (
+            "not_exist",
+            "识别到跨表指标锚点（如 GMV 与退款金额），单查询无法同口径构造",
+        )
+    dim_anchors = tuple(a for a in profile.anchor_fields if a not in metrics_anchors)
+
+    # 维度用法判定：分组提示命中 => 分组；取值唯一命中枚举 => 筛选；
+    # 多候选/未命中 => 澄清（严禁猜测筛选条件）
+    enums = enum_values or {}
+    filters: list[dict[str, Any]] = []
+    group_dims: list[str] = []
+    pending: list[tuple[str, list[str]]] = []
+    for dim in dim_anchors:
+        if _wants_grouping(query, dim):
+            group_dims.append(dim)
+            continue
+        hits = [v for v in (enums.get(dim) or []) if v and v in query]
+        if len(hits) == 1:
+            filters.append({"field": dim, "operator": "eq", "value": hits[0]})
+        else:
+            pending.append((dim, hits))
+    if pending:
+        metric_labels = "、".join(_metric_label(m) for m in metrics_anchors)
+        question = (
+            f"AI 规划暂不可用，已识别指标【{metric_labels}】，但以下维度的"
+            "筛选条件无法从问题中唯一确定，请补充或选择："
+        )
+        options: list[str] = []
+        for dim, hits in pending:
+            label = _dimension_label(dim)
+            if hits:
+                options.extend(f"{label}={v}" for v in hits[:4])
+            else:
+                options.append(f"按{label}分组统计（不筛选具体取值）")
+                options.append(f"不限定{label}，查询全部")
+        return ("clarify", (question, options[:6]))
+
+    explicit = parse_explicit_time_window(query)
+    window = (
+        {"start": explicit[0], "end": explicit[1]} if explicit else dict(_DEGRADE_DEFAULT_WINDOW)
+    )
+    if tables == {"fact_orders"}:
+        filters.append({"field": "pay_status", "operator": "eq", "value": "SUCCESS"})
+    dsl: dict[str, Any] = {
+        "metrics": [
+            {
+                "kind": "aggregate",
+                "field": field,
+                "agg": _SCALAR_FIELD_AGG[field],
+                "alias": field if _SCALAR_FIELD_AGG[field] == "sum" else f"{field}_count",
+            }
+            for field in metrics_anchors
+        ],
+        "dimensions": [{"field": d} for d in group_dims],
+        "filters": filters,
+        "time_filter": {"range_type": "absolute", "absolute": window},
+    }
+    scope_desc = "、".join(_metric_label(m) for m in metrics_anchors)
+    if group_dims:
+        scope_desc += f"（按{'、'.join(_dimension_label(d) for d in group_dims)}分组）"
+    for f in filters:
+        if f["field"] != "pay_status":
+            scope_desc += f"（{_dimension_label(f['field'])}={f['value']}）"
+    steps = [
+        PlanStep(id="s1", goal=f"按确认条件查询{scope_desc}", kind="query", dsl=dsl),
+        PlanStep(
+            id="s2",
+            goal="按确认条件汇总查询结果作答（降级模式）",
+            kind="synthesize",
+            depends_on=["s1"],
+        ),
+    ]
+    return ("plan", steps)
 
 
 def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
