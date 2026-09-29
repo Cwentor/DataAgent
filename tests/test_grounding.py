@@ -43,3 +43,66 @@ def test_date_tokens_are_not_flagged():
         "环比基准期为 2024 年 4 月。"
     )
     assert grounding_review(report, allowed) == []
+
+
+def test_markdown_list_numbers_are_not_flagged():
+    """排查建议的 Markdown 序号（1. 2. 3. 4.）不得计入不可溯源。
+
+    2026-09-29 线上实证：四段式报告的"业务假设与排查建议"小节通常
+    4 条编号列表，序号被数字正则抠成业务数值 => 恰超阈值 >3 =>
+    整份忠实报告被弃用。序号是结构标记，不是数据。
+    """
+    allowed = {1156943.73, 0.078}
+    report = (
+        "### 业务假设与排查建议\n"
+        "1. 排查北京促销活动退出的影响；\n"
+        "2. 关注客单价的下滑趋势；\n"
+        "3. 核对支付成功率变化；\n"
+        "4. 跟进重点省份的复购情况。\n"
+    )
+    assert grounding_review(report, allowed) == []
+
+
+def test_chinese_list_numbers_are_not_flagged():
+    """中文序号形态（1、2、）与行内编号同样排除。"""
+    allowed = {0.078}
+    report = "1、排查活动影响\n2、关注客单价\n3、核对支付成功率"
+    assert grounding_review(report, allowed) == []
+
+
+def test_summary_string_numbers_enter_whitelist():
+    """summary 字符串值（findings/title 文本）里的数字必须入白名单。
+
+    2026-09-29 线上实证：findings 叙述"增长 6.2%"里的数字不在数值
+    字段中，LLM 忠实复述被误杀；title 被 Coder 误塞统计 dict 时其
+    repr 里的分析结果数字同理。字符串数字来自确定性上游产物，
+    不是 LLM 编造，必须可溯源。
+    """
+    from core.orchestrator.grounding import collect_allowed_values
+    from core.orchestrator.state import AgentState, Artifact
+
+    state = AgentState(
+        session_id="g1",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="x",
+        artifacts=[
+            Artifact(
+                kind="summary",
+                name="s1",
+                payload={
+                    "summary": {
+                        "title": "驱动因子分解",
+                        "findings": ["GMV 增长 6.2%，主要因子 [买家数] 贡献 62%"],
+                        "metrics": {"baseline": 1230127.5},
+                        "table": {},
+                    }
+                },
+            )
+        ],
+    )
+    allowed = collect_allowed_values(state, None)
+    assert 6.2 in allowed and 0.062 in allowed  # "6.2%" 两种量纲候选
+    assert 62.0 in allowed and 0.62 in allowed  # "62%" 两种量纲候选
+    # 忠实复述 findings 的报告不再被误杀
+    assert grounding_review("GMV 增长 6.2%，买家数贡献 62%。", allowed) == []
