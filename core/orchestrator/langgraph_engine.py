@@ -128,6 +128,7 @@ def _plan_gate(state: AgentState) -> AgentState:
             user_query=f"{state.user_query}（用户补充：{str(resume_value).strip()}）",
             human_reply=None,
             clarification=None,
+            clarification_rounds=state.clarification_rounds + 1,
             plan_steps=[],
             phase="plan",
         )

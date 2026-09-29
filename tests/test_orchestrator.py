@@ -1433,3 +1433,16 @@ def test_grounding_retry_residual_still_flagged(tmp_path, monkeypatch):
     assert "115.69" in trace.report
     assert "数据溯源提示" in trace.report  # 重试残留必须标注
     assert "42.5" in trace.report  # 残留数值仍呈现但已警示
+
+
+# --------------------------------------------------------------------------- #
+# 分层降级兜底：澄清轮次计数（二轮上限的状态载体）
+# --------------------------------------------------------------------------- #
+def test_clarification_rounds_field_defaults_zero():
+    """澄清轮次计数字段存在且默认 0。"""
+    from core.orchestrator.state import AgentState
+
+    state = AgentState(session_id="cr", turn_id="t1", trace_id="tr1", user_query="x")
+    assert state.clarification_rounds == 0
+    bumped = state.apply(clarification_rounds=state.clarification_rounds + 1)
+    assert bumped.clarification_rounds == 1

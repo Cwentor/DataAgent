@@ -179,6 +179,9 @@ class AgentState(BaseModel):
     clarification_options: list[str] = Field(
         default_factory=list, description="选项式澄清候选（前端 pill 按钮，点击即答复）"
     )
+    clarification_rounds: int = Field(
+        default=0, description="降级澄清已发生轮次（二轮仍歧义则拒答，防循环）"
+    )
     human_reply: str | None = Field(default=None, description="HITL 恢复时的用户答复")
     # 执行轨迹
     tool_calls: list[ToolRecord] = Field(default_factory=list)
