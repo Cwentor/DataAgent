@@ -11,7 +11,7 @@
  * @property {Object} payload           事件载荷（按 event 类型判别）
  *
  * @typedef {'plan_created'|'step_start'|'tool_start'|'tool_end'|'reflection'|
- *           'hitl_request'|'artifact_emit'|'done'|'error'} AgentEventType
+ *           'degrade'|'hitl_request'|'artifact_emit'|'done'|'error'} AgentEventType
  */
 (function () {
   "use strict";
@@ -19,7 +19,7 @@
   /** 事件类型全集（运行时守卫用；未知类型忽略不炸）。 */
   var AGENT_EVENT_TYPES = [
     "plan_created", "step_start", "tool_start", "tool_end",
-    "reflection", "hitl_request", "artifact_emit", "done", "error"
+    "reflection", "degrade", "hitl_request", "artifact_emit", "done", "error"
   ];
 
   /** 工具名全集（与后端埋点对齐）。 */

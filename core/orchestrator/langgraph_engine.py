@@ -29,6 +29,7 @@ from langgraph.graph import END
 from langgraph.graph import StateGraph as LGStateGraph
 from langgraph.types import Command, interrupt
 
+from audit.metrics import default_registry
 from config import settings
 from core.orchestrator import events
 from core.orchestrator.agent import (
@@ -152,9 +153,11 @@ def _plan_gate(state: AgentState) -> AgentState:
         trigger="plan_review",
     )
     if resume.get("action") == "reject":
-        if state.answered_by == "degraded_confirmed":
-            # 降级可观测：用户拒绝降级推断计划（设计 §3.5 degrade_rejected）
+        if state.answered_by in ("degraded_confirmed", "degraded_auto"):
+            # 降级可观测：用户拒绝降级推断计划（设计 §3.5 degrade_rejected；
+            # degraded_auto = L4 全自动降级计划，拒绝同样埋点）
             events.emit_event("degrade", {"outcome": "rejected", "query": state.user_query[:200]})
+            default_registry().record_degrade("rejected")
         # 规格 §5.1 ③：终止并如实报告，不产出
         return state.apply(
             phase="done",
@@ -169,6 +172,10 @@ def _plan_gate(state: AgentState) -> AgentState:
             phase="plan",
         )
     # approve / edit 均置审批标记（edit 的重规划执行自动，不再审批）
+    if state.answered_by.startswith("degraded_"):
+        # 降级可观测：降级计划获批准执行（设计 §3.5 degrade_confirmed）；
+        # L4 的自动 approve（未经人工确认）同口径计入，水印已如实区分
+        default_registry().record_degrade("confirmed")
     return state.apply(plan_reviewed=True)
 
 

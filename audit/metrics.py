@@ -32,6 +32,8 @@ class MetricsRegistry:
         self._error_kinds: Counter[str] = Counter()
         # 熔断事件：查询超时 / 扫描行数熔断 / 返回行数熔断 / 不安全 SQL
         self._circuit_breakers: Counter[str] = Counter()
+        # 分层降级兜底（2026-09）：弱解析命中 / 计划获批准执行 / 拒绝或回落拒答
+        self._degrade_outcomes: Counter[str] = Counter()
         # Multi-Tool Agent：工具调用次数与失败次数
         self._tools_called = 0
         self._tool_errors = 0
@@ -75,6 +77,12 @@ class MetricsRegistry:
         with self._lock:
             self._circuit_breakers[kind] += 1
 
+    def record_degrade(self, outcome: str) -> None:
+        """登记一次分层降级事件（parse_hit=弱解析命中 / confirmed=计划获批准 /
+        rejected=用户拒绝或回落拒答）。"""
+        with self._lock:
+            self._degrade_outcomes[outcome] += 1
+
     def record_self_heal_failure(self) -> None:
         """登记一次自愈失败（Record a self-heal failure）。"""
         with self._lock:
@@ -109,6 +117,7 @@ class MetricsRegistry:
                 "action_distribution": dict(self._action_counts),
                 "error_kinds": dict(self._error_kinds),
                 "circuit_breakers": dict(self._circuit_breakers),
+                "degrade_outcomes": dict(self._degrade_outcomes),
                 "tools": {
                     "called": self._tools_called,
                     "errors": self._tool_errors,
