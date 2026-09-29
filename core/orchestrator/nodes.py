@@ -1819,7 +1819,20 @@ def _summary_analyst_markdown(
     lines: list[str] = []
     findings = summary.get("findings") or []
     metrics = summary.get("metrics") or {}
-    lines.append(f"### {_section_title(summary, state)}")
+    title_raw = summary.get("title")
+    if isinstance(title_raw, (dict, list)):
+        # Coder 位置参数误用救援（2026-09-29 线上案例：统计 dict 塞进 title
+        # 形参）：并入 metrics 桶渲染为表格——数据救回而非丢弃，标题回落
+        # "归因分析"，严禁 repr 上屏
+        rescued = title_raw if isinstance(title_raw, dict) else {"明细": title_raw}
+        merged = dict(metrics)
+        for key, val in rescued.items():
+            merged.setdefault(str(key), val)
+        metrics = merged
+        section_title = "归因分析"
+    else:
+        section_title = _section_title(summary, state)
+    lines.append(f"### {section_title}")
     for f in findings:
         lines.append(f"- {f}")
     if metrics:
@@ -1846,17 +1859,21 @@ _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 def _section_title(summary: dict[str, Any], state: AgentState | None = None) -> str:
     """小节标题人读化三级回退：
 
-    1. title 含中文 => 直接使用（内置模板/Coder 守约场景）；
+    1. title 含中文 => 直接使用（内置模板/Coder 守约场景）；repr/JSON 串
+       形态（`{`/`[` 开头）除外——即使含中文也不许上屏（2026-09-29 线上
+       案例：Coder 把统计 dict 塞进 title，repr 含中文省份名被误判为标题）；
     2. title 为英文（step.id 或 Coder 自拟）=> 按 id 匹配计划步骤取中文 goal；
     3. 仍无法确定 => "归因分析（<原 title>）"（保留可追溯性）；空 => "归因分析"。
     """
     title = str(summary.get("title") or "").strip()
-    if title and _CJK_RE.search(title):
+    if title and title[:1] not in ("{", "[") and _CJK_RE.search(title):
         return title
     if title and state is not None:
         for step in state.plan_steps:
             if step.id == title and (step.goal or "").strip():
                 return step.goal.strip()
+    if title[:1] in ("{", "["):
+        return "归因分析"  # repr/JSON 串：连括注回显也不允许，回落通用名
     return f"归因分析（{title}）" if title else "归因分析"
 
 
@@ -2425,9 +2442,11 @@ def synthesize_node(state: AgentState) -> AgentState:
         if artifact.kind == "summary":
             summary = artifact.payload.get("summary", {})
             title = summary.get("title", "")
-            if title and title in seen_summary_titles:
+            # title 非 str（Coder 误塞 dict，2026-09-29 线上案例）不参与
+            # 去重集合（dict 不可哈希），直接保留交渲染层救援
+            if isinstance(title, str) and title and title in seen_summary_titles:
                 continue  # 同小节去重（T14）：重规划多轮执行同模板只呈现一次
-            if title:
+            if isinstance(title, str) and title:
                 seen_summary_titles.add(title)
             deduped_summaries.append(summary)
 
