@@ -376,11 +376,70 @@ def test_chinese_dict_title_never_reprd(tmp_path, monkeypatch):
 
 
 def test_repr_like_str_title_never_used_as_heading(tmp_path, monkeypatch):
-    """title 为 repr 串形态的 str => 即使含中文也不许当标题直出。"""
+    """title 为 repr 串形态的 str（线上真实形态：沙箱保存时 str 化）=>
+    不许当标题直出，但可解析时数据必须救回表格化。"""
     report = _render_report(
         monkeypatch,
         tmp_path,
-        _summary_only_state("{'total_delta_gmv': -206624.33, 'province': '北京'}"),
+        _summary_only_state(
+            "{'total_delta_gmv': -206624.33, 'by_province': "
+            "[{'province': '北京', 'gmv_w1': 112791.59, 'gmv_w2': 10140.62, "
+            "'delta_gmv': -107150.97}]}"
+        ),
     )
     assert "{'total_delta_gmv'" not in report
     assert "### 归因分析" in report
+    assert "| 北京 |" in report
+    assert "-10.72 万元" in report
+
+
+def test_unparseable_str_title_dropped_safely(tmp_path, monkeypatch):
+    """title 为不可解析的 repr 串（语法畸形）=> 安全丢弃，回落"归因分析"。"""
+    report = _render_report(
+        monkeypatch,
+        tmp_path,
+        _summary_only_state("{'broken': [1, 2"),  # 无法 literal_eval
+    )
+    assert "broken" not in report
+    assert "### 归因分析" in report
+
+
+# --------------------------------------------------------------------------- #
+# pct 语义自适应与高频键中文映射（2026-09-29 线上复验发现）
+# --------------------------------------------------------------------------- #
+def test_metric_human_pct_value_semantics():
+    """pct 键值域自适应：|v|>1.5 视为已百分化的数值（直接加 %），小数仍 ×100。"""
+    from core.orchestrator.nodes import _metric_human
+
+    assert _metric_human(51.86, "contrib_pct") == "51.9%"  # Coder 百分数形态
+    assert _metric_human(-91.35, "growth_pct") == "-91.3%"  # 浮点 -91.3499... 舍入
+    assert _metric_human(123.49, "decline_concentration_pct") == "123.5%"
+    assert _metric_human(-0.3347, "gmv_change_pct") == "-33.5%"  # 小数形态不变
+    assert _metric_human(-0.65, "share") == "-65.0%"  # 内部模板键不变
+
+
+def test_coder_common_keys_have_chinese_labels():
+    """Coder 高频统计键（线上案例命名）必须有中文标签，禁止蛇形名直出。"""
+    from core.orchestrator.nodes import _metric_label
+
+    for key in (
+        "total_delta_gmv",
+        "declining_province_count",
+        "decline_concentration_pct",
+        "by_province",
+        "top_declining_provinces",
+        "gmv_w1",
+        "gmv_w2",
+        "delta_gmv",
+        "contrib_pct",
+        "growth_pct",
+        "buyers_delta",
+        "aov_w1",
+        "aov_w2",
+        "orders_w1",
+        "orders_w2",
+        "buyers_w1",
+        "buyers_w2",
+        "freq",
+    ):
+        assert _metric_label(key) != key, f"键 {key} 缺中文标签"

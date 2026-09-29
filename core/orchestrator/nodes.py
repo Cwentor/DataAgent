@@ -1820,13 +1820,24 @@ def _summary_analyst_markdown(
     findings = summary.get("findings") or []
     metrics = summary.get("metrics") or {}
     title_raw = summary.get("title")
+    # Coder 位置参数误用救援（2026-09-29 线上案例：统计 dict 塞进 title 形参，
+    # 沙箱保存时被 str(title) 序列化为 repr 串）：把 dict/list 及可解析的
+    # repr/JSON 串还原后并入 metrics 桶渲染为表格——数据救回而非丢弃，
+    # 标题回落"归因分析"，严禁 repr 上屏
+    rescued: Any = None
     if isinstance(title_raw, (dict, list)):
-        # Coder 位置参数误用救援（2026-09-29 线上案例：统计 dict 塞进 title
-        # 形参）：并入 metrics 桶渲染为表格——数据救回而非丢弃，标题回落
-        # "归因分析"，严禁 repr 上屏
-        rescued = title_raw if isinstance(title_raw, dict) else {"明细": title_raw}
+        rescued = title_raw
+    elif isinstance(title_raw, str) and title_raw[:1] in ("{", "["):
+        import ast
+
+        try:
+            rescued = ast.literal_eval(title_raw)
+        except (ValueError, SyntaxError, MemoryError):
+            rescued = None  # 不可解析：安全丢弃，标题回落通用名
+    if isinstance(rescued, (dict, list)):
+        rescued_map = rescued if isinstance(rescued, dict) else {"明细": rescued}
         merged = dict(metrics)
-        for key, val in rescued.items():
+        for key, val in rescued_map.items():
             merged.setdefault(str(key), val)
         metrics = merged
         section_title = "归因分析"
@@ -1971,6 +1982,25 @@ _METRIC_LABELS: dict[str, str] = {
     "factor": "因子",
     "province": "省份",
     "log_decomp": "对数贡献分解",
+    # Coder 自由代码高频统计键（2026-09-29 线上案例命名），禁止蛇形名直出
+    "total_delta_gmv": "GMV 总变化",
+    "declining_province_count": "下滑省份数",
+    "decline_concentration_pct": "下滑集中度",
+    "by_province": "分省明细",
+    "top_declining_provinces": "下滑前三省",
+    "gmv_w1": "基期 GMV",
+    "gmv_w2": "现期 GMV",
+    "delta_gmv": "GMV 变化",
+    "contrib_pct": "贡献占比",
+    "growth_pct": "增长率",
+    "buyers_delta": "买家数变化",
+    "aov_w1": "基期客单价",
+    "aov_w2": "现期客单价",
+    "orders_w1": "基期订单数",
+    "orders_w2": "现期订单数",
+    "buyers_w1": "基期买家数",
+    "buyers_w2": "现期买家数",
+    "freq": "人均订单数",
 }
 
 
@@ -1985,6 +2015,18 @@ def _metric_label(key: str) -> str:
     except Exception:  # 目录不可用不阻断渲染
         pass
     return _METRIC_LABELS.get(key, key)
+
+
+def _fmt_pct_smart(value: Any) -> str:
+    """pct 键值域自适应：|v| > 1.5 视为 Coder 已百分化的数值（直接加 %），
+    小数比率仍 ×100——修复 51.86 被渲染成 5186.0% 的双重换算。"""
+    try:
+        fval = float(value)
+    except (TypeError, ValueError):
+        return _fmt_pct(value)
+    if abs(fval) > 1.5:
+        return f"{fval:.1f}%"
+    return _fmt_pct(value)
 
 
 def _is_ratio_key(key: str) -> bool:
@@ -2029,7 +2071,7 @@ def _metric_human(value: Any, key: str = "", depth: int = 0) -> str:
         )
         return f"（{inner}）" if inner else "（无明细）"
     if _is_ratio_key(key):
-        return _fmt_pct(value)
+        return _fmt_pct_smart(value)
     lowered = str(key).lower()
     if any(token in lowered for token in _COUNT_METRIC_KEYS):
         return _fmt_count(value)
