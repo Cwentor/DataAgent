@@ -516,18 +516,58 @@ def planner_node(state: AgentState) -> AgentState:
     else:
         planner_used = "llm"
     if steps is None:
-        # 兜底准入拒绝：意图不可确定 => 诚实拒答。路由链：plan_steps 为空 =>
-        # route_from_plan_gate 对 blocked_reason 落 critique => critic 短路 =>
-        # 拒答报告。严禁在此猜测口径产计划（回归锚点：曾固定 sum(gmv) 答非所问）。
-        # plan_edit_instruction 必须清除（终审 Important #2）：不清除会被
-        # plan_gate 的 edit 路由无条件回 plan 形成无限循环，用户最终看到
-        # "迭代步数超限"而非拒答报告。
+        # 兜底准入（十八期）+ 分层降级二次判定（2026-09）：UNKNOWN 拆为
+        # 弱解析（字段存在但无法自动拆解 => 交互确认）与 NOT_EXIST（语义
+        # 不存在 => 拒答）。严禁猜测口径产计划（回归锚点：曾固定 sum(gmv)
+        # 答非所问）。
+        from core.retrieval.profiling import profile_enum_values
+
+        mode, payload = _degraded_parse(
+            state.user_query, classify_intent(state.user_query), profile_enum_values()
+        )
+        if mode == "plan":
+            events.emit_event("degrade", {"outcome": "parse_hit", "query": state.user_query[:200]})
+            events.emit_plan(payload)
+            return state.apply(
+                plan_steps=payload,
+                phase="query",
+                scratchpad=[*state.scratchpad, "[planner] degraded-parse"],
+                answered_by="degraded_confirmed",
+                # 新计划 = 新的执行授权需求：高危确认锚复位
+                high_risk_approved=False,
+            )
+        if mode == "clarify":
+            if state.clarification_rounds >= 1:
+                # 二轮澄清仍歧义 => 拒答（防循环；plan_edit_instruction 同类经验）
+                return state.apply(
+                    blocked_reason="经一轮澄清后查询条件仍无法唯一确定，已停止降级解析。"
+                    "请调整问法（明确指标与筛选条件），或等待 AI 规划服务恢复后重试。",
+                    answered_by="blocked",
+                    plan_steps=[],
+                    plan_edit_instruction=None,
+                    scratchpad=[
+                        *state.scratchpad,
+                        "[planner] blocked: degraded clarify round-limit",
+                    ],
+                )
+            question, options = payload
+            events.emit_event("degrade", {"outcome": "parse_hit", "query": state.user_query[:200]})
+            return state.apply(
+                phase="clarify",
+                clarification=question,
+                clarification_options=[str(o) for o in options],
+                clarification_rounds=state.clarification_rounds + 1,
+                scratchpad=[*state.scratchpad, "[planner] degraded-clarify"],
+            )
         return state.apply(
-            blocked_reason="无法从语义目录识别问题意图（未命中任何指标/维度锚点）",
+            blocked_reason=str(payload),
             answered_by="blocked",
             plan_steps=[],
             plan_edit_instruction=None,
-            scratchpad=[*state.scratchpad, "[planner] blocked: intent unknown"],
+            scratchpad=[
+                *state.scratchpad,
+                "[planner] blocked: intent unknown（NOT_EXIST）",
+            ],
         )
     # plan_review 修改指令已注入提示词，消费即清除——路由以指令存在性判定
     # "待重规划"，不清除会导致 planner 空转循环

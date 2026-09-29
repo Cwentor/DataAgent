@@ -131,3 +131,91 @@ def test_default_window_and_pay_status_scope():
     dsl = payload[0].dsl
     assert dsl["time_filter"]["absolute"]["start"] == "2024-05-01"
     assert {"field": "pay_status", "operator": "eq", "value": "SUCCESS"} in dsl["filters"]
+
+
+# --------------------------------------------------------------------------- #
+# planner 集成：三分流与降级可见化
+# --------------------------------------------------------------------------- #
+class _NoLLM:
+    """resolve_default_client 返回 None 的替身。"""
+
+
+def test_planner_unknown_with_metric_anchor_yields_degraded_plan(monkeypatch, tmp_path):
+    """ "北京的GMV"（LLM 不可用）=> 弱解析计划，answered_by=degraded_confirmed。
+
+    措辞按真实数仓 profiling 修正：mock 数仓 province 枚举为
+    北京/上海/四川/山东/广东/江苏/浙江/湖北（无"海南"），计划原文
+    "海南省的GMV"会因枚举未命中走 clarify 而非 plan——改用真实枚举
+    唯一命中的"北京的GMV"，与原断言意图（弱解析计划+枚举精确筛选）一致。
+    """
+    from config import settings
+    from core.orchestrator import nodes as orch
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
+    state = AgentState(session_id="dg", turn_id="t1", trace_id="tr1", user_query="北京的GMV")
+    out = orch.planner_node(state)
+    assert out.answered_by == "degraded_confirmed"
+    assert [s.kind for s in out.plan_steps] == ["query", "synthesize"]
+    assert out.plan_steps[0].dsl is not None
+    assert any(
+        f["field"] == "province" and f["value"] == "北京" for f in out.plan_steps[0].dsl["filters"]
+    )
+
+
+def test_planner_unknown_without_anchor_blocks(monkeypatch, tmp_path):
+    """无锚点 UNKNOWN => 拒答（原语义保留）。"""
+    from config import settings
+    from core.orchestrator import nodes as orch
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
+    state = AgentState(session_id="dg2", turn_id="t1", trace_id="tr1", user_query="随便看看")
+    out = orch.planner_node(state)
+    assert out.answered_by == "blocked"
+    assert out.blocked_reason
+
+
+def test_planner_clarify_round_limit_blocks_second_round(monkeypatch, tmp_path):
+    """二轮澄清仍歧义 => 拒答（防循环）。
+
+    措辞同 Task 3："西藏的GMV"会被判 METRIC_SCALAR（无维度锚），澄清用例
+    改用"西藏省的GMV"（"省"命中 province 锚、"西藏"未命中枚举）。
+    """
+    from config import settings
+    from core.orchestrator import nodes as orch
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
+    state = AgentState(
+        session_id="dg3",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="西藏省的GMV",
+        clarification_rounds=1,  # 已澄清过一轮
+    )
+    out = orch.planner_node(state)
+    assert out.answered_by == "blocked"
+    assert "澄清" in out.blocked_reason or "确认" in out.blocked_reason
+
+
+def test_planner_clarify_first_round_emits_options(monkeypatch, tmp_path):
+    """首轮多候选 => clarification + options（交 _plan_gate 挂起）。
+
+    措辞同 Task 3："西藏省的GMV"（枚举未命中）触发留白澄清。
+    """
+    from config import settings
+    from core.orchestrator import nodes as orch
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
+    state = AgentState(session_id="dg4", turn_id="t1", trace_id="tr1", user_query="西藏省的GMV")
+    out = orch.planner_node(state)
+    assert out.phase == "clarify"
+    assert out.clarification
+    assert out.clarification_options
+    assert out.clarification_rounds == 1
