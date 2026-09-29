@@ -304,3 +304,83 @@ def test_render_table_count_column_container_value_folds():
     text = "\n".join(_render_table(table, currency=False))
     assert "['" not in text  # 严禁 list repr
     assert "（共 2 项明细）" in text  # list 折叠为明细占位
+
+
+# --------------------------------------------------------------------------- #
+# title 被塞 dict 的救援渲染（2026-09-29 线上案例：save_summary 位置参数误用）
+# --------------------------------------------------------------------------- #
+def _summary_only_state(title_value) -> AgentState:
+    return AgentState(
+        session_id="rescue",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="按地区定位分析 GMV 下滑原因",
+        artifacts=[
+            Artifact(
+                kind="summary",
+                name="s1",
+                payload={
+                    "summary": {
+                        "title": title_value,
+                        "metrics": {},
+                        "table": {},
+                        "findings": [],
+                    }
+                },
+            )
+        ],
+    )
+
+
+def test_dict_title_rescued_into_table(tmp_path, monkeypatch):
+    """title 为纯英文统计 dict（s3 形态）=> 并入 metrics 桶渲染对比表，标题回落。"""
+    report = _render_report(
+        monkeypatch,
+        tmp_path,
+        _summary_only_state(
+            {
+                "week1": {"gmv": 616872.81, "orders": 44.0},
+                "week2": {"gmv": 410248.48, "orders": 32.0},
+            }
+        ),
+    )
+    assert "{'week1'" not in report and "{'" not in report
+    assert "### 归因分析" in report
+    assert "| 第 1 周 | 61.69 万元 | 44 |" in report
+    assert "| 第 2 周 | 41.02 万元 | 32 |" in report
+
+
+def test_chinese_dict_title_never_reprd(tmp_path, monkeypatch):
+    """title 为含中文 dict（s4 by_province 形态）=> 不许借含中文判断直出，表格化。"""
+    report = _render_report(
+        monkeypatch,
+        tmp_path,
+        _summary_only_state(
+            {
+                "total_delta_gmv": -206624.32999999996,
+                "by_province": [
+                    {
+                        "province": "北京",
+                        "gmv_w1": 112791.58999999998,
+                        "gmv_w2": 10140.62,
+                        "delta_gmv": -107150.96999999999,
+                    }
+                ],
+            }
+        ),
+    )
+    assert "{'total_delta_gmv'" not in report
+    assert "### 归因分析" in report
+    assert "| 北京 |" in report
+    assert "-10.72 万元" in report
+
+
+def test_repr_like_str_title_never_used_as_heading(tmp_path, monkeypatch):
+    """title 为 repr 串形态的 str => 即使含中文也不许当标题直出。"""
+    report = _render_report(
+        monkeypatch,
+        tmp_path,
+        _summary_only_state("{'total_delta_gmv': -206624.33, 'province': '北京'}"),
+    )
+    assert "{'total_delta_gmv'" not in report
+    assert "### 归因分析" in report

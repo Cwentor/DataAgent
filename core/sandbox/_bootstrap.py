@@ -175,7 +175,20 @@ def list_inputs():
 
 
 def save_summary(title="", metrics=None, table=None, findings=None, extra=None):
-    """写出结构化摘要 outputs/summary.json（table.rows ≤100 行硬限）。"""
+    """写出结构化摘要 outputs/summary.json（table.rows ≤100 行硬限）。
+
+    title 必须为简体中文业务短语字符串：Coder 常把整个统计 dict 误当
+    第一个位置参数传入（2026-09-29 线上案例），此处硬校验并给出正确
+    用法指引——报错反哺自愈闭环，让 LLM 拿着报错重写调用。
+    """
+    if not isinstance(title, str) or title[:1] in ("{", "["):
+        raise ValueError(
+            "save_summary 的 title 必须是简体中文业务短语字符串（如 title='驱动因子分解'），"
+            "严禁把统计 dict 传给 title；统计数值请放 metrics（只放标量）与"
+            " table（columns + rows），例如：save_summary(title='分省归因', "
+            "metrics={'total_delta_gmv': -206624.33}, "
+            "table={'columns': ['province', 'delta_gmv'], 'rows': [['北京', -107150.97]]})"
+        )
     if table and len(table.get("rows", [])) > _MAX_SUMMARY_ROWS:
         raise ValueError(f"table.rows 超过 {_MAX_SUMMARY_ROWS} 行上限，请先聚合")
     payload = {

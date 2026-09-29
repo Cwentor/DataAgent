@@ -275,3 +275,35 @@ def test_default_backend_cached_and_clearable(monkeypatch):
         assert len(calls) == 2
     finally:
         backends.clear_default_backend_cache()
+
+
+# --------------------------------------------------------------------------- #
+# save_summary 参数校验（2026-09-29 线上案例：Coder 把统计 dict 误塞 title 形参）
+# --------------------------------------------------------------------------- #
+def test_run_code_rejects_dict_title_with_guidance(tmp_path):
+    """title 非 str（Coder 位置参数误用）=> 沙箱精确报错并指引正确用法（反哺自愈）。"""
+    ws = _make_workspace(tmp_path)
+    code = "save_summary({'week1': {'gmv': 616872.81}, 'week2': {'gmv': 410248.48}})\n"
+    result = run_code(code, ws, name="dict_title")
+    assert not result.ok
+    assert "title" in result.error
+    assert "metrics" in result.error  # 指引把统计数据放 metrics/table
+
+
+def test_run_code_rejects_repr_like_str_title(tmp_path):
+    """title 为 repr/JSON 串形态（'{' 开头）同样拒绝——防 dump 上屏。"""
+    ws = _make_workspace(tmp_path)
+    code = "save_summary(\"{'total_delta_gmv': -206624.33}\")\n"
+    result = run_code(code, ws, name="repr_title")
+    assert not result.ok
+    assert "title" in result.error
+
+
+def test_run_code_str_title_still_ok(tmp_path):
+    """合法中文短语 title 不受校验影响。"""
+    ws = _make_workspace(tmp_path)
+    code = "save_summary(title='驱动因子分解', metrics={'gmv': 350.0})\n"
+    result = run_code(code, ws, name="str_title")
+    assert result.ok, result.error
+    assert result.summary["title"] == "驱动因子分解"
+    assert result.summary["metrics"]["gmv"] == 350.0
