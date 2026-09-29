@@ -154,7 +154,15 @@ def test_planner_unknown_with_metric_anchor_yields_degraded_plan(monkeypatch, tm
 
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
-    state = AgentState(session_id="dg", turn_id="t1", trace_id="tr1", user_query="北京的GMV")
+    # 显式 L2（计划确认模式）：conftest 将测试默认自主性置 L4，L4 下计划
+    # 自动过审、answered_by 应为 degraded_auto（L4 行为由专测覆盖）
+    state = AgentState(
+        session_id="dg",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="北京的GMV",
+        autonomy_level="L2",
+    )
     out = orch.planner_node(state)
     assert out.answered_by == "degraded_confirmed"
     assert [s.kind for s in out.plan_steps] == ["query", "synthesize"]
@@ -308,8 +316,16 @@ def test_e2e_degraded_compound_query_with_approval(monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
+    # 显式 L2（计划确认模式）：conftest 默认 L4 下 answered_by 应为
+    # degraded_auto（L4 行为由专测覆盖）；本用例验证确认通道语义
     state = orch.planner_node(
-        AgentState(session_id="e2e", turn_id="t1", trace_id="tr1", user_query="北京的GMV")
+        AgentState(
+            session_id="e2e",
+            turn_id="t1",
+            trace_id="tr1",
+            user_query="北京的GMV",
+            autonomy_level="L2",
+        )
     )
     assert state.answered_by == "degraded_confirmed"
     dsl = state.plan_steps[0].dsl
@@ -339,8 +355,16 @@ def test_e2e_degraded_clarify_then_resume_yields_plan(monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
+    # 显式 L2（计划确认模式）：conftest 默认 L4 下 answered_by 应为
+    # degraded_auto（L4 行为由专测覆盖）
     first = orch.planner_node(
-        AgentState(session_id="e2e2", turn_id="t1", trace_id="tr1", user_query="海南省的GMV")
+        AgentState(
+            session_id="e2e2",
+            turn_id="t1",
+            trace_id="tr1",
+            user_query="海南省的GMV",
+            autonomy_level="L2",
+        )
     )
     # 通道一：枚举未命中 => 留白澄清（options 不含任何具体省份值，严禁猜）
     assert first.phase == "clarify"
@@ -367,3 +391,187 @@ def test_e2e_degraded_clarify_then_resume_yields_plan(monkeypatch, tmp_path):
     from semantic.dsl_schema import QueryDSL
 
     QueryDSL.model_validate(second.plan_steps[0].dsl)
+
+
+# --------------------------------------------------------------------------- #
+# 终审修复轮（Important #1）：clarify 选项回执闭环（spec §3.2 白名单第②类
+# "用户确认内容"的落地）
+# --------------------------------------------------------------------------- #
+def test_degraded_clarify_option_receipt_closes_loop():
+    """选项回执闭环："北京和上海的GMV"澄清后点选"省份=北京" => plan。
+
+    回归锚点（终审 Important #1）：补充段解析缺失时，原 query 残留"上海"
+    使 province 枚举命中数保持 2 => 仍 pending => 二轮轮次必拒答——用户
+    按系统选项操作却走进死路，spec §3.3 闭环承诺落空。
+    """
+    base = "北京和上海的GMV"
+    mode, payload = _degraded_parse(base, classify_intent(base), ENUMS)
+    assert mode == "clarify"
+    merged = f"{base}（用户补充：省份=北京）"
+    mode, payload = _degraded_parse(merged, classify_intent(merged), ENUMS)
+    assert mode == "plan"
+    dsl = payload[0].dsl
+    assert {"field": "province", "operator": "eq", "value": "北京"} in dsl["filters"]
+    # 原 query 残留取值不得混入筛选（已确认条件覆盖该维度）
+    assert not any(f["field"] == "province" and f["value"] == "上海" for f in dsl["filters"])
+
+
+def test_degraded_clarify_invalid_receipt_ignored():
+    """无效回执忽略（宁缺毋滥）：label 无法反查 / value 未命中枚举均维持原判定。"""
+    merged_bad_value = "北京和上海的GMV（用户补充：省份=西藏）"
+    mode, _ = _degraded_parse(merged_bad_value, classify_intent(merged_bad_value), ENUMS)
+    assert mode == "clarify"  # value 未命中枚举 => 补充无效，维持歧义判定
+    merged_bad_label = "北京和上海的GMV（用户补充：颜色=红色）"
+    mode2, _ = _degraded_parse(merged_bad_label, classify_intent(merged_bad_label), ENUMS)
+    assert mode2 == "clarify"  # label 反查不中维度 => 忽略补充
+
+
+def test_planner_clarify_receipt_closes_loop_in_round_two(monkeypatch, tmp_path):
+    """集成闭环：二轮轮次下选项回执二次解析 => 产出计划而非拒答（防循环不误伤）。"""
+    from config import settings
+    from core.orchestrator import nodes as orch
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
+    # 显式 L2（计划确认模式）：conftest 默认 L4 下 answered_by 应为
+    # degraded_auto（L4 行为由专测覆盖）
+    first = orch.planner_node(
+        AgentState(
+            session_id="dg5",
+            turn_id="t1",
+            trace_id="tr1",
+            user_query="北京和上海的GMV",
+            autonomy_level="L2",
+        )
+    )
+    assert first.phase == "clarify"
+    assert first.clarification_rounds == 1
+    assert any("省份=北京" in o for o in first.clarification_options)
+    # 模拟 _plan_gate clarify 恢复合并语义（逐字对齐 langgraph_engine）
+    resumed = first.apply(
+        user_query=f"{first.user_query}（用户补充：省份=北京）",
+        human_reply=None,
+        clarification=None,
+        clarification_rounds=first.clarification_rounds + 1,
+        plan_steps=[],
+        phase="plan",
+    )
+    second = orch.planner_node(resumed)
+    assert second.answered_by == "degraded_confirmed"  # 非二轮超限拒答
+    assert [s.kind for s in second.plan_steps] == ["query", "synthesize"]
+    assert any(
+        f["field"] == "province" and f["value"] == "北京"
+        for f in second.plan_steps[0].dsl["filters"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 终审修复轮（Important #2）：L4 全自动模式的诚实水印
+# --------------------------------------------------------------------------- #
+def test_planner_l4_degraded_plan_marks_auto(monkeypatch, tmp_path):
+    """L4 全自动（无 plan_review 挂起）=> answered_by=degraded_auto（未经人工确认）。"""
+    from config import settings
+    from core.orchestrator import nodes as orch
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
+    state = AgentState(
+        session_id="dg6",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="北京的GMV",
+        autonomy_level="L4",
+    )
+    out = orch.planner_node(state)
+    assert out.answered_by == "degraded_auto"
+    assert [s.kind for s in out.plan_steps] == ["query", "synthesize"]
+
+
+def test_degradation_banner_distinguishes_auto():
+    """degraded_auto 水印明示"全自动审批、未经人工确认"；heuristic 原文案保留。"""
+    from core.orchestrator.nodes import _degradation_banner
+    from core.orchestrator.state import AgentState
+
+    auto = AgentState(
+        session_id="wm3",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="x",
+        answered_by="degraded_auto",
+    )
+    banner = _degradation_banner(auto)
+    assert "降级模式" in banner and "未经人工确认" in banner
+    heuristic = AgentState(
+        session_id="wm4",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="x",
+        answered_by="heuristic",
+    )
+    assert "离线兜底引擎" in _degradation_banner(heuristic)
+
+
+def test_degraded_auto_plan_reject_emits_event(monkeypatch):
+    """L4 降级计划被用户拒绝 => degrade/rejected 事件同样发射（埋点条件扩展）。"""
+    from core.orchestrator import events as orch_events
+    from core.orchestrator import langgraph_engine
+    from core.orchestrator.langgraph_engine import _plan_gate
+    from core.orchestrator.state import AgentState, PlanStep
+
+    seen: list[tuple[str, dict]] = []
+    orig = orch_events.emit_event
+
+    def spy(event: str, payload: dict) -> None:
+        seen.append((event, payload))
+        orig(event, payload)
+
+    monkeypatch.setattr(orch_events, "emit_event", spy)
+    monkeypatch.setattr(
+        langgraph_engine,
+        "maybe_interrupt",
+        lambda state, payload, *, trigger: {"action": "reject", "instruction": None},
+    )
+    state = AgentState(
+        session_id="rj2",
+        turn_id="t1",
+        trace_id="tr1",
+        user_query="北京的GMV",
+        answered_by="degraded_auto",
+        plan_steps=[
+            PlanStep(id="s1", goal="按确认条件查询GMV", kind="query"),
+            PlanStep(id="s2", goal="汇总作答", kind="synthesize", depends_on=["s1"]),
+        ],
+        phase="query",
+    )
+    out = _plan_gate(state)
+    assert out.phase == "done"
+    assert any(e == "degrade" and p.get("outcome") == "rejected" for e, p in seen)
+
+
+# --------------------------------------------------------------------------- #
+# 终审修复轮（Important #3）：降级指标埋点与前端协议契约
+# --------------------------------------------------------------------------- #
+def test_metrics_record_degrade_outcomes():
+    """降级指标：record_degrade 三 outcome 锁内计数 + snapshot 导出。"""
+    from audit.metrics import MetricsRegistry
+
+    reg = MetricsRegistry()
+    reg.record_degrade("parse_hit")
+    reg.record_degrade("parse_hit")
+    reg.record_degrade("confirmed")
+    reg.record_degrade("rejected")
+    snap = reg.snapshot()
+    assert snap["degrade_outcomes"] == {"parse_hit": 2, "confirmed": 1, "rejected": 1}
+    # 空注册表导出空 dict（不缺键）
+    assert MetricsRegistry().snapshot()["degrade_outcomes"] == {}
+
+
+def test_protocol_js_whitelists_degrade_event():
+    """前端协议契约锚定：AgentEventType 白名单含 "degrade"（否则 SSE 帧被静默丢弃）。"""
+    from pathlib import Path
+
+    protocol = Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "protocol.js"
+    text = protocol.read_text(encoding="utf-8")
+    assert '"degrade"' in text

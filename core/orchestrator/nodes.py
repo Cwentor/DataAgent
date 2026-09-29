@@ -30,6 +30,7 @@ from typing import Any
 from agent.heuristic import region_provinces
 from agent.time_utils import parse_explicit_time_window
 from audit.logging import get_logger
+from audit.metrics import default_registry
 from core.orchestrator import events
 from core.orchestrator.intent import (
     IntentProfile,
@@ -293,6 +294,33 @@ def _wants_grouping(query: str, dim: str) -> bool:
     return False
 
 
+def _confirmed_filter_from_supplement(query: str, enums: dict[str, list[str]]) -> dict[str, str]:
+    """解析澄清补充段中的选项回执（spec §3.2 白名单第②类"用户确认内容"）。
+
+    resume 合并后的 query 形如 "...（用户补充：省份=北京）"——补充文本是
+    用户对系统澄清选项的显式确认，优先级高于原 query 残留取值的子串扫描
+    （否则"北京和上海的GMV（用户补充：省份=北京）"中残留的"上海"仍使枚举
+    命中数 >1，把按系统选项操作的用户逼进二轮超限拒答死路）。
+
+    仅当 label 能经 dimension_terms() 反查为维度字段、且 value 精确命中
+    该字段枚举时才采纳；否则忽略该补充（宁缺毋滥，维持原判定）。确认
+    维度必然在锚点重提取的维度锚内（label 与重提取共用同一维度词表）。
+    """
+    m_supplement = re.search(r"（用户补充：(.+?)）", query)
+    if not m_supplement:
+        return {}
+    m_receipt = re.match(r"^([^=]+)=(.+)$", m_supplement.group(1).strip())
+    if not m_receipt:
+        return {}
+    field = dimension_terms().get(m_receipt.group(1).strip())
+    if not field:
+        return {}
+    value = m_receipt.group(2).strip()
+    if value not in (enums.get(field) or []):
+        return {}
+    return {field: value}
+
+
 def _degraded_parse(
     query: str, profile: IntentProfile, enum_values: dict[str, list[str]] | None
 ) -> tuple[str, Any]:
@@ -337,13 +365,19 @@ def _degraded_parse(
         )
     dim_anchors = tuple(a for a in profile.anchor_fields if a not in metrics_anchors)
 
-    # 维度用法判定：分组提示命中 => 分组；取值唯一命中枚举 => 筛选；
-    # 多候选/未命中 => 澄清（严禁猜测筛选条件）
+    # 维度用法判定：用户确认条件（澄清选项回执）优先 => 分组提示命中 =>
+    # 分组；取值唯一命中枚举 => 筛选；多候选/未命中 => 澄清（严禁猜测筛选条件）
     enums = enum_values or {}
     filters: list[dict[str, Any]] = []
     group_dims: list[str] = []
     pending: list[tuple[str, list[str]]] = []
+    confirmed = _confirmed_filter_from_supplement(query, enums)
     for dim in dim_anchors:
+        if dim in confirmed:
+            # 用户已确认该维度取值（选项回执）：跳过残留取值扫描，直接
+            # 采纳确认条件——原 query 残留取值不得再混入命中统计
+            filters.append({"field": dim, "operator": "eq", "value": confirmed[dim]})
+            continue
         if _wants_grouping(query, dim):
             group_dims.append(dim)
             continue
@@ -527,18 +561,24 @@ def planner_node(state: AgentState) -> AgentState:
         )
         if mode == "plan":
             events.emit_event("degrade", {"outcome": "parse_hit", "query": state.user_query[:200]})
+            default_registry().record_degrade("parse_hit")
             events.emit_plan(payload)
             return state.apply(
                 plan_steps=payload,
                 phase="query",
                 scratchpad=[*state.scratchpad, "[planner] degraded-parse"],
-                answered_by="degraded_confirmed",
+                # L4 全自动经 maybe_interrupt 自动 approve 直通、未经人工确认，
+                # 水印必须区分（诚实铁律）；其余档位经 plan_review 挂起等确认
+                answered_by=(
+                    "degraded_auto" if state.autonomy_level == "L4" else "degraded_confirmed"
+                ),
                 # 新计划 = 新的执行授权需求：高危确认锚复位
                 high_risk_approved=False,
             )
         if mode == "clarify":
             if state.clarification_rounds >= 1:
                 # 二轮澄清仍歧义 => 拒答（防循环；plan_edit_instruction 同类经验）
+                default_registry().record_degrade("rejected")
                 return state.apply(
                     blocked_reason="经一轮澄清后查询条件仍无法唯一确定，已停止降级解析。"
                     "请调整问法（明确指标与筛选条件），或等待 AI 规划服务恢复后重试。",
@@ -552,6 +592,7 @@ def planner_node(state: AgentState) -> AgentState:
                 )
             question, options = payload
             events.emit_event("degrade", {"outcome": "parse_hit", "query": state.user_query[:200]})
+            default_registry().record_degrade("parse_hit")
             return state.apply(
                 phase="clarify",
                 clarification=question,
@@ -559,6 +600,7 @@ def planner_node(state: AgentState) -> AgentState:
                 clarification_rounds=state.clarification_rounds + 1,
                 scratchpad=[*state.scratchpad, "[planner] degraded-clarify"],
             )
+        default_registry().record_degrade("rejected")
         return state.apply(
             blocked_reason=str(payload),
             answered_by="blocked",
@@ -2589,6 +2631,13 @@ def _degradation_banner(state: AgentState) -> str:
         return (
             "> ⚠️ **本次报告由降级模式生成**（AI 规划暂不可用）：查询条件为规则推断"
             "并经人工确认，未经 LLM 完整语义理解。\n\n"
+        )
+    if state.answered_by == "degraded_auto":
+        # L4 全自动：计划经 maybe_interrupt 自动 approve 直通、未经任何人工
+        # 确认，水印必须如实区分（终审 Important #2 诚实铁律）
+        return (
+            "> ⚠️ **本次报告由降级模式生成**（AI 规划暂不可用）：查询条件为规则推断，"
+            "当前为全自动审批模式、未经人工确认，请谨慎采信。\n\n"
         )
     if state.answered_by != "heuristic":
         return ""
