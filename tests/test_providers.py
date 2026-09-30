@@ -1252,3 +1252,73 @@ def test_openai_chat_stream_eof_propagates_without_fallback(monkeypatch):
             UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1")
         )
     assert not stub.calls
+
+
+# --------------------------------------------------------------------------- #
+# OpenAIResponsesAdapter 流式分支
+# --------------------------------------------------------------------------- #
+def test_openai_responses_stream_aggregates(monkeypatch):
+    provider = _provider(protocol="openai_responses", stream=True)
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": '{"r": '}),
+        json.dumps({"type": "response.output_text.delta", "delta": "2}"}),
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+                },
+            }
+        ),
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["url"] = url
+        captured["payload"] = payload
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert captured["url"].endswith("/responses")
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["text"]["format"] == {"type": "json_object"}
+    assert resp.content == '{"r": 2}'
+    assert resp.parsed_json == {"r": 2}
+    assert resp.usage.total_tokens == 3
+
+
+def test_openai_responses_stream_falls_back_to_non_stream_on_400(monkeypatch):
+    provider = _provider(protocol="openai_responses", stream=True)
+
+    def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        raise ProviderError(
+            "模型服务返回 HTTP 400: streaming not supported here", code="provider_error"
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
+    stub = _HttpStub(
+        body={
+            "output": [{"content": [{"type": "output_text", "text": '{"r": 2}'}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    )
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert stub.calls
+    assert "stream" not in stub.calls[0][1]  # 回退请求不带 stream 参数
+    assert resp.parsed_json == {"r": 2}

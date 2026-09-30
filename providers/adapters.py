@@ -600,7 +600,11 @@ class OpenAIResponsesAdapter(BaseAdapter):
     """
 
     def chat(self, request: UnifiedChatRequest) -> UnifiedChatResponse:
-        """按 /responses 规范组装请求并解析 output 文本。"""
+        """按 /responses 规范组装请求并解析 output 文本。
+
+        provider.stream=True 时走 SSE 流式聚合；网关拒绝流式（HTTP 400 且
+        报文含 stream 特征）时回退非流式重试一次。
+        """
         messages, system_prompt = self._split_messages(request)
         want_json = (
             request.response_format is not None and request.response_format.type == "json_object"
@@ -612,15 +616,26 @@ class OpenAIResponsesAdapter(BaseAdapter):
             input_blocks.append({"role": "system", "content": system_prompt})
         input_blocks.extend({"role": m["role"], "content": m["content"]} for m in messages)
 
+        from config import settings
+
+        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
+        timeout = request.timeout or settings.PROVIDER_TIMEOUT
+        if self.provider.stream:
+            try:
+                return self._chat_via_stream(request, input_blocks, want_json, timeout)
+            except ProviderError as exc:
+                if not (
+                    exc.code == "provider_error"
+                    and "HTTP 400" in str(exc)
+                    and "stream" in str(exc).lower()
+                ):
+                    raise
+                logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
         payload: dict[str, Any] = {
             "model": request.model,
             "input": input_blocks,
             "temperature": request.temperature if request.temperature is not None else 0.0,
         }
-        from config import settings
-
-        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
-        timeout = request.timeout or settings.PROVIDER_TIMEOUT
         status, _, raw = self._post(payload, want_json=want_json, timeout=timeout)
         try:
             data = json.loads(raw)
@@ -635,6 +650,42 @@ class OpenAIResponsesAdapter(BaseAdapter):
             return self._build_response(content, usage, json_mode=want_json)
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
             raise ProtocolError(f"Responses API 响应解析失败（HTTP {status}）: {exc}") from exc
+
+    def _chat_via_stream(
+        self,
+        request: UnifiedChatRequest,
+        input_blocks: list[dict[str, Any]],
+        want_json: bool,
+        timeout: int,
+    ) -> UnifiedChatResponse:
+        """SSE 流式调用：delta 取 response.output_text.delta，usage 取 response.completed。"""
+        from config import settings
+
+        url = f"{self.provider.base_url.rstrip('/')}/responses"
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "input": input_blocks,
+            "temperature": request.temperature if request.temperature is not None else 0.0,
+            "stream": True,
+        }
+        if want_json:
+            # JSON Mode 原生参数流式下照常透传（被拒时交由外层回退非流式降级链）
+            payload["text"] = {"format": {"type": "json_object"}}
+        content, usage = _consume_stream(
+            _http_post_sse(
+                url,
+                payload=payload,
+                headers=self._build_headers(),
+                timeout=timeout,
+                max_seconds=settings.PROVIDER_STREAM_MAX_SECONDS,
+            ),
+            extract_delta=lambda f: (f.get("delta") or "")
+            if f.get("type") == "response.output_text.delta"
+            else "",
+            terminal=lambda f: f.get("type") == "response.completed",
+            extract_usage=lambda f: (f.get("response") or {}).get("usage"),
+        )
+        return self._build_response(content, usage, json_mode=want_json)
 
     def _post(
         self,
