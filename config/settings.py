@@ -151,6 +151,8 @@ PROVIDERS_FILE: Path = PROJECT_ROOT / "config" / "providers.json"
 PROVIDERS_ENC_SECRET: str = os.getenv("PROVIDERS_ENC_SECRET", "")
 # 供应商连通性探测与对话请求的默认超时（秒）
 PROVIDER_TIMEOUT: int = int(os.getenv("PROVIDER_TIMEOUT", "60"))
+# 流式传输总时长上限（秒）：块间空闲超时复用 PROVIDER_TIMEOUT，本项防无限流
+PROVIDER_STREAM_MAX_SECONDS: int = int(os.getenv("PROVIDER_STREAM_MAX_SECONDS", "300"))
 
 # 报告综合（Synthesizer）专用读超时（秒）：长文生成耗时 > 常规调用，独立预算；
 # 配置 <=0 视为非法，回落默认 180

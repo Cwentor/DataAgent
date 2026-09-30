@@ -50,6 +50,7 @@ class ProviderConfig(BaseModel):
     name: str
     is_preset: bool = False  # 预置供应商不可删除（可禁用）
     enabled: bool = True
+    stream: bool = False  # SSE 流式传输（网关对长请求整包读超时时开启）
     base_url: str
     api_key: str = ""
     protocol: ApiProtocol = ApiProtocol.OPENAI_CHAT
