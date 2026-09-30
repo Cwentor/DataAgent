@@ -2602,7 +2602,12 @@ def _cannot_answer_report(state: AgentState) -> str:
     """意图不可确定的诚实拒答报告（十八期）。
 
     与 _no_data_report 同哲学：严禁让 LLM 在无理解依据时编造答案。
-    说明原因 + 能力清单引导 + 可行动建议；纯确定性字符串构造，零 LLM 调用。
+    说明原因 + 能力清单引导 + 可行动建议；纯确定性字符串构造，零 LLM
+    调用（_resolve_llm 仅做配置解析，不发起网络请求）。
+
+    建议按 LLM 配置状态区分（2026-09 诊断修复）：旧版无条件建议"配置
+    LLM 模型"——LLM 已配置但网关调用失败时误导用户重复配置；已配置
+    分支如实告知"拒答由确定性兜底裁决"并给出连通性排查指引。
     """
     from core.orchestrator.intent import capability_catalog_lines
 
@@ -2621,7 +2626,16 @@ def _cannot_answer_report(state: AgentState) -> str:
     lines.append("**当前支持查询的能力清单：**")
     lines.extend(capability_catalog_lines())
     lines.append("")
-    lines.append("建议：请调整问法（明确指标或维度），或配置 LLM 模型后重试以获得完整语义理解。")
+    if _resolve_llm() is None:
+        lines.append(
+            "建议：请调整问法（明确指标或维度）。当前未配置 LLM 模型，"
+            "语义理解由确定性兜底承担；配置 LLM 后重试可获得完整语义理解。"
+        )
+    else:
+        lines.append(
+            "建议：请调整问法（明确指标或维度）。LLM 已配置，本次拒答由"
+            "确定性兜底裁决；若持续出现，请检查 LLM 网关连通性或查看服务日志。"
+        )
     return "\n".join(lines)
 
 

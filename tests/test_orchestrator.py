@@ -918,6 +918,35 @@ def test_run_agent_blocked_report_skips_llm_synthesis(tmp_path, monkeypatch):
     assert llm_report_calls == []  # 短路实锤：综合层未被触碰
 
 
+def test_blocked_report_llm_configured_wording(tmp_path, monkeypatch):
+    """拒答建议按配置状态区分：LLM 已配置时不得再误导用户去"配置模型"。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("帮我看看最近情况", session_id="blockedcfg")
+    assert trace.phase == "done"
+    assert "LLM 已配置" in trace.report
+    assert "未配置 LLM" not in trace.report
+    assert "或配置 LLM 模型后重试" not in trace.report  # 旧的无条件文案必须消失
+
+
+def test_blocked_report_llm_absent_wording(tmp_path, monkeypatch):
+    """LLM 未配置时：如实告知确定性兜底模式与配置引导。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("帮我看看最近情况", session_id="blockednone")
+    assert trace.phase == "done"
+    assert "未配置 LLM" in trace.report
+    assert "LLM 已配置" not in trace.report
+
+
 def test_intent_dsl_guard_unit():
     """L3 守卫：基数+金额聚合拦截；合法 WHERE 不受限（Review Focus 2）。"""
     from core.orchestrator.nodes import _intent_dsl_mismatch
