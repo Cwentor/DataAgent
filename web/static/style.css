@@ -444,8 +444,33 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   width: 100%; margin-top: 4px; padding: 6px 8px; border-radius: 8px;
   border: 1px solid var(--border, #ddd); background: var(--bg, #fff); color: inherit;
 }
-.plan-steps { margin: 6px 0 10px 18px; padding: 0; font-size: 13px; }
-.plan-steps li { margin: 3px 0; }
+.plan-steps { margin: 6px 0 12px 18px; padding: 0; font-size: 13px; }
+.plan-steps li { margin: 4px 0; line-height: 1.65; }
+
+/* 计划审批卡美化：步骤类型徽标 + 圆角全宽修改指令框 + 按钮组右下角 */
+/* 标题只承担"分析计划审批"引导语义（计划内容在步骤列表），加粗加大突出层级 */
+.plan-review-card .hitl-q { font-size: 15px; font-weight: 700; margin-bottom: 12px; }
+.step-kind-badge {
+  display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.3px;
+  padding: 1px 9px; border-radius: 999px; margin-right: 5px; vertical-align: 1px;
+  white-space: nowrap;
+}
+.step-kind-badge.kind-query { background: var(--accent-soft, #e7f0ff); color: var(--accent-dark, #1c58d9); }
+.step-kind-badge.kind-analyze { background: #fff1e2; color: #d9480f; }
+.step-kind-badge.kind-synthesize { background: #f1edff; color: #6741d9; }
+.plan-review-card .hitl-input-row { margin-top: 2px; }
+.plan-edit-input {
+  flex: 1 1 100%; min-width: 0; width: 100%;
+  border: 1px solid var(--border, #ddd); border-radius: 999px;
+  padding: 8px 14px; font-size: 12.5px; font-family: inherit; color: inherit;
+  background: var(--bg, #fff);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.plan-edit-input:focus {
+  outline: none; border-color: var(--accent, #2f6bff);
+  box-shadow: 0 0 0 3px var(--accent-soft, rgba(47, 107, 255, 0.15));
+}
+.plan-review-actions { justify-content: flex-end; margin-top: 10px; }
 
 /* M3：run manifest 子任务轨迹卡 */
 .manifest-card { border: 1px dashed var(--border, #ccc); border-radius: 8px; padding: 8px 12px; margin: 6px 0; }
