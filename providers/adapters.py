@@ -811,6 +811,17 @@ class AnthropicAdapter(BaseAdapter):
 
         # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
         timeout = request.timeout or settings.PROVIDER_TIMEOUT
+        if self.provider.stream:
+            try:
+                return self._chat_via_stream(payload, want_json, timeout)
+            except ProviderError as exc:
+                if not (
+                    exc.code == "provider_error"
+                    and "HTTP 400" in str(exc)
+                    and "stream" in str(exc).lower()
+                ):
+                    raise
+                logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
         status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=timeout)
         try:
             data = json.loads(raw)
@@ -843,6 +854,59 @@ class AnthropicAdapter(BaseAdapter):
             )
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
             raise ProtocolError(f"Anthropic 响应解析失败（HTTP {status}）: {exc}") from exc
+
+    def _chat_via_stream(
+        self, payload_base: dict[str, Any], want_json: bool, timeout: int
+    ) -> UnifiedChatResponse:
+        """SSE 流式调用：delta 取 content_block_delta，usage 由 message_start/message_delta 合并。"""
+        from config import settings
+
+        url = f"{self.provider.base_url.rstrip('/')}/v1/messages"
+        payload = {**payload_base, "stream": True}
+        usage_acc: dict[str, int] = {}
+
+        def _extract_usage(frame: dict[str, Any]) -> dict[str, Any] | None:
+            ftype = frame.get("type")
+            if ftype == "message_start":
+                start = ((frame.get("message") or {}).get("usage") or {})
+                usage_acc["input_tokens"] = int(start.get("input_tokens") or 0)
+            elif ftype == "message_delta":
+                delta_usage = frame.get("usage") or {}
+                usage_acc["output_tokens"] = int(delta_usage.get("output_tokens") or 0)
+            return dict(usage_acc) if usage_acc else None
+
+        content, usage = _consume_stream(
+            _http_post_sse(
+                url,
+                payload=payload,
+                headers=self._build_headers(),
+                timeout=timeout,
+                max_seconds=settings.PROVIDER_STREAM_MAX_SECONDS,
+            ),
+            extract_delta=lambda f: (f.get("delta") or {}).get("text") or ""
+            if f.get("type") == "content_block_delta"
+            else "",
+            terminal=lambda f: f.get("type") == "message_stop",
+            extract_usage=_extract_usage,
+        )
+        parsed = None
+        if want_json:
+            try:
+                parsed = extract_json_object(content)
+            except ProtocolError:
+                parsed = None
+        usage = usage or {}
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        return UnifiedChatResponse(
+            content=content,
+            parsed_json=parsed,
+            usage=Usage(
+                prompt_tokens=input_tokens,
+                completion_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+            ),
+        )
 
     def test_connection(self) -> TestConnectionResult:
         """发送极小 ping 文本，验证 HTTP 200 与延时。"""

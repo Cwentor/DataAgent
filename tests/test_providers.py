@@ -1322,3 +1322,70 @@ def test_openai_responses_stream_falls_back_to_non_stream_on_400(monkeypatch):
     assert stub.calls
     assert "stream" not in stub.calls[0][1]  # 回退请求不带 stream 参数
     assert resp.parsed_json == {"r": 2}
+
+
+# --------------------------------------------------------------------------- #
+# AnthropicAdapter 流式分支
+# --------------------------------------------------------------------------- #
+def test_anthropic_stream_aggregates_and_merges_usage(monkeypatch):
+    provider = _provider(protocol="anthropic", stream=True)
+    frames = [
+        json.dumps({"type": "message_start", "message": {"usage": {"input_tokens": 4}}}),
+        json.dumps({"type": "content_block_delta", "delta": {"text": '{"a": '}}),
+        json.dumps({"type": "content_block_delta", "delta": {"text": "1}"}}),
+        json.dumps({"type": "message_delta", "usage": {"output_tokens": 6}}),
+        json.dumps({"type": "message_stop"}),
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["url"] = url
+        captured["payload"] = payload
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "system", "content": "你是助手"}, {"role": "user", "content": "hi"}],
+            model="claude-x",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert captured["url"].endswith("/v1/messages")
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["system"].startswith("你是助手")  # system 顶级字段照旧
+    assert resp.content == '{"a": 1}'
+    assert resp.parsed_json == {"a": 1}
+    assert resp.usage.prompt_tokens == 4
+    assert resp.usage.completion_tokens == 6
+    assert resp.usage.total_tokens == 10
+
+
+def test_anthropic_stream_falls_back_to_non_stream_on_400(monkeypatch):
+    provider = _provider(protocol="anthropic", stream=True)
+
+    def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        raise ProviderError(
+            "模型服务返回 HTTP 400: streaming is not supported", code="provider_error"
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
+    stub = _HttpStub(
+        body={
+            "content": [{"type": "text", "text": '{"a": 1}'}],
+            "usage": {"input_tokens": 4, "output_tokens": 6},
+        }
+    )
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-x",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert stub.calls
+    assert "stream" not in stub.calls[0][1]
+    assert resp.parsed_json == {"a": 1}
