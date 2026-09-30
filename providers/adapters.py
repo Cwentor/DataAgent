@@ -37,6 +37,7 @@ from providers.errors import (
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    StreamHandshakeRejected,
 )
 from providers.models import (
     ApiProtocol,
@@ -218,6 +219,20 @@ def _raise_for_error_frame(err: Any) -> None:
     raise ProviderError(f"流式响应错误帧: {_brief(text)}", code="provider_error")
 
 
+def _stream_fallback_eligible(exc: BaseException, *extra_hints: str) -> bool:
+    """流式回退非流式的资格判定：仅限握手阶段 400 且报文命中特征。
+
+    StreamHandshakeRejected 只在 _http_post_sse 首包（未产出任何 chunk 前）
+    抛出——mid-stream 错误帧 / 断连 / 超时永远是其他错误类型，即使其文本
+    巧合包含 "HTTP 400"/"stream" 字样也绝不触发非流式重发（防重复计费）。
+    特征词：stream 前缀族 + JSON Mode 参数族（_UNSUPPORTED_JSON_HINTS）+
+    调用方附加 hints（如 openai_chat 的 stream_options）。
+    """
+    return isinstance(exc, StreamHandshakeRejected) and any(
+        h in str(exc).lower() for h in (*extra_hints, "stream", *_UNSUPPORTED_JSON_HINTS)
+    )
+
+
 def _http_post_sse(
     url: str,
     *,
@@ -256,6 +271,13 @@ def _http_post_sse(
         resp = conn.getresponse()
         if resp.status >= 400:
             raw = resp.read().decode("utf-8", errors="replace")
+            if resp.status == 400:
+                # 握手阶段 400 专用类型：回退资格判定只认它——此时尚未产出
+                # 任何 chunk，重发无重复计费风险；mid-stream 错误帧/断连永远
+                # 是其他错误类型，结构上不可能误触发回退
+                raise StreamHandshakeRejected(
+                    f"模型服务返回 HTTP 400: {_brief(raw)}", code="provider_error"
+                )
             _raise_for_status(resp.status, raw)
         while True:
             # 防线一：剩余预算语义——块间空闲上限与总剩余取最小值收紧单次读
@@ -415,8 +437,9 @@ class OpenAIChatAdapter(BaseAdapter):
         """发送 Chat Completions 请求并解析 choices[0].message.content。
 
         provider.stream=True 时走 SSE 流式聚合（超时语义=块间空闲+总上限）；
-        网关拒绝流式（HTTP 400 且报文含 stream/JSON 参数特征）时自动回退
-        非流式重试一次；流中途断连不属于"拒绝流式"，原样上抛不回退。
+        网关在握手阶段拒绝流式（StreamHandshakeRejected 且报文含
+        stream/JSON 参数特征）时自动回退非流式重试一次；mid-stream 错误帧/
+        断连/超时永远原样上抛不回退（防重复计费）。
         """
         messages, system_prompt = self._split_messages(request)
         want_json = (
@@ -435,15 +458,7 @@ class OpenAIChatAdapter(BaseAdapter):
             try:
                 return self._chat_via_stream(request, messages, want_json, timeout)
             except ProviderError as exc:
-                fallback = (
-                    exc.code == "provider_error"
-                    and "HTTP 400" in str(exc)
-                    and any(
-                        h in str(exc).lower()
-                        for h in ("stream_options", "stream", *_UNSUPPORTED_JSON_HINTS)
-                    )
-                )
-                if not fallback:
+                if not _stream_fallback_eligible(exc, "stream_options"):
                     raise
                 logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
         status, _, raw = self._post(
@@ -510,7 +525,11 @@ class OpenAIChatAdapter(BaseAdapter):
                 extract_usage=lambda f: f.get("usage"),
             )
         except ProviderError as exc:
-            if "stream_options" not in str(exc).lower():
+            # 仅握手阶段 400 且报文提及 stream_options 才去参重试；mid-stream
+            # 错误（StreamHandshakeRejected 之外）原样上抛
+            if not (
+                isinstance(exc, StreamHandshakeRejected) and "stream_options" in str(exc).lower()
+            ):
                 raise
             payload.pop("stream_options", None)
             logger.info("网关不认 stream_options，去参数保流式重试")
@@ -625,8 +644,9 @@ class OpenAIResponsesAdapter(BaseAdapter):
     def chat(self, request: UnifiedChatRequest) -> UnifiedChatResponse:
         """按 /responses 规范组装请求并解析 output 文本。
 
-        provider.stream=True 时走 SSE 流式聚合；网关拒绝流式（HTTP 400 且
-        报文含 stream 特征）时回退非流式重试一次。
+        provider.stream=True 时走 SSE 流式聚合；网关在握手阶段拒绝流式
+        （StreamHandshakeRejected 且报文含 stream/JSON 参数特征）时回退
+        非流式重试一次。
         """
         messages, system_prompt = self._split_messages(request)
         want_json = (
@@ -647,11 +667,7 @@ class OpenAIResponsesAdapter(BaseAdapter):
             try:
                 return self._chat_via_stream(request, input_blocks, want_json, timeout)
             except ProviderError as exc:
-                if not (
-                    exc.code == "provider_error"
-                    and "HTTP 400" in str(exc)
-                    and "stream" in str(exc).lower()
-                ):
+                if not _stream_fallback_eligible(exc):
                     raise
                 logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
         payload: dict[str, Any] = {
@@ -839,11 +855,7 @@ class AnthropicAdapter(BaseAdapter):
             try:
                 return self._chat_via_stream(payload, want_json, timeout)
             except ProviderError as exc:
-                if not (
-                    exc.code == "provider_error"
-                    and "HTTP 400" in str(exc)
-                    and "stream" in str(exc).lower()
-                ):
+                if not _stream_fallback_eligible(exc):
                     raise
                 logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
         status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=timeout)

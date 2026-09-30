@@ -42,6 +42,7 @@ from providers.errors import (
     ProviderNotConfiguredError,
     ProviderTimeoutError,
     RateLimitError,
+    StreamHandshakeRejected,
     error_message,
 )
 from providers.factory import ProviderFactory
@@ -1153,7 +1154,7 @@ def test_openai_chat_stream_degrades_without_stream_options(monkeypatch):
     def flaky_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
         calls.append(dict(payload))
         if "stream_options" in payload:
-            raise ProviderError(
+            raise StreamHandshakeRejected(
                 "模型服务返回 HTTP 400: stream_options not supported", code="provider_error"
             )
         return iter(frames)
@@ -1180,7 +1181,9 @@ def test_openai_chat_stream_falls_back_to_non_stream_on_400(monkeypatch):
 
     def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
         stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
-        raise ProviderError("模型服务返回 HTTP 400: stream is not supported", code="provider_error")
+        raise StreamHandshakeRejected(
+            "模型服务返回 HTTP 400: stream is not supported", code="provider_error"
+        )
 
     monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
     stub = _HttpStub(body={"choices": [{"message": {"content": '{"ok": 1}'}}]})
@@ -1260,7 +1263,7 @@ def test_openai_responses_stream_falls_back_to_non_stream_on_400(monkeypatch):
 
     def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
         stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
-        raise ProviderError(
+        raise StreamHandshakeRejected(
             "模型服务返回 HTTP 400: streaming not supported here", code="provider_error"
         )
 
@@ -1331,7 +1334,7 @@ def test_anthropic_stream_falls_back_to_non_stream_on_400(monkeypatch):
 
     def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
         stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
-        raise ProviderError(
+        raise StreamHandshakeRejected(
             "模型服务返回 HTTP 400: streaming is not supported", code="provider_error"
         )
 
@@ -1502,3 +1505,166 @@ def test_http_post_sse_overlong_line_without_newline_raises(monkeypatch):
                 "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=1
             )
         )
+
+
+# --------------------------------------------------------------------------- #
+# 回退判定收紧（PR1）：仅握手阶段 400 可回退，mid-stream 永不重发
+# --------------------------------------------------------------------------- #
+def test_http_post_sse_handshake_400_raises_dedicated_type(monkeypatch):
+    """首包 400 必须抛 StreamHandshakeRejected（回退资格判定的唯一依据）。"""
+
+    class BadRequestResp:
+        status = 400
+
+        def read(self):
+            return b"stream is not supported"
+
+        def readline(self, limit=-1):
+            return b""
+
+    class BadRequestConn(_SSEConnStub):
+        def getresponse(self):
+            return BadRequestResp()
+
+    monkeypatch.setattr("http.client.HTTPSConnection", BadRequestConn)
+    with pytest.raises(StreamHandshakeRejected):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=30
+            )
+        )
+
+
+def _midstream_fail_sse(frame: str):
+    """构造 mid-stream 错误桩：先产出半个 delta，再抛文本含 400/stream 特征的错误帧。"""
+
+    def _stub(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        yield frame
+        raise ProviderError(
+            "流式响应错误帧: HTTP 400 stream response_format not supported",
+            code="provider_error",
+        )
+
+    return _stub
+
+
+def test_midstream_error_never_falls_back_openai_chat(monkeypatch):
+    # 事项 5 回归：mid-stream 错误文本巧合含 "HTTP 400"/"stream" 不得触发非流式重发
+    provider = _provider(stream=True)
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _midstream_fail_sse(json.dumps({"choices": [{"delta": {"content": "he"}}]})),
+    )
+    stub = _HttpStub(body={"choices": [{"message": {"content": "{}"}}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    with pytest.raises(ProviderError):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert not stub.calls  # 绝不重发
+
+
+def test_midstream_error_never_falls_back_openai_responses(monkeypatch):
+    provider = _provider(protocol="openai_responses", stream=True)
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _midstream_fail_sse(json.dumps({"type": "response.output_text.delta", "delta": "he"})),
+    )
+    stub = _HttpStub(body={"output": [{"content": [{"type": "output_text", "text": "{}"}]}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    with pytest.raises(ProviderError):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert not stub.calls
+
+
+def test_midstream_error_never_falls_back_anthropic(monkeypatch):
+    provider = _provider(protocol="anthropic", stream=True)
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _midstream_fail_sse(json.dumps({"type": "content_block_delta", "delta": {"text": "he"}})),
+    )
+    stub = _HttpStub(body={"content": [{"type": "text", "text": "{}"}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    with pytest.raises(ProviderError):
+        adapter.chat(
+            UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="claude-x")
+        )
+    assert not stub.calls
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        AuthenticationError("鉴权失败（HTTP 401）"),
+        ProviderError("模型服务返回 HTTP 403: forbidden", code="provider_error"),
+        ProviderError("模型服务返回 HTTP 500: internal error", code="provider_error"),
+        ProviderTimeoutError("请求超时: read timed out"),
+    ],
+    ids=["401", "403", "500", "timeout"],
+)
+def test_stream_non_handshake400_never_falls_back(monkeypatch, exc):
+    """事项 7 矩阵：非握手 400（401/403/500/超时）三协议一律不回退非流式。"""
+    cases = [
+        (
+            OpenAIChatAdapter,
+            _provider(stream=True),
+            "m-1",
+            {"output": None},
+        ),
+        (
+            OpenAIResponsesAdapter,
+            _provider(protocol="openai_responses", stream=True),
+            "m-1",
+            None,
+        ),
+        (
+            AnthropicAdapter,
+            _provider(protocol="anthropic", stream=True),
+            "claude-x",
+            None,
+        ),
+    ]
+    for adapter_cls, provider, model_id, _ in cases:
+
+        def reject(url, *, payload, headers, timeout, max_seconds, api_key=None, _exc=exc):
+            raise _exc
+
+        monkeypatch.setattr("providers.adapters._http_post_sse", reject)
+        stub = _HttpStub(body={"choices": [{"message": {"content": "{}"}}]})
+        monkeypatch.setattr("providers.adapters._http_post", stub)
+        adapter = adapter_cls(provider, model_id)
+        with pytest.raises(ProviderError):
+            adapter.chat(
+                UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model=model_id)
+            )
+        assert not stub.calls, f"{adapter_cls.__name__} 在 {type(exc).__name__} 下误回退"
+
+
+def test_responses_handshake_400_json_hint_falls_back(monkeypatch):
+    # 事项 6：responses 回退判定补齐 JSON hints——报文无 "stream" 字样也回退
+    provider = _provider(protocol="openai_responses", stream=True)
+
+    def reject_json_mode(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        raise StreamHandshakeRejected(
+            "模型服务返回 HTTP 400: text.format not supported", code="provider_error"
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", reject_json_mode)
+    stub = _HttpStub(
+        body={
+            "output": [{"content": [{"type": "output_text", "text": '{"r": 2}'}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    )
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert stub.calls
+    assert resp.parsed_json == {"r": 2}
