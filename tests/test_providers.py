@@ -1219,7 +1219,10 @@ def test_openai_chat_stream_falls_back_to_non_stream_on_400(monkeypatch):
     # Review Focus #4：网关整体拒绝 stream -> 回退非流式重试一次
     provider = _provider(stream=True)
 
+    stream_calls: list[int] = []
+
     def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
         raise ProviderError("模型服务返回 HTTP 400: stream is not supported", code="provider_error")
 
     monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
@@ -1233,6 +1236,7 @@ def test_openai_chat_stream_falls_back_to_non_stream_on_400(monkeypatch):
             response_format={"type": "json_object"},
         )
     )
+    assert stream_calls  # 流式桩确被先调用（先拒绝后回退）
     assert stub.calls  # 确实走了非流式路径
     assert resp.parsed_json == {"ok": 1}
 
@@ -1295,7 +1299,10 @@ def test_openai_responses_stream_aggregates(monkeypatch):
 def test_openai_responses_stream_falls_back_to_non_stream_on_400(monkeypatch):
     provider = _provider(protocol="openai_responses", stream=True)
 
+    stream_calls: list[int] = []
+
     def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
         raise ProviderError(
             "模型服务返回 HTTP 400: streaming not supported here", code="provider_error"
         )
@@ -1316,6 +1323,7 @@ def test_openai_responses_stream_falls_back_to_non_stream_on_400(monkeypatch):
             response_format={"type": "json_object"},
         )
     )
+    assert stream_calls  # 流式桩确被先调用（先拒绝后回退）
     assert stub.calls
     assert "stream" not in stub.calls[0][1]  # 回退请求不带 stream 参数
     assert resp.parsed_json == {"r": 2}
@@ -1362,7 +1370,10 @@ def test_anthropic_stream_aggregates_and_merges_usage(monkeypatch):
 def test_anthropic_stream_falls_back_to_non_stream_on_400(monkeypatch):
     provider = _provider(protocol="anthropic", stream=True)
 
+    stream_calls: list[int] = []
+
     def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
         raise ProviderError(
             "模型服务返回 HTTP 400: streaming is not supported", code="provider_error"
         )
@@ -1383,6 +1394,90 @@ def test_anthropic_stream_falls_back_to_non_stream_on_400(monkeypatch):
             response_format={"type": "json_object"},
         )
     )
+    assert stream_calls  # 流式桩确被先调用（先拒绝后回退）
     assert stub.calls
     assert "stream" not in stub.calls[0][1]
     assert resp.parsed_json == {"a": 1}
+
+
+# --------------------------------------------------------------------------- #
+# 流式鉴权头（修复轮）：三协议流式调用必须与非流式路径同源鉴权
+# --------------------------------------------------------------------------- #
+def test_openai_chat_stream_passes_api_key(monkeypatch):
+    # openai_chat 流式：api_key 经 _http_post_sse 参数透传（网关 401 防线）
+    provider = _provider(stream=True)
+    frames = [json.dumps({"choices": [{"delta": {"content": '{"ok": 1}'}}]}), "[DONE]"]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["api_key"] = api_key
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert resp.parsed_json == {"ok": 1}
+    assert captured["api_key"] == provider.api_key
+    assert captured["api_key"] is not None  # 区分"传了/没传"
+
+
+def test_openai_responses_stream_passes_api_key(monkeypatch):
+    # openai_responses 流式：同 openai_chat 的 api_key 透传要求
+    provider = _provider(protocol="openai_responses", stream=True)
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": '{"r": 2}'}),
+        json.dumps({"type": "response.completed", "response": {"usage": {"total_tokens": 1}}}),
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["api_key"] = api_key
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert resp.parsed_json == {"r": 2}
+    assert captured["api_key"] == provider.api_key
+    assert captured["api_key"] is not None
+
+
+def test_anthropic_stream_passes_auth_headers(monkeypatch):
+    # anthropic 流式：headers 内联 x-api-key + anthropic-version（api_key 参数保持 None）
+    provider = _provider(protocol="anthropic", stream=True)
+    frames = [
+        json.dumps({"type": "content_block_delta", "delta": {"text": '{"a": 1}'}}),
+        json.dumps({"type": "message_stop"}),
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["headers"] = headers
+        captured["api_key"] = api_key
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-x",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert resp.parsed_json == {"a": 1}
+    assert captured["headers"]["x-api-key"] == provider.api_key
+    assert captured["headers"]["anthropic-version"] == "2023-06-01"
+    assert captured["api_key"] is None

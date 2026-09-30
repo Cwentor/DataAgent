@@ -485,7 +485,12 @@ class OpenAIChatAdapter(BaseAdapter):
         try:
             content, usage = _consume_stream(
                 _http_post_sse(
-                    url, payload=payload, headers=headers, timeout=timeout, max_seconds=max_seconds
+                    url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=timeout,
+                    max_seconds=max_seconds,
+                    api_key=self.provider.api_key,
                 ),
                 extract_delta=_delta,
                 terminal=lambda f: False,  # 终止帧 = [DONE]，_consume_stream 内建处理
@@ -498,7 +503,12 @@ class OpenAIChatAdapter(BaseAdapter):
             logger.info("网关不认 stream_options，去参数保流式重试")
             content, usage = _consume_stream(
                 _http_post_sse(
-                    url, payload=payload, headers=headers, timeout=timeout, max_seconds=max_seconds
+                    url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=timeout,
+                    max_seconds=max_seconds,
+                    api_key=self.provider.api_key,
                 ),
                 extract_delta=_delta,
                 terminal=lambda f: False,
@@ -678,6 +688,7 @@ class OpenAIResponsesAdapter(BaseAdapter):
                 headers=self._build_headers(),
                 timeout=timeout,
                 max_seconds=settings.PROVIDER_STREAM_MAX_SECONDS,
+                api_key=self.provider.api_key,
             ),
             extract_delta=lambda f: (
                 (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
@@ -863,6 +874,11 @@ class AnthropicAdapter(BaseAdapter):
 
         url = f"{self.provider.base_url.rstrip('/')}/v1/messages"
         payload = {**payload_base, "stream": True}
+        # 鉴权与非流式路径同源：内联 x-api-key + anthropic-version（api_key 参数保持 None）
+        headers = {**self._build_headers()}
+        if self.provider.api_key:
+            headers["x-api-key"] = self.provider.api_key
+            headers["anthropic-version"] = "2023-06-01"
         usage_acc: dict[str, int] = {}
 
         def _extract_usage(frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -879,7 +895,7 @@ class AnthropicAdapter(BaseAdapter):
             _http_post_sse(
                 url,
                 payload=payload,
-                headers=self._build_headers(),
+                headers=headers,
                 timeout=timeout,
                 max_seconds=settings.PROVIDER_STREAM_MAX_SECONDS,
             ),
