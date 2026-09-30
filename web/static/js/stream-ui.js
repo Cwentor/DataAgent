@@ -142,6 +142,15 @@
     return card;
   }
 
+  /** 步骤类型徽标：query/analyze/synthesize 三色（与工具徽标同色系）。
+   *  供计划审批卡与高危确认卡共用，编号列表 + 徽标 + 目标文本的行结构。 */
+  function elStepKindBadge(kind) {
+    var span = document.createElement("span");
+    span.className = "step-kind-badge kind-" + (kind || "query");
+    span.textContent = kind || "query";
+    return span;
+  }
+
     function elHighRisk(item) {
     var card = document.createElement("div");
     // 复用 plan-review-card class：bindHitlCard 按 data-plan-action 契约绑定按钮
@@ -154,7 +163,8 @@
     list.className = "plan-steps";
     (item.steps || []).forEach(function (step) {
       var li = document.createElement("li");
-      li.textContent = "[analyze] " + (step.goal || step.id || "");
+      li.appendChild(elStepKindBadge("analyze"));
+      li.appendChild(document.createTextNode(" " + (step.goal || step.id || "")));
       list.appendChild(li);
     });
     card.appendChild(list);
@@ -180,22 +190,25 @@
     card.className = "hitl-card plan-review-card";
     var head = document.createElement("div");
     head.className = "hitl-q";
-    head.textContent = "分析计划审批：" + (item.summary || "请确认以下执行计划");
+    // 标题不带 summary：多步计划的首步目标与 summary 通常逐字重复，重复展示噪音
+    head.textContent = "分析计划审批";
     card.appendChild(head);
     var list = document.createElement("ol");
     list.className = "plan-steps";
     (item.planSteps || []).forEach(function (step) {
       var li = document.createElement("li");
-      li.textContent = "[" + (step.kind || "query") + "] " + (step.goal || "");
+      li.appendChild(elStepKindBadge(step.kind));
+      li.appendChild(document.createTextNode(" " + (step.goal || "")));
       list.appendChild(li);
     });
     card.appendChild(list);
     var editRow = document.createElement("div");
     editRow.className = "hitl-input-row";
-    editRow.innerHTML = '<input class="plan-edit-input" placeholder="修改指令（选"修改"时必填）…">';
+    editRow.innerHTML =
+      '<input class="plan-edit-input" placeholder="修改指令（选「修改」时必填），提交后按新指令重新规划…">';
     card.appendChild(editRow);
     var actions = document.createElement("div");
-    actions.className = "hitl-options";
+    actions.className = "hitl-options plan-review-actions";
     [
       { action: "approve", text: "批准" },
       { action: "edit", text: "修改" },
