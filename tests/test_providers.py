@@ -997,7 +997,7 @@ class _SSEResponse:
         self._lines = lines
         self._i = 0
 
-    def readline(self):
+    def readline(self, limit=-1):
         if self._i >= len(self._lines):
             return b""
         item = self._lines[self._i]
@@ -1053,7 +1053,7 @@ def test_http_post_sse_idle_timeout_maps_to_provider_timeout(monkeypatch):
     class IdleResp:
         status = 200
 
-        def readline(self):
+        def readline(self, limit=-1):
             raise TimeoutError("read timed out")
 
     class IdleConn(_SSEConnStub):
@@ -1087,7 +1087,7 @@ def test_http_post_sse_first_packet_401_maps(monkeypatch):
         def read(self):
             return b"unauthorized"
 
-        def readline(self):
+        def readline(self, limit=-1):
             return b""
 
     class UnauthorizedConn(_SSEConnStub):
@@ -1481,3 +1481,24 @@ def test_gemini_adapter_removed_from_package():
 
     assert not hasattr(providers, "GeminiAdapter")
     assert "GeminiAdapter" not in providers.__all__
+
+
+def test_http_post_sse_overlong_line_without_newline_raises(monkeypatch):
+    # 无换行慢滴流：单行达到行字节上限且无换行 => ProviderError 熔断，防内存无界增长
+    class DripResp:
+        status = 200
+
+        def readline(self, limit=-1):
+            return b"x" * 65536  # 恰为行上限且不以 b"\n" 结尾
+
+    class DripConn(_SSEConnStub):
+        def getresponse(self):
+            return DripResp()
+
+    monkeypatch.setattr("http.client.HTTPSConnection", DripConn)
+    with pytest.raises(ProviderError, match="SSE 行超长"):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=1
+            )
+        )
