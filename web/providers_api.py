@@ -10,8 +10,7 @@
 
 设计约束：
 - 供应商控制开放多供应商接入：任意端点只要接口协议符合白名单
-  （openai_chat / openai_responses / anthropic）即可添加；gemini 协议
-  不在控制面白名单内（预置与 UI 均不提供）；
+  （openai_chat / openai_responses / anthropic）即可添加；
 - API Key 落盘加密存储（providers.crypto），文件内容不含明文；
 - 列表/详情响应**完全不含 api_key 字段**：前端不再回填脱敏串，杜绝
   「把脱敏串当真 Key 用」导致的连通失败；编辑时留空 = 保持原 Key；
@@ -64,7 +63,7 @@ def _factory():
 def _normalize_provider_payload(body: dict[str, Any]) -> dict[str, Any]:
     """规范化创建/更新请求体：协议字符串校验 + 模型条目结构透传 pydantic。
 
-    协议白名单：仅接受 SUPPORTED_PROTOCOLS 内的接口协议（gemini 拒绝）。
+    协议白名单：仅接受 SUPPORTED_PROTOCOLS 内的接口协议（gemini 协议已移除）。
     额外防御：客户端提交的 ``is_preset`` 一律忽略（预置标记只由系统管理）。
     """
     payload = {k: v for k, v in dict(body).items() if k != "is_preset"}
@@ -132,7 +131,7 @@ def list_providers() -> tuple[int, dict[str, Any]]:
 def create_provider(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     """POST /api/settings/providers：创建自定义供应商（is_preset 固定为 False）。
 
-    接口协议必须符合白名单（chat/responses/anthropic），gemini 返回 400。
+    接口协议必须符合白名单（chat/responses/anthropic）。
     """
     if not isinstance(body, dict) or not str(body.get("name") or "").strip():
         return 400, {"error": "供应商名称（name）必填"}
