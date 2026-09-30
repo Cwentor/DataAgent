@@ -963,17 +963,20 @@ class AnthropicAdapter(BaseAdapter):
                 parsed = extract_json_object(content)
             except ProtocolError:
                 parsed = None
-        usage = usage or {}
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        return UnifiedChatResponse(
-            content=content,
-            parsed_json=parsed,
-            usage=Usage(
+        # usage 契约与非流式一致：上游未产出 usage 帧 => None（不造 Usage(0,0,0)）
+        usage_model = None
+        if usage:
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            usage_model = Usage(
                 prompt_tokens=input_tokens,
                 completion_tokens=output_tokens,
                 total_tokens=input_tokens + output_tokens,
-            ),
+            )
+        return UnifiedChatResponse(
+            content=content,
+            parsed_json=parsed,
+            usage=usage_model,
         )
 
     def test_connection(self) -> TestConnectionResult:
