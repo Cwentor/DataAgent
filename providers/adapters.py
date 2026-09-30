@@ -189,6 +189,10 @@ def _brief(raw: str, limit: int = 300) -> str:
 # --------------------------------------------------------------------------- #
 # SSE 流式传输（stream=True：块间空闲超时 + 总时长上限，客户端聚合）
 # --------------------------------------------------------------------------- #
+# 单行字节上限：网关永不换行的慢滴流会在该处被截断并熔断（防内存无界增长）
+_SSE_MAX_LINE_BYTES = 65536
+
+
 def _iter_sse_payloads(lines: Iterable[str]) -> Iterator[str]:
     """从 SSE 行序列提取 data 负载（协议中立纯函数，便于单测）。
 
@@ -225,10 +229,13 @@ def _http_post_sse(
 ) -> Iterator[str]:
     """发送流式 JSON POST，逐条产出 SSE data 负载（惰性生成器）。
 
-    超时语义：timeout 为块间空闲上限（socket 读超时对 readline 天然逐块计时）；
-    max_seconds 为整条流的 wall-clock 总上限，超限抛 ProviderTimeoutError。
-    首包 HTTP 状态非 2xx 与 _http_post 同映射；EOF（b""）正常结束迭代——
-    终止帧校验归消费方（_consume_stream）。
+    两道防无限流防线：
+    - 块间空闲上限 timeout 与流总剩余预算取最小值，经 sock.settimeout 收紧
+      单次 readline 的等待上限（慢滴流持续供字节也无法拖过总预算）；
+    - 单行字节上限 _SSE_MAX_LINE_BYTES：网关永不换行时 readline 在该处被
+      截断，达到上限仍无换行 => ProviderError 熔断（防内存无界增长）。
+    总预算耗尽抛 ProviderTimeoutError。首包 HTTP 状态非 2xx 与 _http_post
+    同映射；EOF（b""）正常结束迭代——终止帧校验归消费方（_consume_stream）。
     """
     body = json.dumps(payload).encode("utf-8")
     merged_headers = {
@@ -251,11 +258,19 @@ def _http_post_sse(
             raw = resp.read().decode("utf-8", errors="replace")
             _raise_for_status(resp.status, raw)
         while True:
-            if time.perf_counter() - started > max_seconds:
+            # 防线一：剩余预算语义——块间空闲上限与总剩余取最小值收紧单次读
+            remaining = max_seconds - (time.perf_counter() - started)
+            if remaining <= 0:
                 raise ProviderTimeoutError(f"流式总时长超限（>{max_seconds}s）")
-            line = resp.readline()
+            sock = getattr(conn, "sock", None)
+            if sock is not None:
+                sock.settimeout(min(timeout, remaining))
+            # 防线二：行字节上限——无换行慢滴流单行熔断
+            line = resp.readline(_SSE_MAX_LINE_BYTES)
             if not line:
                 return  # EOF：终止帧校验归消费方
+            if len(line) == _SSE_MAX_LINE_BYTES and not line.endswith(b"\n"):
+                raise ProviderError("SSE 行超长（无换行慢滴流），已熔断", code="provider_error")
             yield from _iter_sse_payloads([line.decode("utf-8", errors="replace")])
     except TimeoutError as exc:  # socket.timeout（块间空闲超时）
         raise ProviderTimeoutError(f"请求超时: {exc}") from exc
