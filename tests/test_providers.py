@@ -1144,3 +1144,111 @@ def test_http_post_sse_first_packet_401_maps(monkeypatch):
                 "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=30
             )
         )
+
+
+# --------------------------------------------------------------------------- #
+# OpenAIChatAdapter 流式分支
+# --------------------------------------------------------------------------- #
+def test_openai_chat_stream_aggregates(monkeypatch):
+    provider = _provider(stream=True)
+    frames = [
+        json.dumps({"choices": [{"delta": {"content": '{"ok"'}}]}),
+        json.dumps({"choices": [{"delta": {"content": ": 1}"}}]}),
+        json.dumps(
+            {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}
+        ),
+        "[DONE]",
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["url"] = url
+        captured["payload"] = payload
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert captured["url"].endswith("/chat/completions")
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["stream_options"] == {"include_usage": True}
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+    assert resp.content == '{"ok": 1}'
+    assert resp.parsed_json == {"ok": 1}
+    assert resp.usage.total_tokens == 5
+
+
+def test_openai_chat_stream_degrades_without_stream_options(monkeypatch):
+    # Review Focus #3：网关不认 stream_options -> 去参保流式重试
+    provider = _provider(stream=True)
+    frames = [json.dumps({"choices": [{"delta": {"content": '{"a": 1}'}}]}), "[DONE]"]
+    calls: list[dict] = []
+
+    def flaky_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        calls.append(dict(payload))
+        if "stream_options" in payload:
+            raise ProviderError(
+                "模型服务返回 HTTP 400: stream_options not supported", code="provider_error"
+            )
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", flaky_sse)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert "stream_options" not in calls[-1]
+    assert calls[-1]["stream"] is True  # 保流式，仅去参数
+    assert resp.parsed_json == {"a": 1}
+
+
+def test_openai_chat_stream_falls_back_to_non_stream_on_400(monkeypatch):
+    # Review Focus #4：网关整体拒绝 stream -> 回退非流式重试一次
+    provider = _provider(stream=True)
+
+    def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        raise ProviderError(
+            "模型服务返回 HTTP 400: stream is not supported", code="provider_error"
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
+    stub = _HttpStub(body={"choices": [{"message": {"content": '{"ok": 1}'}}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert stub.calls  # 确实走了非流式路径
+    assert resp.parsed_json == {"ok": 1}
+
+
+def test_openai_chat_stream_eof_propagates_without_fallback(monkeypatch):
+    # 断连不是"网关拒绝流式"：不得触发非流式回退（避免重复计费长请求）
+    provider = _provider(stream=True)
+
+    def eof_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        return iter([json.dumps({"choices": [{"delta": {"content": "half"}}]})])
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", eof_stream)
+    stub = _HttpStub(body={"choices": [{"message": {"content": "{}"}}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    with pytest.raises(ProviderError):
+        adapter.chat(
+            UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1")
+        )
+    assert not stub.calls

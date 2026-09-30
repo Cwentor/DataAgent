@@ -399,7 +399,12 @@ class OpenAIChatAdapter(BaseAdapter):
     """
 
     def chat(self, request: UnifiedChatRequest) -> UnifiedChatResponse:
-        """发送 Chat Completions 请求并解析 choices[0].message.content。"""
+        """发送 Chat Completions 请求并解析 choices[0].message.content。
+
+        provider.stream=True 时走 SSE 流式聚合（超时语义=块间空闲+总上限）；
+        网关拒绝流式（HTTP 400 且报文含 stream/JSON 参数特征）时自动回退
+        非流式重试一次；流中途断连不属于"拒绝流式"，原样上抛不回退。
+        """
         messages, system_prompt = self._split_messages(request)
         want_json = (
             request.response_format is not None and request.response_format.type == "json_object"
@@ -409,16 +414,34 @@ class OpenAIChatAdapter(BaseAdapter):
         if system_prompt is not None:
             messages = [{"role": "system", "content": system_prompt}, *messages]
 
-        base_payload: dict[str, Any] = {
-            "model": request.model,
-            "messages": messages,
-            "temperature": request.temperature if request.temperature is not None else 0.0,
-        }
         from config import settings
 
         # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
         timeout = request.timeout or settings.PROVIDER_TIMEOUT
-        status, _, raw = self._post(base_payload, want_json=want_json, timeout=timeout)
+        if self.provider.stream:
+            try:
+                return self._chat_via_stream(request, messages, want_json, timeout)
+            except ProviderError as exc:
+                fallback = (
+                    exc.code == "provider_error"
+                    and "HTTP 400" in str(exc)
+                    and any(
+                        h in str(exc).lower()
+                        for h in ("stream_options", "stream", *_UNSUPPORTED_JSON_HINTS)
+                    )
+                )
+                if not fallback:
+                    raise
+                logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
+        status, _, raw = self._post(
+            {
+                "model": request.model,
+                "messages": messages,
+                "temperature": request.temperature if request.temperature is not None else 0.0,
+            },
+            want_json=want_json,
+            timeout=timeout,
+        )
         try:
             data = json.loads(raw)
             content = data["choices"][0]["message"]["content"]
@@ -426,6 +449,62 @@ class OpenAIChatAdapter(BaseAdapter):
             return self._build_response(content, usage, json_mode=want_json)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise ProtocolError(f"Chat Completions 响应解析失败（HTTP {status}）: {exc}") from exc
+
+    def _chat_via_stream(
+        self,
+        request: UnifiedChatRequest,
+        messages: list[dict[str, Any]],
+        want_json: bool,
+        timeout: int,
+    ) -> UnifiedChatResponse:
+        """SSE 流式调用并聚合为完整 content（provider.stream=True 专用路径）。
+
+        中转站不认 stream_options（HTTP 400 提及该参数）时：去掉该参数保
+        流式重试一次（usage 丢失可接受——上层仅可观测消费）。
+        """
+        from config import settings
+
+        url = f"{self.provider.base_url.rstrip('/')}/chat/completions"
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "messages": messages,
+            "temperature": request.temperature if request.temperature is not None else 0.0,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if want_json:
+            # JSON Mode 原生参数流式下照常透传；被网关拒绝时交由外层回退非流式
+            # （非流式 _post 自带原生参数降级链，行为与现状一致）
+            payload["response_format"] = {"type": "json_object"}
+        headers = self._build_headers()
+        max_seconds = settings.PROVIDER_STREAM_MAX_SECONDS
+
+        def _delta(frame: dict[str, Any]) -> str:
+            return ((frame.get("choices") or [{}])[0].get("delta") or {}).get("content") or ""
+
+        try:
+            content, usage = _consume_stream(
+                _http_post_sse(
+                    url, payload=payload, headers=headers, timeout=timeout, max_seconds=max_seconds
+                ),
+                extract_delta=_delta,
+                terminal=lambda f: False,  # 终止帧 = [DONE]，_consume_stream 内建处理
+                extract_usage=lambda f: f.get("usage"),
+            )
+        except ProviderError as exc:
+            if "stream_options" not in str(exc).lower():
+                raise
+            payload.pop("stream_options", None)
+            logger.info("网关不认 stream_options，去参数保流式重试")
+            content, usage = _consume_stream(
+                _http_post_sse(
+                    url, payload=payload, headers=headers, timeout=timeout, max_seconds=max_seconds
+                ),
+                extract_delta=_delta,
+                terminal=lambda f: False,
+                extract_usage=lambda f: f.get("usage"),
+            )
+        return self._build_response(content, usage, json_mode=want_json)
 
     def _post(
         self,
