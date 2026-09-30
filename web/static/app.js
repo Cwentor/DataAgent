@@ -299,6 +299,7 @@
         ? "<span class='p-badge preset'>预置</span>"
         : "<span class='p-badge custom'>自定义</span>";
       if (!p.enabled) { badge += "<span class='p-badge off'>已禁用</span>"; }
+      if (p.stream) { badge += "<span class='p-badge custom'>流式</span>"; }
       html += "<div class='provider-item" + (p.id === currentProviderId ? " active" : "") + "'"
         + " data-id='" + esc(p.id) + "'>"
         + "<span class='p-name'>" + esc(p.name) + "</span>" + badge + "</div>";
@@ -321,6 +322,7 @@
     $("pf-name").value = p ? p.name : "";
     $("pf-enabled").checked = p ? !!p.enabled : true;
     $("pf-protocol").value = p ? p.protocol : "openai_chat";
+    $("pf-stream").checked = p ? !!p.stream : false;
     $("pf-base-url").value = p ? p.base_url : "";
     $("pf-api-key").value = "";
     $("pf-api-key").placeholder = p && p.has_api_key
@@ -347,6 +349,7 @@
     $("pf-name").value = "";
     $("pf-enabled").checked = true;
     $("pf-protocol").value = "openai_chat";
+    $("pf-stream").checked = false;
     $("pf-base-url").value = "";
     $("pf-api-key").value = "";
     $("pf-api-key").placeholder = "输入 API Key";
@@ -416,6 +419,7 @@
       name: $("pf-name").value.trim(),
       enabled: $("pf-enabled").checked,
       protocol: $("pf-protocol").value,
+      stream: $("pf-stream").checked,
       base_url: $("pf-base-url").value.trim(),
       api_key: $("pf-api-key").value,
       models: models
