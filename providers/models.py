@@ -24,7 +24,6 @@ class ApiProtocol(StrEnum):
     OPENAI_CHAT = "openai_chat"  # POST {baseUrl}/chat/completions
     OPENAI_RESPONSES = "openai_responses"  # POST {baseUrl}/responses
     ANTHROPIC = "anthropic"  # POST {baseUrl}/v1/messages
-    GEMINI = "gemini"  # POST {baseUrl}/v1beta/models/{model}:generateContent
 
 
 # --------------------------------------------------------------------------- #

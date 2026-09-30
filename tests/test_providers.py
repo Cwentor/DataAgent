@@ -5,8 +5,8 @@
   对外视图不含 api_key（仅 has_api_key）、历史脱敏串不覆盖明文、预置拒绝删除；
 - extract_json_object：裸 JSON / Markdown 围栏 / 前后杂文本的安全清洗；
 - 适配器：openai_chat 透传 response_format + 降级重试、openai_responses 的
-  input/text.format 规范、anthropic 的 system 顶级字段与 x-api-key 鉴权头、
-  gemini 的 responseMimeType；401 -> AuthenticationError、429 -> RateLimitError；
+  input/text.format 规范、anthropic 的 system 顶级字段与 x-api-key 鉴权头；
+  401 -> AuthenticationError、429 -> RateLimitError；
 - ProviderFactory：显式分派 / 无 Key 供应商不参与默认分派 / 失效缓存；
 - 请求级模型切换：ContextVar 绑定 -> DispatchingAdapter 转发目标供应商；
 - HTTP API：未认证 401、CRUD 全流程（响应不含 api_key）、reveal 查看密钥、
@@ -23,7 +23,6 @@ import pytest
 
 from providers.adapters import (
     AnthropicAdapter,
-    GeminiAdapter,
     OpenAIChatAdapter,
     OpenAIResponsesAdapter,
     _consume_stream,
@@ -403,30 +402,6 @@ def test_openai_responses_payload_shape(monkeypatch):
     assert payload["input"][0]["role"] == "user"
     assert payload["text"]["format"] == {"type": "json_object"}
     assert resp.parsed_json == {"r": 2}
-
-
-def test_gemini_payload_and_url(monkeypatch):
-    stub = _HttpStub(
-        body={
-            "candidates": [{"content": {"parts": [{"text": '{"g": 3}'}]}}],
-            "usageMetadata": {"totalTokenCount": 9},
-        }
-    )
-    monkeypatch.setattr("providers.adapters._http_post", stub)
-    adapter = GeminiAdapter(
-        _provider(protocol="gemini", base_url="https://gai.googleapis.com"), "gemini-x"
-    )
-    resp = adapter.chat(
-        UnifiedChatRequest(
-            messages=[{"role": "user", "content": "hi"}],
-            model="gemini-x",
-            response_format={"type": "json_object"},
-        )
-    )
-    url, payload = stub.calls[0]
-    assert "gemini-x:generateContent" in url
-    assert payload["generationConfig"]["responseMimeType"] == "application/json"
-    assert resp.parsed_json == {"g": 3}
 
 
 # --------------------------------------------------------------------------- #
@@ -810,24 +785,6 @@ def test_anthropic_chat_timeout_override(monkeypatch):
 
     monkeypatch.setattr("providers.adapters._http_post", stub)
     adapter = AnthropicAdapter(_provider(), "m-1")
-    adapter.chat(
-        UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
-    )
-    assert captured["timeout"] == 180
-
-
-def test_gemini_chat_timeout_override(monkeypatch):
-    from providers.adapters import GeminiAdapter
-    from providers.models import UnifiedChatRequest
-
-    captured: dict = {}
-
-    def stub(url, *, payload, headers, timeout, api_key=None):
-        captured["timeout"] = timeout
-        return 200, {}, json.dumps({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
-
-    monkeypatch.setattr("providers.adapters._http_post", stub)
-    adapter = GeminiAdapter(_provider(), "m-1")
     adapter.chat(
         UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
     )
@@ -1481,3 +1438,46 @@ def test_anthropic_stream_passes_auth_headers(monkeypatch):
     assert captured["headers"]["x-api-key"] == provider.api_key
     assert captured["headers"]["anthropic-version"] == "2023-06-01"
     assert captured["api_key"] is None
+
+
+# --------------------------------------------------------------------------- #
+# store 加载防毒 + gemini 移除回归
+# --------------------------------------------------------------------------- #
+def test_store_skips_invalid_protocol_entry_with_warning(tmp_path, caplog):
+    # Review Focus #5：存量文件含 gemini 等未知协议条目 -> 跳过并告警，不拒载
+    import logging
+
+    raw = [
+        {
+            "id": "bad",
+            "name": "坏条目",
+            "protocol": "gemini",
+            "base_url": "https://x.example.com",
+        },
+        {
+            "id": "ok",
+            "name": "好条目",
+            "protocol": "openai_chat",
+            "base_url": "https://y.example.com",
+        },
+    ]
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="providers.store"):
+        store = ProviderStore(path)
+    assert [p.id for p in store.list_providers()] == ["ok"]
+
+
+def test_gemini_protocol_removed_from_contract():
+    from providers.models import ApiProtocol
+
+    assert "GEMINI" not in ApiProtocol.__members__
+    with pytest.raises(Exception):  # noqa: B017 - pydantic ValidationError
+        _provider(protocol="gemini")
+
+
+def test_gemini_adapter_removed_from_package():
+    import providers
+
+    assert not hasattr(providers, "GeminiAdapter")
+    assert "GeminiAdapter" not in providers.__all__

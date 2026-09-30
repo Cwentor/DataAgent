@@ -4,14 +4,12 @@
 - ``BaseAdapter``：统一抽象（``chat`` / ``test_connection`` / ``chat_text``）；
 - ``OpenAIChatAdapter``：POST {baseUrl}/chat/completions（标准 OpenAI 兼容）；
 - ``OpenAIResponsesAdapter``：POST {baseUrl}/responses（新版 Responses 规范）；
-- ``AnthropicAdapter``：POST {baseUrl}/v1/messages（System Prompt 提取至顶级字段）；
-- ``GeminiAdapter``：POST {baseUrl}/v1beta/models/{model}:generateContent。
+- ``AnthropicAdapter``：POST {baseUrl}/v1/messages（System Prompt 提取至顶级字段）。
 
 结构化输出保障（JSON Mode）：
 - 请求侧：支持原生 JSON Schema 的协议透传原生参数（openai_chat 的
-  ``response_format`` / responses 的 ``text.format`` / gemini 的
-  ``responseMimeType``），anthropic 与所有兜底路径在 System Prompt 注入
-  Strict JSON 约束；
+  ``response_format`` / responses 的 ``text.format``），anthropic 与所有
+  兜底路径在 System Prompt 注入 Strict JSON 约束；
 - 响应侧：统一正则安全清洗提取 JSON（``extract_json_object``），对带
   ```json 围栏 / 前后杂文本的响应一律可用；
 - 降级：透传原生结构化参数被服务端拒绝（400 且模型不支持）时，自动去掉
@@ -957,117 +955,12 @@ class AnthropicAdapter(BaseAdapter):
 
 
 # --------------------------------------------------------------------------- #
-# Gemini 适配器
-# --------------------------------------------------------------------------- #
-class GeminiAdapter(BaseAdapter):
-    """Google Gemini 协议（``/v1beta/models/{model}:generateContent``）。
-
-    JSON Mode：透传 ``generationConfig.responseMimeType="application/json"``
-    并注入 System Prompt 约束（双保险）。
-    """
-
-    def chat(self, request: UnifiedChatRequest) -> UnifiedChatResponse:
-        """组装 Gemini 请求（contents + systemInstruction）并解析候选文本。"""
-        messages, system_prompt = self._split_messages(request)
-        want_json = (
-            request.response_format is not None and request.response_format.type == "json_object"
-        )
-        if want_json and system_prompt is not None:
-            system_prompt = _inject_strict_json(system_prompt)
-
-        contents: list[dict[str, Any]] = []
-        for m in messages:
-            role = "model" if m["role"] == "assistant" else "user"
-            contents.append({"role": role, "parts": [{"text": m["content"]}]})
-        if not contents:
-            contents = [{"role": "user", "parts": [{"text": "ping"}]}]
-        payload: dict[str, Any] = {"contents": contents}
-        if system_prompt:
-            payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
-        generation: dict[str, Any] = {}
-        if request.temperature is not None:
-            generation["temperature"] = request.temperature
-        if want_json:
-            generation["responseMimeType"] = "application/json"
-        if generation:
-            payload["generationConfig"] = generation
-
-        url = f"{self.provider.base_url.rstrip('/')}/v1beta/models/{request.model}:generateContent"
-        headers = {**self._build_headers()}
-        if self.provider.api_key:
-            headers["x-goog-api-key"] = self.provider.api_key
-        from config import settings
-
-        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
-        timeout = request.timeout or settings.PROVIDER_TIMEOUT
-        status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=timeout)
-        try:
-            data = json.loads(raw)
-            candidates = data.get("candidates") or []
-            content = ""
-            for cand in candidates:
-                for part in (cand.get("content") or {}).get("parts", []) or []:
-                    if isinstance(part, dict) and part.get("text"):
-                        content += part["text"]
-            usage = data.get("usageMetadata") or {}
-            parsed = None
-            if want_json:
-                try:
-                    parsed = extract_json_object(content)
-                except ProtocolError:
-                    parsed = None
-            return UnifiedChatResponse(
-                content=content,
-                parsed_json=parsed,
-                usage=(
-                    Usage(
-                        prompt_tokens=int(usage.get("promptTokenCount") or 0),
-                        completion_tokens=int(usage.get("candidatesTokenCount") or 0),
-                        total_tokens=int(usage.get("totalTokenCount") or 0),
-                    )
-                    if usage
-                    else None
-                ),
-            )
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise ProtocolError(f"Gemini 响应解析失败（HTTP {status}）: {exc}") from exc
-
-    def test_connection(self) -> TestConnectionResult:
-        """发送极小 ping 文本，验证 HTTP 200 与延时。"""
-        from config import settings
-
-        started = time.perf_counter()
-        try:
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
-                "generationConfig": {"maxOutputTokens": 1},
-            }
-            url = f"{self.provider.base_url.rstrip('/')}/v1beta/models/{self.model_id}:generateContent"
-            headers = {**self._build_headers()}
-            if self.provider.api_key:
-                headers["x-goog-api-key"] = self.provider.api_key
-            status, _, _ = _http_post(
-                url, payload=payload, headers=headers, timeout=settings.PROVIDER_TIMEOUT
-            )
-            return TestConnectionResult(
-                success=status == 200, latency_ms=round((time.perf_counter() - started) * 1000.0, 1)
-            )
-        except ProviderError as exc:
-            return TestConnectionResult(
-                success=False,
-                latency_ms=round((time.perf_counter() - started) * 1000.0, 1),
-                error=str(exc),
-            )
-
-
-# --------------------------------------------------------------------------- #
 # 适配器工厂表
 # --------------------------------------------------------------------------- #
 ADAPTER_BY_PROTOCOL: dict[ApiProtocol, type[BaseAdapter]] = {
     ApiProtocol.OPENAI_CHAT: OpenAIChatAdapter,
     ApiProtocol.OPENAI_RESPONSES: OpenAIResponsesAdapter,
     ApiProtocol.ANTHROPIC: AnthropicAdapter,
-    ApiProtocol.GEMINI: GeminiAdapter,
 }
 
 
@@ -1083,7 +976,6 @@ __all__ = [
     "ADAPTER_BY_PROTOCOL",
     "AnthropicAdapter",
     "BaseAdapter",
-    "GeminiAdapter",
     "OpenAIChatAdapter",
     "OpenAIResponsesAdapter",
     "build_adapter",
