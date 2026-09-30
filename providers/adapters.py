@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import re
 import time
 import urllib.parse
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from providers.errors import (
@@ -50,6 +52,8 @@ from providers.models import (
 BT = chr(96)  # backtick
 FENCE = BT * 3
 _JSON_FENCE = re.compile(FENCE + r"(?:json)?\s*(.*?)\s*" + FENCE, re.DOTALL)
+
+logger = logging.getLogger(__name__)
 
 # System Prompt 注入的 Strict JSON 约束（JSON Mode 兜底，协议无关）
 _STRICT_JSON_PROMPT = (
@@ -164,21 +168,146 @@ def _http_post(
         raise ProviderError(f"网络请求失败: {exc}", code="provider_error") from exc
     finally:
         conn.close()
-    if resp.status == 401:
-        raise AuthenticationError(f"鉴权失败（HTTP 401）: {_brief(raw)}")
-    if resp.status == 429:
-        raise RateLimitError(f"配额超限或请求过于频繁（HTTP 429）: {_brief(raw)}")
-    if resp.status >= 400:
-        raise ProviderError(
-            f"模型服务返回 HTTP {resp.status}: {_brief(raw)}", code="provider_error"
-        )
+    _raise_for_status(resp.status, raw)
     return resp.status, dict(resp.getheaders()), raw
+
+
+def _raise_for_status(status: int, raw: str) -> None:
+    """HTTP 状态 -> 标准错误族映射（_http_post 与 SSE 读取器共用）。"""
+    if status == 401:
+        raise AuthenticationError(f"鉴权失败（HTTP 401）: {_brief(raw)}")
+    if status == 429:
+        raise RateLimitError(f"配额超限或请求过于频繁（HTTP 429）: {_brief(raw)}")
+    if status >= 400:
+        raise ProviderError(f"模型服务返回 HTTP {status}: {_brief(raw)}", code="provider_error")
 
 
 def _brief(raw: str, limit: int = 300) -> str:
     """压缩错误响应体为单行摘要（防审计日志膨胀 / 前端泄露敏感信息）。"""
     text = raw.replace("\n", " ").strip()
     return text[:limit]
+
+
+# --------------------------------------------------------------------------- #
+# SSE 流式传输（stream=True：块间空闲超时 + 总时长上限，客户端聚合）
+# --------------------------------------------------------------------------- #
+def _iter_sse_payloads(lines: Iterable[str]) -> Iterator[str]:
+    """从 SSE 行序列提取 data 负载（协议中立纯函数，便于单测）。
+
+    忽略空行 / event: / comment:（: 开头）行；`data: <payload>` 产出 payload
+    原文（含 "[DONE]" 字面量——终止语义由消费方判读，本函数不解析 JSON）。
+    """
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith(":") or text.startswith("event:"):
+            continue
+        if text.startswith("data:"):
+            yield text[len("data:") :].strip()
+
+
+def _raise_for_error_frame(err: Any) -> None:
+    """流式错误帧 -> 标准错误族映射（429/鉴权特征 -> 专用异常，其余 ProviderError）。"""
+    text = err if isinstance(err, str) else json.dumps(err, ensure_ascii=False)
+    lowered = str(text).lower()
+    if "429" in lowered or "rate_limit" in lowered or "ratelimit" in lowered:
+        raise RateLimitError(f"流式限流（429 特征）: {_brief(text)}")
+    if "401" in lowered or "authentication" in lowered or "invalid_api_key" in lowered:
+        raise AuthenticationError(f"流式鉴权失败: {_brief(text)}")
+    raise ProviderError(f"流式响应错误帧: {_brief(text)}", code="provider_error")
+
+
+def _http_post_sse(
+    url: str,
+    *,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int,
+    max_seconds: int,
+    api_key: str | None = None,
+) -> Iterator[str]:
+    """发送流式 JSON POST，逐条产出 SSE data 负载（惰性生成器）。
+
+    超时语义：timeout 为块间空闲上限（socket 读超时对 readline 天然逐块计时）；
+    max_seconds 为整条流的 wall-clock 总上限，超限抛 ProviderTimeoutError。
+    首包 HTTP 状态非 2xx 与 _http_post 同映射；EOF（b""）正常结束迭代——
+    终止帧校验归消费方（_consume_stream）。
+    """
+    body = json.dumps(payload).encode("utf-8")
+    merged_headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        **headers,
+    }
+    if api_key:
+        merged_headers["Authorization"] = f"Bearer {api_key}"
+    parsed = _validate_outbound_url(url)
+    conn_cls = (
+        http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    )
+    conn = conn_cls(parsed.hostname, parsed.port, timeout=timeout)
+    started = time.perf_counter()
+    try:
+        conn.request("POST", parsed.path or "/", body=body, headers=merged_headers)
+        resp = conn.getresponse()
+        if resp.status >= 400:
+            raw = resp.read().decode("utf-8", errors="replace")
+            _raise_for_status(resp.status, raw)
+        while True:
+            if time.perf_counter() - started > max_seconds:
+                raise ProviderTimeoutError(f"流式总时长超限（>{max_seconds}s）")
+            line = resp.readline()
+            if not line:
+                return  # EOF：终止帧校验归消费方
+            yield from _iter_sse_payloads([line.decode("utf-8", errors="replace")])
+    except TimeoutError as exc:  # socket.timeout（块间空闲超时）
+        raise ProviderTimeoutError(f"请求超时: {exc}") from exc
+    except (http.client.HTTPException, OSError) as exc:
+        raise ProviderError(f"网络请求失败: {exc}", code="provider_error") from exc
+    finally:
+        conn.close()
+
+
+def _consume_stream(
+    payloads: Iterable[str],
+    *,
+    extract_delta: Callable[[dict[str, Any]], str],
+    terminal: Callable[[dict[str, Any]], bool],
+    extract_usage: Callable[[dict[str, Any]], dict[str, Any] | None],
+) -> tuple[str, dict[str, Any] | None]:
+    """聚合 SSE 帧：返回 (content, usage_raw)；终止校验与错误裁决统一在此。
+
+    - "[DONE]" 字面量视为优雅终止（仅 OpenAI 系协议发送，anthropic 不发）；
+    - 协议终止帧由 terminal(frame) 判定；EOF 先于终止帧 => ProviderError（断连）；
+    - 帧内 error 字段 => _raise_for_error_frame 映射标准错误族；
+    - 终止时 content 为空 => ProtocolError（如内容全部落在 reasoning_content）。
+    """
+    parts: list[str] = []
+    usage: dict[str, Any] | None = None
+    for raw in payloads:
+        text = raw.strip()
+        if text == "[DONE]":
+            break
+        try:
+            frame = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ProtocolError(f"SSE 帧解析失败: {exc}") from exc
+        if not isinstance(frame, dict):
+            raise ProtocolError(f"SSE 帧非 JSON 对象: {type(frame).__name__}")
+        if frame.get("error"):
+            _raise_for_error_frame(frame["error"])
+        if terminal(frame):
+            usage = extract_usage(frame) or usage
+            break
+        piece = extract_delta(frame)
+        if piece:
+            parts.append(piece)
+        usage = extract_usage(frame) or usage
+    else:
+        raise ProviderError("流式响应中途断连（未收到终止帧）", code="provider_error")
+    content = "".join(parts)
+    if not content:
+        raise ProtocolError("流式响应未产出内容（content 为空）")
+    return content, usage
 
 
 # --------------------------------------------------------------------------- #

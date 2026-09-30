@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import threading
+from typing import ClassVar
 
 import pytest
 
@@ -25,6 +26,9 @@ from providers.adapters import (
     GeminiAdapter,
     OpenAIChatAdapter,
     OpenAIResponsesAdapter,
+    _consume_stream,
+    _http_post_sse,
+    _iter_sse_payloads,
     extract_json_object,
 )
 from providers.context import (
@@ -34,8 +38,10 @@ from providers.context import (
 )
 from providers.errors import (
     AuthenticationError,
+    ProtocolError,
     ProviderError,
     ProviderNotConfiguredError,
+    ProviderTimeoutError,
     RateLimitError,
     error_message,
 )
@@ -930,3 +936,211 @@ def test_settings_stream_max_seconds_exists():
 
     assert isinstance(settings.PROVIDER_STREAM_MAX_SECONDS, int)
     assert settings.PROVIDER_STREAM_MAX_SECONDS > 0
+
+
+# --------------------------------------------------------------------------- #
+# SSE 流式（纯函数 / 读取器 / 聚合器）
+# --------------------------------------------------------------------------- #
+def test_iter_sse_payloads_ignores_noise_and_yields_data():
+    lines = [
+        ": keep-alive",
+        "event: response.output_text.delta",
+        'data: {"a": 1}',
+        "",
+        "data: [DONE]",
+    ]
+    assert list(_iter_sse_payloads(lines)) == ['{"a": 1}', "[DONE]"]
+
+
+def test_consume_stream_aggregates_and_collects_usage():
+    frames = [
+        json.dumps({"choices": [{"delta": {"content": "he"}}]}),
+        json.dumps({"choices": [{"delta": {"content": "llo"}}]}),
+        json.dumps(
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+        ),
+        "[DONE]",
+    ]
+    content, usage = _consume_stream(
+        frames,
+        extract_delta=lambda f: ((f.get("choices") or [{}])[0].get("delta") or {}).get("content")
+        or "",
+        terminal=lambda f: False,
+        extract_usage=lambda f: f.get("usage"),
+    )
+    assert content == "hello"
+    assert usage["total_tokens"] == 3
+
+
+def test_consume_stream_eof_without_terminal_raises():
+    # 流中途断连：EOF 先于终止帧 => ProviderError，绝不返回半截内容
+    with pytest.raises(ProviderError):
+        _consume_stream(
+            [json.dumps({"choices": [{"delta": {"content": "half"}}]})],
+            extract_delta=lambda f: ((f.get("choices") or [{}])[0].get("delta") or {}).get(
+                "content"
+            )
+            or "",
+            terminal=lambda f: False,
+            extract_usage=lambda f: None,
+        )
+
+
+def test_consume_stream_empty_content_raises_protocol_error():
+    # DeepSeek 系网关内容进 reasoning_content 的形态：content 为空必须报错走兜底
+    frames = [json.dumps({"choices": [{"delta": {}}]}), "[DONE]"]
+    with pytest.raises(ProtocolError):
+        _consume_stream(
+            frames,
+            extract_delta=lambda f: ((f.get("choices") or [{}])[0].get("delta") or {}).get(
+                "content"
+            )
+            or "",
+            terminal=lambda f: False,
+            extract_usage=lambda f: None,
+        )
+
+
+def test_consume_stream_error_frame_maps_429():
+    frames = [json.dumps({"error": {"code": "429", "message": "rate limited"}})]
+    with pytest.raises(RateLimitError):
+        _consume_stream(
+            frames,
+            extract_delta=lambda f: "",
+            terminal=lambda f: False,
+            extract_usage=lambda f: None,
+        )
+
+
+def test_consume_stream_protocol_terminal_frame_collects_usage():
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": "ok"}),
+        json.dumps({"type": "response.completed", "response": {"usage": {"total_tokens": 7}}}),
+    ]
+    content, usage = _consume_stream(
+        frames,
+        extract_delta=lambda f: (
+            (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
+        ),
+        terminal=lambda f: f.get("type") == "response.completed",
+        extract_usage=lambda f: f.get("response", {}).get("usage"),
+    )
+    assert content == "ok"
+    assert usage["total_tokens"] == 7
+
+
+class _SSEResponse:
+    """SSE 读取器测试桩响应：按预置行序列逐行 readline。"""
+
+    def __init__(self, lines, status=200):
+        self.status = status
+        self._lines = lines
+        self._i = 0
+
+    def readline(self):
+        if self._i >= len(self._lines):
+            return b""
+        item = self._lines[self._i]
+        self._i += 1
+        return item.encode("utf-8")
+
+    def read(self):
+        return b'{"error": "bad request"}'
+
+    def getheaders(self):
+        return {}
+
+
+class _SSEConnStub:
+    """SSE 读取器测试桩连接：记录请求体/头，返回类属性 lines 组成的响应。"""
+
+    lines: ClassVar[list[str]] = []
+    last: ClassVar[dict | None] = None
+
+    def __init__(self, host, port, timeout=None):
+        self.host = host
+
+    def request(self, method, path, body=None, headers=None):
+        _SSEConnStub.last = {"body": json.loads(body), "headers": headers}
+
+    def getresponse(self):
+        return _SSEResponse(_SSEConnStub.lines)
+
+    def close(self):
+        pass
+
+
+def test_http_post_sse_yields_data_lines_and_sends_stream_payload(monkeypatch):
+    _SSEConnStub.lines = [": ping", 'data: {"x": 1}', "data: [DONE]", ""]
+    monkeypatch.setattr("http.client.HTTPSConnection", _SSEConnStub)
+    out = list(
+        _http_post_sse(
+            "https://gw.example.com/v1/chat/completions",
+            payload={"stream": True, "messages": []},
+            headers={"X-Custom": "1"},
+            timeout=5,
+            max_seconds=30,
+            api_key="k-test",
+        )
+    )
+    assert out == ['{"x": 1}', "[DONE]"]
+    assert _SSEConnStub.last["body"]["stream"] is True
+    assert _SSEConnStub.last["headers"]["Authorization"] == "Bearer k-test"
+    assert _SSEConnStub.last["headers"]["Accept"] == "text/event-stream"
+
+
+def test_http_post_sse_idle_timeout_maps_to_provider_timeout(monkeypatch):
+    class IdleResp:
+        status = 200
+
+        def readline(self):
+            raise TimeoutError("read timed out")
+
+    class IdleConn(_SSEConnStub):
+        def getresponse(self):
+            return IdleResp()
+
+    monkeypatch.setattr("http.client.HTTPSConnection", IdleConn)
+    with pytest.raises(ProviderTimeoutError):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=1, max_seconds=30
+            )
+        )
+
+
+def test_http_post_sse_total_limit_raises(monkeypatch):
+    _SSEConnStub.lines = ['data: {"a": 1}', 'data: {"b": 2}']
+    monkeypatch.setattr("http.client.HTTPSConnection", _SSEConnStub)
+    with pytest.raises(ProviderTimeoutError):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=0
+            )
+        )
+
+
+def test_http_post_sse_first_packet_401_maps(monkeypatch):
+    class UnauthorizedResp:
+        status = 401
+
+        def read(self):
+            return b"unauthorized"
+
+        def readline(self):
+            return b""
+
+    class UnauthorizedConn(_SSEConnStub):
+        def getresponse(self):
+            return UnauthorizedResp()
+
+    monkeypatch.setattr("http.client.HTTPSConnection", UnauthorizedConn)
+    with pytest.raises(AuthenticationError):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=30
+            )
+        )
