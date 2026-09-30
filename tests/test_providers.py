@@ -22,6 +22,7 @@ from typing import ClassVar
 import pytest
 
 from providers.adapters import (
+    _SSE_MAX_LINE_BYTES,
     AnthropicAdapter,
     OpenAIChatAdapter,
     OpenAIResponsesAdapter,
@@ -1492,7 +1493,7 @@ def test_http_post_sse_overlong_line_without_newline_raises(monkeypatch):
         status = 200
 
         def readline(self, limit=-1):
-            return b"x" * 65536  # 恰为行上限且不以 b"\n" 结尾
+            return b"x" * _SSE_MAX_LINE_BYTES  # 恰为行上限且不以 b"\n" 结尾
 
     class DripConn(_SSEConnStub):
         def getresponse(self):
@@ -1668,3 +1669,90 @@ def test_responses_handshake_400_json_hint_falls_back(monkeypatch):
     )
     assert stub.calls
     assert resp.parsed_json == {"r": 2}
+
+
+# --------------------------------------------------------------------------- #
+# SSE 解析协议对齐（PR2）：空 data 行忽略 / responses 错误帧识别 / 行上限
+# --------------------------------------------------------------------------- #
+def test_iter_sse_payloads_skips_empty_data_lines():
+    # 事项 1：SSE 规范中空 data: 字段（仅冒号或纯空白）应忽略，不产出空负载
+    lines = ["data:", "data: ", "data:\t", 'data: {"a": 1}', "data: [DONE]"]
+    assert list(_iter_sse_payloads(lines)) == ['{"a": 1}', "[DONE]"]
+
+
+def test_sse_line_limit_is_256kb():
+    # 事项 8：行上限从 64KB 放宽到 256KB——合法大 payload 单行（带换行）不被误杀
+    assert _SSE_MAX_LINE_BYTES == 256 * 1024
+
+
+def test_consume_stream_extract_error_responses_error_event():
+    # 事项 3：responses 协议 {"type": "error"} 事件须识别为错误帧而非"断连"
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": "he"}),
+        json.dumps({"type": "error", "code": "server_error", "message": "boom"}),
+    ]
+    with pytest.raises(ProviderError, match="boom"):
+
+        def _extract_error(frame):
+            if frame.get("type") == "error":
+                return frame
+            if frame.get("type") == "response.failed":
+                return (frame.get("response") or {}).get("error") or frame
+            return None
+
+        _consume_stream(
+            frames,
+            extract_delta=lambda f: (
+                (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
+            ),
+            terminal=lambda f: f.get("type") == "response.completed",
+            extract_usage=lambda f: None,
+            extract_error=_extract_error,
+        )
+
+
+def test_consume_stream_extract_error_response_failed_maps_429():
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": "he"}),
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {"error": {"code": "rate_limit_exceeded", "message": "slow down"}},
+            }
+        ),
+    ]
+
+    def _extract_error(frame):
+        if frame.get("type") == "error":
+            return frame
+        if frame.get("type") == "response.failed":
+            return (frame.get("response") or {}).get("error") or frame
+        return None
+
+    with pytest.raises(RateLimitError):
+        _consume_stream(
+            frames,
+            extract_delta=lambda f: (
+                (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
+            ),
+            terminal=lambda f: f.get("type") == "response.completed",
+            extract_usage=lambda f: None,
+            extract_error=_extract_error,
+        )
+
+
+def test_openai_responses_stream_error_event_raises_not_disconnect(monkeypatch):
+    # 适配器级回归：responses 流中段错误事件不再归因为"中途断连"
+    provider = _provider(protocol="openai_responses", stream=True)
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": "he"}),
+        json.dumps({"type": "error", "code": "server_error", "message": "upstream blew up"}),
+    ]
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    with pytest.raises(ProviderError, match="upstream blew up"):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))

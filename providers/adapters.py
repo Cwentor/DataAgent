@@ -191,7 +191,9 @@ def _brief(raw: str, limit: int = 300) -> str:
 # SSE 流式传输（stream=True：块间空闲超时 + 总时长上限，客户端聚合）
 # --------------------------------------------------------------------------- #
 # 单行字节上限：网关永不换行的慢滴流会在该处被截断并熔断（防内存无界增长）
-_SSE_MAX_LINE_BYTES = 65536
+# 单行字节上限（256KB）：防无换行慢滴流内存无界增长；取值需容纳合法的
+# 超长单行大 payload（如伪流式整包网关把完整 JSON 放一行），故远大于常规帧
+_SSE_MAX_LINE_BYTES = 256 * 1024
 
 
 def _iter_sse_payloads(lines: Iterable[str]) -> Iterator[str]:
@@ -199,13 +201,16 @@ def _iter_sse_payloads(lines: Iterable[str]) -> Iterator[str]:
 
     忽略空行 / event: / comment:（: 开头）行；`data: <payload>` 产出 payload
     原文（含 "[DONE]" 字面量——终止语义由消费方判读，本函数不解析 JSON）。
+    空 data: 字段（仅冒号或纯空白）按 SSE 规范忽略，不产出空负载。
     """
     for line in lines:
         text = line.strip()
         if not text or text.startswith(":") or text.startswith("event:"):
             continue
         if text.startswith("data:"):
-            yield text[len("data:") :].strip()
+            payload = text[len("data:") :].strip()
+            if payload:
+                yield payload
 
 
 def _raise_for_error_frame(err: Any) -> None:
@@ -308,12 +313,16 @@ def _consume_stream(
     extract_delta: Callable[[dict[str, Any]], str],
     terminal: Callable[[dict[str, Any]], bool],
     extract_usage: Callable[[dict[str, Any]], dict[str, Any] | None],
+    extract_error: Callable[[dict[str, Any]], Any] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """聚合 SSE 帧：返回 (content, usage_raw)；终止校验与错误裁决统一在此。
 
     - "[DONE]" 字面量视为优雅终止（仅 OpenAI 系协议发送，anthropic 不发）；
     - 协议终止帧由 terminal(frame) 判定；EOF 先于终止帧 => ProviderError（断连）；
     - 帧内 error 字段 => _raise_for_error_frame 映射标准错误族；
+    - extract_error（可选）：协议专属错误帧识别（如 responses 的
+      {"type": "error"} / response.failed——无 "error" 顶层键，普通检测
+      漏判后会退化成"断连"），返回真值即按错误帧映射；
     - 终止时 content 为空 => ProtocolError（如内容全部落在 reasoning_content）。
     """
     parts: list[str] = []
@@ -330,6 +339,10 @@ def _consume_stream(
             raise ProtocolError(f"SSE 帧非 JSON 对象: {type(frame).__name__}")
         if frame.get("error"):
             _raise_for_error_frame(frame["error"])
+        if extract_error is not None:
+            protocol_error = extract_error(frame)
+            if protocol_error:
+                _raise_for_error_frame(protocol_error)
         if terminal(frame):
             usage = extract_usage(frame) or usage
             break
@@ -710,6 +723,17 @@ class OpenAIResponsesAdapter(BaseAdapter):
         if want_json:
             # JSON Mode 原生参数流式下照常透传（被拒时交由外层回退非流式降级链）
             payload["text"] = {"format": {"type": "json_object"}}
+
+        def _extract_error(frame: dict[str, Any]) -> Any:
+            """responses 协议错误帧：{"type":"error"} 与 response.failed 无顶层
+            "error" 键，普通检测漏判后会退化成"断连"——此处显式识别。"""
+            ftype = frame.get("type")
+            if ftype == "error":
+                return frame
+            if ftype == "response.failed":
+                return (frame.get("response") or {}).get("error") or frame
+            return None
+
         content, usage = _consume_stream(
             _http_post_sse(
                 url,
@@ -724,6 +748,7 @@ class OpenAIResponsesAdapter(BaseAdapter):
             ),
             terminal=lambda f: f.get("type") == "response.completed",
             extract_usage=lambda f: (f.get("response") or {}).get("usage"),
+            extract_error=_extract_error,
         )
         return self._build_response(content, usage, json_mode=want_json)
 
