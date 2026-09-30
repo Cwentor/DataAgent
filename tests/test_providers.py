@@ -1756,3 +1756,43 @@ def test_openai_responses_stream_error_event_raises_not_disconnect(monkeypatch):
     adapter = OpenAIResponsesAdapter(provider, "m-1")
     with pytest.raises(ProviderError, match="upstream blew up"):
         adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+
+
+# --------------------------------------------------------------------------- #
+# 配置防呆与 usage 契约一致（PR3）
+# --------------------------------------------------------------------------- #
+def test_settings_stream_max_seconds_guards_nonpositive(monkeypatch):
+    # 事项 2：env 误配 0/负数时回落安全默认 300（仿 SYNTHESIZER_TIMEOUT 先例）
+    import importlib
+
+    from config import settings as settings_mod
+
+    for bad in ("0", "-5"):
+        monkeypatch.setenv("PROVIDER_STREAM_MAX_SECONDS", bad)
+        try:
+            importlib.reload(settings_mod)
+            assert settings_mod.PROVIDER_STREAM_MAX_SECONDS == 300
+        finally:
+            monkeypatch.delenv("PROVIDER_STREAM_MAX_SECONDS")
+            importlib.reload(settings_mod)
+
+
+def test_anthropic_stream_usage_none_when_absent(monkeypatch):
+    # 事项 4：流式未收到 usage 帧 => usage=None（与非流式空 usage 语义一致）
+    provider = _provider(protocol="anthropic", stream=True)
+    frames = [
+        json.dumps({"type": "content_block_delta", "delta": {"text": '{"a": 1}'}}),
+        json.dumps({"type": "message_stop"}),
+    ]
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    resp = adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="claude-x")
+    )
+    assert resp.content == '{"a": 1}'
+    assert resp.usage is None  # 本测试焦点：无 usage 帧 => None
+    assert resp.parsed_json is None  # 请求未启用 json_mode，解析关闭属预期
