@@ -55,6 +55,17 @@ class ProviderNotConfiguredError(ProviderError):
     code = "provider_not_configured"
 
 
+class StreamHandshakeRejected(ProviderError):
+    """流式握手阶段被网关拒绝（HTTP 400，尚未产出任何 SSE chunk）。
+
+    适配器据此判定"回退非流式重试"资格：仅此异常允许触发回退——
+    mid-stream 错误帧 / 断连 / 超时永远产出其他错误类型，不会被误判为
+    可回退（防对已部分计费的长请求重复重发）。
+    """
+
+    code = "provider_error"
+
+
 # 标准错误码 -> 面向业务用户的可读中文文案（前端 Toast / 服务端错误透传）
 ERROR_MESSAGES: dict[str, str] = {
     "auth_failed": "模型服务鉴权失败，请检查 API Key 是否正确",
@@ -79,5 +90,6 @@ __all__ = [
     "ProviderNotConfiguredError",
     "ProviderTimeoutError",
     "RateLimitError",
+    "StreamHandshakeRejected",
     "error_message",
 ]
