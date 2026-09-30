@@ -909,3 +909,24 @@ def test_chat_facade_no_retry_on_other_errors(monkeypatch):
     with pytest.raises(ProviderError):
         chat_text(_Broken(), [{"role": "user", "content": "x"}])
     assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 流式契约（ProviderConfig.stream / 总时长上限）
+# --------------------------------------------------------------------------- #
+def test_provider_config_stream_defaults_false_and_roundtrips(tmp_path):
+    cfg = _provider()
+    assert cfg.stream is False  # 存量配置缺省关闭，行为不变
+    cfg2 = _provider(stream=True)
+    assert cfg2.stream is True
+    # 序列化往返（public_view 透传给前端）
+    dumped = cfg2.model_dump(mode="json")
+    assert dumped["stream"] is True
+    assert ProviderConfig.model_validate(dumped).stream is True
+
+
+def test_settings_stream_max_seconds_exists():
+    from config import settings
+
+    assert isinstance(settings.PROVIDER_STREAM_MAX_SECONDS, int)
+    assert settings.PROVIDER_STREAM_MAX_SECONDS > 0
