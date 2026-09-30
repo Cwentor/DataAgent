@@ -679,9 +679,9 @@ class OpenAIResponsesAdapter(BaseAdapter):
                 timeout=timeout,
                 max_seconds=settings.PROVIDER_STREAM_MAX_SECONDS,
             ),
-            extract_delta=lambda f: (f.get("delta") or "")
-            if f.get("type") == "response.output_text.delta"
-            else "",
+            extract_delta=lambda f: (
+                (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
+            ),
             terminal=lambda f: f.get("type") == "response.completed",
             extract_usage=lambda f: (f.get("response") or {}).get("usage"),
         )
@@ -868,7 +868,7 @@ class AnthropicAdapter(BaseAdapter):
         def _extract_usage(frame: dict[str, Any]) -> dict[str, Any] | None:
             ftype = frame.get("type")
             if ftype == "message_start":
-                start = ((frame.get("message") or {}).get("usage") or {})
+                start = (frame.get("message") or {}).get("usage") or {}
                 usage_acc["input_tokens"] = int(start.get("input_tokens") or 0)
             elif ftype == "message_delta":
                 delta_usage = frame.get("usage") or {}
@@ -883,9 +883,11 @@ class AnthropicAdapter(BaseAdapter):
                 timeout=timeout,
                 max_seconds=settings.PROVIDER_STREAM_MAX_SECONDS,
             ),
-            extract_delta=lambda f: (f.get("delta") or {}).get("text") or ""
-            if f.get("type") == "content_block_delta"
-            else "",
+            extract_delta=lambda f: (
+                (f.get("delta") or {}).get("text") or ""
+                if f.get("type") == "content_block_delta"
+                else ""
+            ),
             terminal=lambda f: f.get("type") == "message_stop",
             extract_usage=_extract_usage,
         )

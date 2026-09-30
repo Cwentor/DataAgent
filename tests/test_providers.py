@@ -1155,7 +1155,10 @@ def test_openai_chat_stream_aggregates(monkeypatch):
         json.dumps({"choices": [{"delta": {"content": '{"ok"'}}]}),
         json.dumps({"choices": [{"delta": {"content": ": 1}"}}]}),
         json.dumps(
-            {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            }
         ),
         "[DONE]",
     ]
@@ -1217,9 +1220,7 @@ def test_openai_chat_stream_falls_back_to_non_stream_on_400(monkeypatch):
     provider = _provider(stream=True)
 
     def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
-        raise ProviderError(
-            "模型服务返回 HTTP 400: stream is not supported", code="provider_error"
-        )
+        raise ProviderError("模型服务返回 HTTP 400: stream is not supported", code="provider_error")
 
     monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
     stub = _HttpStub(body={"choices": [{"message": {"content": '{"ok": 1}'}}]})
@@ -1248,9 +1249,7 @@ def test_openai_chat_stream_eof_propagates_without_fallback(monkeypatch):
     monkeypatch.setattr("providers.adapters._http_post", stub)
     adapter = OpenAIChatAdapter(provider, "m-1")
     with pytest.raises(ProviderError):
-        adapter.chat(
-            UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1")
-        )
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
     assert not stub.calls
 
 
@@ -1265,9 +1264,7 @@ def test_openai_responses_stream_aggregates(monkeypatch):
         json.dumps(
             {
                 "type": "response.completed",
-                "response": {
-                    "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
-                },
+                "response": {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}},
             }
         ),
     ]
