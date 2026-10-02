@@ -45,6 +45,6 @@
   },
   {
     "question": "列出所有省份和品牌",
-    "expect": "refusal"
+    "expect": "list_answer"
   }
 ]

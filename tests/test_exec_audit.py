@@ -180,7 +180,11 @@ def test_m2_new_shapes_pass_audit_gate(conn):
             }
         )
     )
-    for name, sql in [("projection", projection_sql), ("having", having_sql), ("expression", expression_sql)]:
+    for name, sql in [
+        ("projection", projection_sql),
+        ("having", having_sql),
+        ("expression", expression_sql),
+    ]:
         findings = audit_compiled_sql(sql)
         rejected = [f for f in findings if f.severity == "rejected"]
         assert rejected == [], (name, [f.to_dict() for f in rejected])

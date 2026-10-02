@@ -573,9 +573,7 @@ def test_having_field_must_be_metric_alias():
 
 def test_having_requires_grouping_and_metrics():
     """HAVING 语义前提：必须带分组维度且指标非空；纯投影/标量拒绝。"""
-    base_metrics = [
-        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
-    ]
+    base_metrics = [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]
     # 无分组维度（全局标量）带 HAVING
     with pytest.raises(ValidationError):
         QueryDSL.model_validate(
@@ -684,9 +682,7 @@ def test_expression_metric_contract_rejections():
                     {
                         "kind": "ratio",
                         "alias": "rate",
-                        "numerator": {
-                            "kind": "aggregate", "field": "order_amount", "agg": "sum"
-                        },
+                        "numerator": {"kind": "aggregate", "field": "order_amount", "agg": "sum"},
                         "denominator": {"kind": "aggregate", "field": "order_id", "agg": "count"},
                     },
                     {
@@ -704,13 +700,18 @@ def test_expression_metric_contract_rejections():
     [
         # HAVING × 纯投影（无指标别名可过滤）
         (
-            {"dimensions": [{"field": "brand"}], "having": [{"field": "gmv", "operator": "gt", "value": 0}]},
+            {
+                "dimensions": [{"field": "brand"}],
+                "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            },
             "纯维度投影",
         ),
         # HAVING × 无分组维度（全局标量）
         (
             {
-                "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                ],
                 "having": [{"field": "gmv", "operator": "gt", "value": 0}],
             },
             "分组维度",
@@ -719,7 +720,12 @@ def test_expression_metric_contract_rejections():
         (
             {
                 "metrics": [
-                    {"kind": "window", "base": {"field": "order_amount", "agg": "sum", "alias": "gmv_base"}, "func": "cumsum", "alias": "gmv_cum"},
+                    {
+                        "kind": "window",
+                        "base": {"field": "order_amount", "agg": "sum", "alias": "gmv_base"},
+                        "func": "cumsum",
+                        "alias": "gmv_cum",
+                    },
                     {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
                 ],
                 "dimensions": [{"field": "order_time"}],
