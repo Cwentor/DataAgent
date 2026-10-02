@@ -1591,3 +1591,60 @@ def test_intent_dsl_mismatch_rejects_metrics_on_enumeration():
     }
     mismatch = _orch_nodes._intent_dsl_mismatch(query, bad_payload)
     assert mismatch is not None and "投影" in mismatch
+
+
+def test_agent_state_assumptions_field():
+    """M3-T1：AgentState 契约新增口径假设字段（默认空，宽容消费）。"""
+    state = AgentState(user_query="x")
+    assert state.assumptions == []
+
+
+def test_planner_prompt_injects_clarify_context():
+    """M3-T1：二轮澄清上下文注入——提示词含"严禁再次澄清"硬性指令。"""
+    from core.orchestrator.prompts import planner_prompt
+
+    single = planner_prompt("q", "schema")
+    double = planner_prompt("q", "schema", clarify_context="用户已答复过一轮澄清")
+    assert "澄清" not in single or "仍不唯一" not in single
+    assert "严禁再次澄清" in double and "口径假设" in double
+
+
+def test_planner_node_consumes_assumptions(monkeypatch):
+    """M3-T1：Planner 产出口径假设 → 状态透传（宽容消费）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {"id": "s1", "goal": "取数", "kind": "query",
+             "dsl": {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+                     "dimensions": [], "filters": []}},
+        ],
+        "assumptions": ["仅统计成功支付订单", "时间窗口取数仓最近完整期"],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.assumptions == ["仅统计成功支付订单", "时间窗口取数仓最近完整期"]
+
+
+def test_planner_node_tolerates_invalid_assumptions(monkeypatch):
+    """M3-T1 Review Focus #2：非法 assumptions 宽容忽略，不阻塞规划。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {"id": "s1", "goal": "取数", "kind": "query",
+             "dsl": {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+                     "dimensions": [], "filters": []}},
+        ],
+        "assumptions": "不是数组的假设",
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.assumptions == []
+    assert state.plan_steps  # 规划不受阻
