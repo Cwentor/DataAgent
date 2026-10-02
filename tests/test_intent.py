@@ -126,11 +126,6 @@ def test_enumeration_priority_rules():
     assert classify_intent("有多少个品牌").intent == IntentType.CARDINALITY
 
 
-def test_enumeration_multi_dim_is_unknown():
-    """十九期 M1 Review Focus #4：多维枚举 M1 判 UNKNOWN（兜底拒答并说明）。"""
-    assert classify_intent("列出所有省份和品牌").intent == IntentType.UNKNOWN
-
-
 def test_enumeration_dsl_shape_and_filter_clue():
     """枚举 DSL 构造：单维投影无指标；过滤线索拒绝构造（宁拒答不冒充）。"""
     dsl = enumeration_dsl("把全部品牌名列举给我")
@@ -148,3 +143,16 @@ def test_capability_catalog_mentions_enumeration():
     """能力清单如实告知枚举能力（拒答报告与工作台同源）。"""
     text = "\n".join(capability_catalog_lines())
     assert "列出全部品牌" in text
+
+
+def test_enumeration_multi_dim_opens_in_m2():
+    """十九期 M2：多维枚举放开——两维锚点投影，字段序 = 提取序。"""
+    profile = classify_intent("列出所有省份和品牌")
+    assert profile.intent == IntentType.ENUMERATION
+    assert set(profile.anchor_fields) == {"province", "brand"}
+
+    dsl = enumeration_dsl("列出所有省份和品牌")
+    assert dsl is not None
+    assert dsl["metrics"] == []
+    assert [d["field"] for d in dsl["dimensions"]] == list(profile.anchor_fields)
+    assert dsl["order_by"][0]["field"] == profile.anchor_fields[0]
