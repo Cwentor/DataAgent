@@ -133,6 +133,76 @@ def test_run_agent_hitl_flow(tmp_path, monkeypatch):
     assert any(s["ok"] for s in final.steps)
 
 
+def test_clarify_pending_then_new_question_routes_fresh(tmp_path, monkeypatch):
+    """澄清挂起后新问题按新查询路由（docs/reviews/20261002-audit-clarify-pending-hijack.md 回归锚点）。
+
+    同会话内上一轮以 phase=clarify 挂起后，用户忽略澄清直接提出的新问题
+    必须独立成轮作答，严禁被合并进旧查询（答非所问禁区）；同时旧澄清卡
+    在新问题 intervening 后仍须可在本轮线程上恢复（线程按轮隔离）。
+    """
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
+
+    paused = run_agent("海南省的GMV是多少", session_id="hijack-seq", autonomy_level="L4")
+    assert paused.phase == "clarify"
+
+    trace = run_agent("有多少个省份", session_id="hijack-seq", autonomy_level="L4")
+    assert trace.phase == "done"
+    assert "查询答案：8" in trace.report
+    assert "用户补充" not in trace.report
+
+    final = run_agent(
+        "海南省的GMV是多少",
+        session_id="hijack-seq",
+        autonomy_level="L4",
+        resume_state=paused.apply(human_reply="广东省"),
+    )
+    assert final.phase == "done"
+    assert "广东省" in final.report
+
+
+def test_sequential_pending_clarifies_resume_independently(tmp_path, monkeypatch):
+    """同会话两轮澄清挂起互不串扰（20261002 审计：checkpointer 线程按轮隔离）。
+
+    回归锚点：thread_id 仅到会话粒度时，同线程叠加的两个 clarify interrupt
+    会让先挂起卡片的答复被合并进后挂起轮的查询（答非所问）。按轮隔离后，
+    各轮恢复必须在各自线程上完成，报告口径归属各自问题。
+    """
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
+
+    paused_first = run_agent("海南省的GMV是多少", session_id="dual-clarify", autonomy_level="L4")
+    assert paused_first.phase == "clarify"
+    paused_second = run_agent("河北省的GMV是多少", session_id="dual-clarify", autonomy_level="L4")
+    assert paused_second.phase == "clarify"
+
+    final_first = run_agent(
+        "海南省的GMV是多少",
+        session_id="dual-clarify",
+        autonomy_level="L4",
+        resume_state=paused_first.apply(human_reply="广东"),
+    )
+    assert final_first.phase == "done"
+    assert "广东" in final_first.report
+    assert "河北" not in final_first.report
+
+    final_second = run_agent(
+        "河北省的GMV是多少",
+        session_id="dual-clarify",
+        autonomy_level="L4",
+        resume_state=paused_second.apply(human_reply="四川"),
+    )
+    assert final_second.phase == "done"
+    assert "四川省" in final_second.report or "四川" in final_second.report
+    assert "海南" not in final_second.report
+
+
 def test_run_agent_factoid_bypasses_clarify_gate(tmp_path, monkeypatch):
     """LLM 在场时事实型短问句直达完成，不再被澄清门打断。
 

@@ -267,7 +267,9 @@ def _run_agent_langgraph_path(
             final, pending = resume_langgraph(
                 resume_state,
                 {"kind": "clarify", "resume_value": reply},
-                thread_id=_checkpoint_thread_id(principal, session_id),
+                # 恢复经挂起态自带的 turn_id 找回同轮线程（线程按轮隔离，
+                # 见 docs/reviews/20261002-audit-clarify-pending-hijack.md）
+                thread_id=_checkpoint_thread_id(principal, session_id, resume_state.turn_id),
             )
         except GraphRecursionError:
             return resume_state.apply(
@@ -289,7 +291,7 @@ def _run_agent_langgraph_path(
     )
     try:
         final, pending = invoke_langgraph(
-            state, thread_id=_checkpoint_thread_id(principal, session_id)
+            state, thread_id=_checkpoint_thread_id(principal, session_id, turn_id)
         )
     except GraphRecursionError:
         logger.error(
@@ -306,9 +308,13 @@ def _run_agent_langgraph_path(
 __all__ = ["AgentTrace", "run_agent"]
 
 
-def _checkpoint_thread_id(principal: str | None, session_id: str) -> str:
-    """Checkpointer thread_id 规范（设计 §4.2）：f"{user_id}:{session_id}"。
+def _checkpoint_thread_id(principal: str | None, session_id: str, turn_id: str) -> str:
+    """Checkpointer thread_id 规范：f"{user_id}:{session_id}:{turn_id}"（按轮隔离）。
 
-    principal 缺省（评测/单测直调）回退 session_id，行为与 M0 一致。
+    turn 维度保证每轮新问题天然落在全新线程，同会话多轮的 clarify/plan_review/
+    high_risk interrupt 互不叠加（旧澄清卡的恢复与新问题的运行彻底隔离）；
+    resume 路径经 resume_state.turn_id 找回挂起轮线程，跨重启仍可恢复。
+    principal 缺省（评测/单测直调）回退 session_id 前缀。
     """
-    return f"{principal}:{session_id}" if principal else session_id
+    prefix = f"{principal}:{session_id}" if principal else session_id
+    return f"{prefix}:{turn_id}"
