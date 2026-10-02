@@ -532,6 +532,11 @@ def planner_node(state: AgentState) -> AgentState:
                 schema_digest(profile_enum_values()),
                 error_context=error_context,
                 history_context=state.history_digest or None,
+                clarify_context=(
+                    "已澄清轮次：{}".format(state.clarification_rounds)
+                    if state.clarification_rounds >= 1
+                    else None
+                ),
             ),
         )
         if not payload:
@@ -540,22 +545,36 @@ def planner_node(state: AgentState) -> AgentState:
             state = state.apply(scratchpad=[*state.scratchpad, "[planner] llm-call-failed"])
         if payload:
             if payload.get("clarification"):
-                clar_raw = payload["clarification"]
-                options: list[str] = []
-                if isinstance(clar_raw, dict):
-                    question = str(clar_raw.get("question") or "").strip()
-                    raw_opts = clar_raw.get("options")
-                    if isinstance(raw_opts, list):
-                        options = [str(o) for o in raw_opts if isinstance(o, str) and o.strip()]
-                else:
-                    question = str(clar_raw).strip()
-                return state.apply(
-                    phase="clarify",
-                    clarification=question or "请补充分析需求",
-                    clarification_options=options,
-                )
+                # 二轮硬拦截（M3-T2 Review Focus #3）：提示词是软约束，消费层
+                # 强制——二轮仍反问视为无效响应，忽略 clarification 落入下方
+                # steps=None 兜底（degraded assume 模式带假设作答），严禁二轮
+                # 澄清挂起死循环
+                if state.clarification_rounds < 1:
+                    clar_raw = payload["clarification"]
+                    options: list[str] = []
+                    if isinstance(clar_raw, dict):
+                        question = str(clar_raw.get("question") or "").strip()
+                        raw_opts = clar_raw.get("options")
+                        if isinstance(raw_opts, list):
+                            options = [
+                                str(o) for o in raw_opts if isinstance(o, str) and o.strip()
+                            ]
+                    else:
+                        question = str(clar_raw).strip()
+                    return state.apply(
+                        phase="clarify",
+                        clarification=question or "请补充分析需求",
+                        clarification_options=options,
+                    )
             steps = _plan_from_llm(payload)
             from_llm = steps is not None
+            # 口径假设（十九期 M3 分级透明作答）：宽容消费（缺失/非法不阻塞）；
+            # 报告头部呈现由 synthesize 承担
+            raw_assumptions = payload.get("assumptions")
+            if isinstance(raw_assumptions, list):
+                cleaned = [str(a).strip() for a in raw_assumptions if str(a).strip()]
+                if cleaned:
+                    state = state.apply(assumptions=cleaned)
             # intent 回传（十八期）：仅诊断可观测，宽容消费（缺失/非法不阻塞）；
             # L3 守卫不依赖它（用 intent 模块确定性重判）
             intent_payload = payload.get("intent")

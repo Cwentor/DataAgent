@@ -180,7 +180,11 @@ class AgentState(BaseModel):
         default_factory=list, description="选项式澄清候选（前端 pill 按钮，点击即答复）"
     )
     clarification_rounds: int = Field(
-        default=0, description="降级澄清已发生轮次（二轮仍歧义则拒答，防循环）"
+        default=0, description="澄清已发生轮次（二轮仍歧义转带假设作答，防循环）"
+    )
+    assumptions: list[str] = Field(
+        default_factory=list,
+        description="口径假设（分级透明作答，十九期 M3）：选定合理口径的理由说明，报告头部呈现",
     )
     human_reply: str | None = Field(default=None, description="HITL 恢复时的用户答复")
     # 执行轨迹
