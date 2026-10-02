@@ -18,6 +18,7 @@ class IntentType:
 
     DIAGNOSTIC = "diagnostic"
     CARDINALITY = "cardinality"
+    ENUMERATION = "enumeration"
     METRIC_SCALAR = "metric_scalar"
     UNKNOWN = "unknown"
 
@@ -85,6 +86,22 @@ _COUNT_QUESTION_TERMS: tuple[str, ...] = (
     "几家",
 )
 
+# 枚举问句触发词（"把全部品牌名列举给我 / 有哪些品类"）：维度取值清单，
+# 十九期 M1 新增直答意图。这是问法词表（非字段别名词表），允许字面维护。
+_ENUMERATION_TERMS: tuple[str, ...] = (
+    "列举",
+    "列出",
+    "有哪些",
+    "都有什么",
+    "都有哪些",
+    "全部",
+)
+
+
+def _is_enumeration_question(query: str) -> bool:
+    return any(t in query for t in _ENUMERATION_TERMS)
+
+
 # 基数问句中的过滤线索词根（"有退款的省份有多少个"）：此类问句的 WHERE
 # 口径无法从词表确定性推导，兜底构造全量计数会丢失过滤语义（答非所问的
 # 温和形态）——count_dimension_dsl 返回 None 拒答，留给 LLM 规划。
@@ -120,9 +137,9 @@ def classify_intent(query: str) -> IntentProfile:
     """确定性意图分类（L1 硬匹配）。
 
     判定优先级：诊断（触发词+锚点）> 基数（量词+单维度锚+无指标锚）>
-    标量指标（指标硬锚）> UNKNOWN。基数判定以指标锚为排除条件——
-    "有多少个品类的GMV"（量词+维度+指标锚）是按维度的指标问题而非基数问题。
-
+    枚举（问法词+单维度锚+无指标锚）> 标量指标（指标硬锚）> UNKNOWN。
+    基数与枚举均以指标锚为排除条件；量词与枚举词共存时基数优先
+    （"有多少个品牌"问计数而非清单）。
     复合问句（指标锚+维度限定词共存，如"海南省的GMV"）判 UNKNOWN：
     兜底无法确定性提取维度取值（"海南省"->'海南'？数仓可能根本没有该
     取值），降维成全域聚合会输出错范围数据（终审 Critical #1 回归锚点）
@@ -135,6 +152,8 @@ def classify_intent(query: str) -> IntentProfile:
         return IntentProfile(IntentType.DIAGNOSTIC, metrics + dims, "hard")
     if _is_count_question(query) and not metrics and len(dims) == 1:
         return IntentProfile(IntentType.CARDINALITY, dims, "hard")
+    if _is_enumeration_question(query) and not metrics and len(dims) == 1:
+        return IntentProfile(IntentType.ENUMERATION, dims, "hard")
     if metrics and not dims and not is_diagnostic:
         return IntentProfile(IntentType.METRIC_SCALAR, metrics, "hard")
     return IntentProfile(IntentType.UNKNOWN, (), "none")
@@ -168,6 +187,27 @@ def count_dimension_dsl(query: str) -> dict | None:
     }
 
 
+def enumeration_dsl(query: str) -> dict | None:
+    """枚举类问题的确定性纯维度投影 DSL（十九期 M1，元数据探查，无时间过滤）。
+
+    非枚举问题返回 None；含过滤线索（"列出有退款的品牌"）时也返回 None——
+    兜底无法确定性推导 WHERE 口径，全量清单会冒充过滤语义（宁拒答不给
+    口径不完整的结果；LLM 在场时由 Planner 规划带过滤的投影）。
+    """
+    profile = classify_intent(query)
+    if profile.intent != IntentType.ENUMERATION:
+        return None
+    if any(t in query for t in _FILTER_CLUE_TERMS):
+        return None
+    field = profile.anchor_fields[0]
+    return {
+        "metrics": [],
+        "dimensions": [{"field": field}],
+        "filters": [],
+        "order_by": [{"field": field, "direction": "asc"}],
+    }
+
+
 def capability_catalog_lines() -> list[str]:
     """拒答报告的能力清单（诚实告知系统边界，含中文 label）。
 
@@ -186,7 +226,8 @@ def capability_catalog_lines() -> list[str]:
         f"{name}（{meta.label or name}）" for name, meta in COLUMNS.items() if name == "unit_price"
     )
     lines = [
-        f"- 分析维度：{dims}；支持基数探查（如「有多少个省份」）",
+        f"- 分析维度：{dims}；支持基数探查（如「有多少个省份」）"
+        "与取值枚举（如「列出全部品牌」）",
         f"- 金额指标：{metrics}",
         "- 计数指标：订单量（order_id）、买家数（user_id）",
     ]
