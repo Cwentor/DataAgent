@@ -16,7 +16,7 @@ from typing import Any
 from security.errors import SecurityError
 from security.policy import POLICIES, PRINCIPAL_ATTRS, Policy
 from semantic import catalog
-from semantic.dsl_schema import Filter, QueryDSL, RatioMetric, WindowMetric
+from semantic.dsl_schema import Filter, QueryDSL
 
 __all__ = ["SecurityError", "apply_policy"]
 
