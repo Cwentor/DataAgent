@@ -793,6 +793,36 @@ def compile_sql(dsl: QueryDSL) -> str:
     if dim_exprs and not is_projection:
         sql += "\nGROUP BY " + ", ".join(dim_exprs)
 
+    if dsl.having and not is_projection:
+        # HAVING 聚合后过滤（十九期 M2）：字段经契约层校验必为本 DSL 指标
+        # 别名，直接引用输出别名（DuckDB 支持）；值按数值字面量渲染
+        having_parts: list[str] = []
+        for h in dsl.having:
+            if h.field not in metric_aliases:
+                raise CompileError(f"HAVING 字段 {h.field!r} 不是指标别名")
+            op_map = {
+                FilterOperator.EQ: "=",
+                FilterOperator.NE: "<>",
+                FilterOperator.GT: ">",
+                FilterOperator.GTE: ">=",
+                FilterOperator.LT: "<",
+                FilterOperator.LTE: "<=",
+            }
+            if h.operator == FilterOperator.IN:
+                vals = ", ".join(_literal(v, "float") for v in h.value)
+                having_parts.append(f"{_quote_ident(h.field)} IN ({vals})")
+            elif h.operator == FilterOperator.BETWEEN:
+                lo, hi = h.value
+                having_parts.append(
+                    f"{_quote_ident(h.field)} BETWEEN {_literal(lo, 'float')} "
+                    f"AND {_literal(hi, 'float')}"
+                )
+            else:
+                having_parts.append(
+                    f"{_quote_ident(h.field)} {op_map[h.operator]} {_literal(h.value, 'float')}"
+                )
+        sql += "\nHAVING " + " AND ".join(having_parts)
+
     if dsl.order_by and dim_exprs:
         parts: list[str] = []
         for o in dsl.order_by:
