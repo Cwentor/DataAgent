@@ -549,7 +549,7 @@ def planner_node(state: AgentState) -> AgentState:
                 error_context=error_context,
                 history_context=state.history_digest or None,
                 clarify_context=(
-                    "已澄清轮次：{}".format(state.clarification_rounds)
+                    f"已澄清轮次：{state.clarification_rounds}"
                     if state.clarification_rounds >= 1
                     else None
                 ),
@@ -572,9 +572,7 @@ def planner_node(state: AgentState) -> AgentState:
                         question = str(clar_raw.get("question") or "").strip()
                         raw_opts = clar_raw.get("options")
                         if isinstance(raw_opts, list):
-                            options = [
-                                str(o) for o in raw_opts if isinstance(o, str) and o.strip()
-                            ]
+                            options = [str(o) for o in raw_opts if isinstance(o, str) and o.strip()]
                     else:
                         question = str(clar_raw).strip()
                     return state.apply(
@@ -2745,9 +2743,7 @@ def _assumptions_header(state: AgentState) -> str:
     if not state.assumptions:
         return ""
     items = "\n".join(f"> {i}. {a}" for i, a in enumerate(state.assumptions, start=1))
-    return (
-        "> ℹ️ **口径假设**（本报告按以下假设选定分析口径，可追问修正）：\n" + items + "\n\n"
-    )
+    return "> ℹ️ **口径假设**（本报告按以下假设选定分析口径，可追问修正）：\n" + items + "\n\n"
 
 
 def synthesize_node(state: AgentState) -> AgentState:

@@ -1617,9 +1617,18 @@ def test_planner_node_consumes_assumptions(monkeypatch):
     payload = {
         "clarification": None,
         "steps": [
-            {"id": "s1", "goal": "取数", "kind": "query",
-             "dsl": {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-                     "dimensions": [], "filters": []}},
+            {
+                "id": "s1",
+                "goal": "取数",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                },
+            },
         ],
         "assumptions": ["仅统计成功支付订单", "时间窗口取数仓最近完整期"],
     }
@@ -1637,9 +1646,18 @@ def test_planner_node_tolerates_invalid_assumptions(monkeypatch):
     payload = {
         "clarification": None,
         "steps": [
-            {"id": "s1", "goal": "取数", "kind": "query",
-             "dsl": {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-                     "dimensions": [], "filters": []}},
+            {
+                "id": "s1",
+                "goal": "取数",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                },
+            },
         ],
         "assumptions": "不是数组的假设",
     }
@@ -1696,11 +1714,22 @@ def test_synthesize_report_prepends_assumptions(monkeypatch):
     payload = {
         "clarification": None,
         "steps": [
-            {"id": "s1", "goal": "取5月GMV", "kind": "query",
-             "dsl": {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-                     "dimensions": [], "filters": [],
-                     "time_filter": {"range_type": "absolute",
-                                     "absolute": {"start": "2024-05-01", "end": "2024-06-01"}}}},
+            {
+                "id": "s1",
+                "goal": "取5月GMV",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                    "time_filter": {
+                        "range_type": "absolute",
+                        "absolute": {"start": "2024-05-01", "end": "2024-06-01"},
+                    },
+                },
+            },
             {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"]},
         ],
         "assumptions": ["时间窗口按 2024-05 全月假设"],
