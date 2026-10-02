@@ -8,7 +8,7 @@ from agent.agent import LLMNL2DSL, extract_json
 from agent.errors import PipelineError
 from agent.heuristic import DeterministicNL2DSL
 from compiler.sql_compiler import compile_sql
-from eval.eval_runner import load_golden
+from eval.eval_runner import _is_contract_pending_case, load_golden
 from semantic.dsl_schema import QueryDSL
 
 
@@ -20,15 +20,14 @@ def test_heuristic_covers_all_golden_questions():
 
     十九期 M2 起：HAVING / 表达式指标形态由 M3 Planner 双产出契约接入，
     确定性启发式暂不具备该产出能力，此类用例（Q26/Q27）豁免并单独经
-    golden oracle 评测覆盖（eval_runner 27/27）。
+    golden oracle 评测覆盖（oracle 27/27）；agent 模式评测
+    （eval_runner --pipeline agent）对同样条件标记 SKIP（M3 接入后移除）。
     """
     h = DeterministicNL2DSL()
     for item in load_golden():
         if item.get("type") == "multi_turn":
             continue  # 多轮用例由 eval.multi_turn 评测单独覆盖
-        if any(m.get("kind") == "expression" for m in item["dsl"].get("metrics", [])) or item[
-            "dsl"
-        ].get("having"):
+        if _is_contract_pending_case(item):
             continue  # M2 新契约形态：启发式产出属 M3 范围
         expected = QueryDSL.model_validate(item["dsl"])
         dsl = h.run(item["question"])
