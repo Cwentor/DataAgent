@@ -1475,3 +1475,51 @@ def test_clarification_rounds_field_defaults_zero():
     assert state.clarification_rounds == 0
     bumped = state.apply(clarification_rounds=state.clarification_rounds + 1)
     assert bumped.clarification_rounds == 1
+
+
+def test_heuristic_plan_enumeration():
+    """十九期 M1：枚举问法的确定性两步计划（投影 DSL + 综合）。"""
+    import core.orchestrator.nodes as _orch_nodes
+
+    steps = _orch_nodes._heuristic_plan("把全部品牌名列举给我")
+    assert steps is not None and len(steps) == 2
+    s1 = steps[0]
+    assert s1.kind == "query" and s1.dsl is not None
+    assert s1.dsl["metrics"] == []
+    assert s1.dsl["dimensions"] == [{"field": "brand"}]
+    assert steps[1].kind == "synthesize"
+
+
+def test_planner_pre_routes_enumeration_without_llm(monkeypatch):
+    """枚举预路由：LLM 在场也不发起调用（现行规划契约表达不了投影）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    def _forbidden_llm(*args, **kwargs):
+        raise AssertionError("枚举预路由不得调用 LLM")
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", _forbidden_llm)
+    state = planner_node(AgentState(user_query="把全部品牌名列举给我"))
+    assert state.phase == "query"
+    assert state.answered_by == "heuristic"
+    assert state.plan_steps[0].dsl is not None
+    assert state.plan_steps[0].dsl["metrics"] == []
+
+
+def test_intent_dsl_mismatch_rejects_metrics_on_enumeration():
+    """L3 守卫：枚举意图的查询必须是纯维度投影（Review Focus #1 兜底）。"""
+    import core.orchestrator.nodes as _orch_nodes
+
+    query = "把全部品牌名列举给我"
+    ok_payload = {"metrics": [], "dimensions": [{"field": "brand"}], "filters": []}
+    assert _orch_nodes._intent_dsl_mismatch(query, ok_payload) is None
+    bad_payload = {
+        "metrics": [
+            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+        ],
+        "dimensions": [{"field": "brand"}],
+        "filters": [],
+    }
+    mismatch = _orch_nodes._intent_dsl_mismatch(query, bad_payload)
+    assert mismatch is not None and "投影" in mismatch

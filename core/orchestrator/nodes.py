@@ -37,6 +37,7 @@ from core.orchestrator.intent import (
     IntentType,
     classify_intent,
     dimension_terms,
+    enumeration_dsl,
 )
 from core.orchestrator.prompts import (
     DEGRADED_SUMMARIZER_SYSTEM,
@@ -205,6 +206,7 @@ def _heuristic_plan(query: str) -> list[PlanStep] | None:
 
     - DIAGNOSTIC => 诊断式 DAG（总量对比 -> 因子分解 -> 维度下钻 -> 综合）；
     - CARDINALITY => count_distinct 直答（DSL 由 intent 模块构造）；
+    - ENUMERATION => 纯维度投影直答（十九期 M1，DSL 由 intent 模块构造）；
     - METRIC_SCALAR => 按锚点直答（跨表混合锚等不可构造时 None）；
     - UNKNOWN => None（planner 置 blocked_reason，critic/synthesize 短路拒答）。
     """
@@ -226,6 +228,20 @@ def _heuristic_plan(query: str) -> list[PlanStep] | None:
                 dsl=dsl,
             ),
             PlanStep(id="s2", goal="直接报告计数结果", kind="synthesize", depends_on=["s1"]),
+        ]
+    if profile.intent == IntentType.ENUMERATION:
+        dsl = enumeration_dsl(query)
+        if dsl is None:
+            return None
+        field = dsl["dimensions"][0]["field"]
+        return [
+            PlanStep(
+                id="s1",
+                goal=f"列出{_dimension_label(field)}的全部取值",
+                kind="query",
+                dsl=dsl,
+            ),
+            PlanStep(id="s2", goal="直接报告维度取值清单", kind="synthesize", depends_on=["s1"]),
         ]
     if profile.intent == IntentType.METRIC_SCALAR:
         dsl = _scalar_dsl(profile.anchor_fields, query)
@@ -491,7 +507,16 @@ def planner_node(state: AgentState) -> AgentState:
     """
     llm = _resolve_llm()
     steps: list[PlanStep] | None = None
-    if llm is not None:
+    from_llm = False
+    # 枚举直答预路由（十九期 M1）：ENUMERATION 为词表硬判定的确定性意图，
+    # 而现行 LLM 规划契约（metrics 必填）无法表达维度投影——先走启发式
+    # 直答；构造失败（如"列出有退款的品牌"含过滤线索）才放行 LLM 规划
+    if (
+        llm is not None
+        and classify_intent(state.user_query).intent == IntentType.ENUMERATION
+    ):
+        steps = _heuristic_plan(state.user_query)
+    if steps is None and llm is not None:
         # SchemaAgent 动态 profiling（后续项）：低基数字段枚举值注入规划上下文；
         # 探查失败降级为空 dict（不阻断规划主链路），离线/无库环境无副作用
         from core.retrieval.profiling import profile_enum_values
@@ -529,6 +554,7 @@ def planner_node(state: AgentState) -> AgentState:
                     clarification_options=options,
                 )
             steps = _plan_from_llm(payload)
+            from_llm = steps is not None
             # intent 回传（十八期）：仅诊断可观测，宽容消费（缺失/非法不阻塞）；
             # L3 守卫不依赖它（用 intent 模块确定性重判）
             intent_payload = payload.get("intent")
@@ -546,9 +572,7 @@ def planner_node(state: AgentState) -> AgentState:
                 )
     if steps is None:
         steps = _heuristic_plan(state.user_query)
-        planner_used = "heuristic"
-    else:
-        planner_used = "llm"
+    planner_used = "llm" if from_llm else "heuristic"
     if steps is None:
         # 兜底准入（十八期）+ 分层降级二次判定（2026-09）：UNKNOWN 拆为
         # 弱解析（字段存在但无法自动拆解 => 交互确认）与 NOT_EXIST（语义
@@ -779,6 +803,10 @@ def _intent_dsl_mismatch(query: str, dsl_payload: dict[str, Any]) -> str | None:
         ):
             return None
         return "基数类问题的查询目标必须是锚定维度上的 count_distinct 聚合"
+    if profile.intent == IntentType.ENUMERATION:
+        if len(metrics) == 0:
+            return None
+        return "枚举类问题的查询必须是纯维度投影（不得携带聚合指标）"
     if profile.intent == IntentType.METRIC_SCALAR:
         outside = [
             str(m.get("field")) for m in metrics if m.get("field") not in profile.anchor_fields
