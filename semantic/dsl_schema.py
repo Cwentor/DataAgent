@@ -315,7 +315,7 @@ class QueryDSL(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    metrics: list[Metric] = Field(min_length=1)
+    metrics: list[Metric] = Field(default_factory=list)
     dimensions: list[Dimension] = Field(default_factory=list)
     time_filter: TimeFilter | None = None
     filters: list[Filter] = Field(default_factory=list)
@@ -326,6 +326,27 @@ class QueryDSL(BaseModel):
         description="日期连续补零：按时间维度补齐缺失日期并用 0 填充指标",
     )
     top_n: TopN | None = Field(default=None, description="分组 Top-N（如每省 Top 3 品类）")
+
+    @model_validator(mode="after")
+    def _check_projection_shape(self) -> QueryDSL:
+        """纯维度投影（metrics 为空）的形态约束（十九期 M1）。
+
+        投影仅支持"全量 distinct 取值清单"形态：dimensions 必须非空
+        （指标与维度同时为空无查询目标）；分组 Top-N / 日期补零依赖指标
+        排序或填充，同比/环比按双窗口指标对比编译——投影均无语义，契约层
+        直接拒绝，编译器与执行层不再重复裁决。
+        """
+        if self.metrics:
+            return self
+        if not self.dimensions:
+            raise ValueError("查询必须包含至少一个指标或维度（metrics 与 dimensions 不能同时为空）")
+        if self.top_n is not None:
+            raise ValueError("维度投影不支持分组 Top-N（无指标可排序）")
+        if self.fill_gaps:
+            raise ValueError("维度投影不支持日期补零（无指标可填充）")
+        if self.time_filter is not None and self.time_filter.comparison != Comparison.NONE:
+            raise ValueError("维度投影不支持同比/环比对比（无指标可对比）")
+        return self
 
     @model_validator(mode="after")
     def _check_scalar_ordering(self) -> QueryDSL:
