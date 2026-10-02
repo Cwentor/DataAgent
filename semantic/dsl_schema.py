@@ -444,6 +444,8 @@ class QueryDSL(BaseModel):
         """
         if not self.having:
             return self
+        if not self.metrics:
+            raise ValueError("纯维度投影不支持 HAVING（无指标别名可过滤）")
         alias_set = {m.alias for m in self.metrics}
         for h in self.having:
             if h.field not in alias_set:
@@ -452,8 +454,6 @@ class QueryDSL(BaseModel):
                 )
         if not self.dimensions:
             raise ValueError("HAVING 需要分组维度（全局标量查询不支持聚合后过滤）")
-        if not self.metrics:
-            raise ValueError("纯维度投影不支持 HAVING（无指标别名可过滤）")
         if any(isinstance(m, WindowMetric) for m in self.metrics):
             raise ValueError("HAVING 暂不支持窗口指标形态")
         if self.top_n is not None:

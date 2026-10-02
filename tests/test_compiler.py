@@ -697,3 +697,52 @@ def test_expression_metric_contract_rejections():
                 ]
             }
         )
+
+
+@pytest.mark.parametrize(
+    "payload, match",
+    [
+        # HAVING × 纯投影（无指标别名可过滤）
+        (
+            {"dimensions": [{"field": "brand"}], "having": [{"field": "gmv", "operator": "gt", "value": 0}]},
+            "纯维度投影",
+        ),
+        # HAVING × 无分组维度（全局标量）
+        (
+            {
+                "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+                "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            },
+            "分组维度",
+        ),
+        # HAVING × 窗口指标
+        (
+            {
+                "metrics": [
+                    {"kind": "window", "base": {"field": "order_amount", "agg": "sum", "alias": "gmv_base"}, "func": "cumsum", "alias": "gmv_cum"},
+                    {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
+                ],
+                "dimensions": [{"field": "order_time"}],
+                "having": [{"field": "orders", "operator": "gt", "value": 0}],
+            },
+            "窗口",
+        ),
+        # 表达式 ref 未声明别名
+        (
+            {
+                "metrics": [
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "abs", "args": [{"ref": "ghost"}]},
+                    }
+                ]
+            },
+            "聚合指标别名",
+        ),
+    ],
+)
+def test_m2_mutual_exclusion_matrix(payload, match):
+    """十九期 M2 验收：互斥组合在契约层显式拒绝（CompileError/ValidationError 矩阵）。"""
+    with pytest.raises(ValidationError, match=match):
+        QueryDSL.model_validate(payload)
