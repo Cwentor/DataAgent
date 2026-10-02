@@ -1740,3 +1740,55 @@ def test_synthesize_report_prepends_assumptions(monkeypatch):
     assert trace.phase == "done"
     assert "口径假设" in (trace.report or "")
     assert "2024-05 全月" in (trace.report or "")
+
+
+def test_ambiguity_routing_state_machine(monkeypatch):
+    """M3-T4 验收锚点：澄清-标注路由状态机（口径模糊三级行为）。
+
+    spec §7 题库第 3 层验收判据：要么选项式澄清、要么 assumptions 非空且
+    报告可见——两种都算通过，静默猜口径直答算失败。
+    """
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    # 一轮歧义（LLM 判定无法选口径）=> 选项式澄清挂起
+    payload_clarify = {
+        "clarification": {"question": "要按省份还是品类看？", "options": ["按省份", "按品类"]},
+        "steps": None,
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload_clarify)
+    first = planner_node(AgentState(user_query="华南的表现怎么样"))
+    assert first.phase == "clarify" and first.clarification_options
+
+    # 二轮（用户答复后仍歧义）=> LLM 再反问被硬拦截，转带假设作答
+    # （"海南省的GMV"：维度锚在但取值多候选/未命中，走 assume 分支；
+    #   "华南的表现"无任何锚点属 not_exist 诚实拒答，不经此路径）
+    second = planner_node(
+        AgentState(user_query="海南省的GMV是多少", clarification_rounds=1, autonomy_level="L4")
+    )
+    assert second.phase != "clarify"
+    assert second.plan_steps and second.assumptions, "二轮必须带假设作答"
+
+    # 中置信（LLM 直接管假设作答）=> assumptions 非空 + 正常计划
+    payload_assume = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取数",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [{"field": "province"}],
+                    "filters": [],
+                },
+            },
+        ],
+        "assumptions": ["华南展开为广东/广西/海南等省份 IN 列表"],
+    }
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload_assume)
+    third = planner_node(AgentState(user_query="华南的表现怎么样"))
+    assert third.phase == "query" and third.assumptions
