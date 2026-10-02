@@ -284,6 +284,10 @@ def _aggregate_metrics(m: Metric) -> list[AggregateMetric]:
         return [m.numerator, m.denominator]
     if isinstance(m, WindowMetric):
         return [m.base]
+    if getattr(m, "kind", "") == "expression":
+        # 表达式指标自身不产生聚合，其引用由 QueryDSL._check_expression_refs
+        # 保证仅指向本 DSL 聚合指标——表收集由那些聚合指标承担
+        return []
     return [m]
 
 
@@ -302,6 +306,38 @@ def _aggregate_expr(am: AggregateMetric) -> str:
     if am.agg == AggFunc.MAX:
         return f"MAX({col})"
     raise CompileError(f"不支持的聚合函数: {am.agg!r}")
+
+
+def _expr_sql(node, resolve) -> str:
+    """表达式 AST -> SQL 片段（十九期 M2）。
+
+    op 白名单与参数个数已由契约层裁决；div 产出 ``(a / NULLIF(b, 0))`` 与
+    比率指标除零口径对齐（除零得 NULL 而非 inf/NaN）。
+    """
+    from semantic.dsl_schema import ExprOp
+
+    if node.ref is not None:
+        return resolve(node.ref)
+    if node.lit is not None:
+        return repr(float(node.lit)) if isinstance(node.lit, float) else str(node.lit)
+    rendered = [_expr_sql(a, resolve) for a in node.args]
+    if node.op == ExprOp.DIV:
+        return f"({rendered[0]} / NULLIF({rendered[1]}, 0))"
+    if node.op == ExprOp.ADD:
+        return f"({rendered[0]} + {rendered[1]})"
+    if node.op == ExprOp.SUB:
+        return f"({rendered[0]} - {rendered[1]})"
+    if node.op == ExprOp.MUL:
+        return f"({rendered[0]} * {rendered[1]})"
+    if node.op == ExprOp.COALESCE:
+        return f"COALESCE({', '.join(rendered)})"
+    if node.op == ExprOp.ROUND:
+        if len(rendered) == 2:
+            return f"ROUND({rendered[0]}, {rendered[1]})"
+        return f"ROUND({rendered[0]})"
+    if node.op == ExprOp.ABS:
+        return f"ABS({rendered[0]})"
+    raise CompileError(f"不支持的表达式操作: {node.op!r}")
 
 
 def _metric_expr(m: Metric) -> tuple[str, str]:
@@ -769,7 +805,18 @@ def compile_sql(dsl: QueryDSL) -> str:
             time_dim_expr = expr
 
     metric_aliases: set[str] = set()
+    # 两遍渲染（十九期 M2）：先聚合/比率指标建立 别名->SQL 表达式 映射，
+    # 再把表达式指标的 ref 代入为底层聚合表达式（非输出别名引用，可移植）
+    alias_expr: dict[str, str] = {}
+
+    def _resolve_ref(ref: str) -> str:
+        if ref not in alias_expr:
+            raise CompileError(f"表达式引用了未知指标别名: {ref!r}")
+        return alias_expr[ref]
+
     for m in dsl.metrics:
+        if getattr(m, "kind", "") == "expression":
+            continue
         if isinstance(m, WindowMetric):
             if time_dim_expr is None:
                 raise CompileError("窗口指标需要时间维度（order_time/refund_time/register_time）")
@@ -779,6 +826,17 @@ def compile_sql(dsl: QueryDSL) -> str:
             expr, alias = _metric_expr(m)
         selects.append(f"{expr} AS {_quote_ident(alias)}")
         metric_aliases.add(alias)
+        alias_expr[alias] = expr
+
+    for m in dsl.metrics:
+        if getattr(m, "kind", "") != "expression":
+            continue
+        if m.alias in metric_aliases:
+            raise CompileError(f"指标别名冲突: {m.alias!r}")
+        expr = _expr_sql(m.expr, _resolve_ref)
+        selects.append(f"{expr} AS {_quote_ident(m.alias)}")
+        metric_aliases.add(m.alias)
+        alias_expr[m.alias] = expr
 
     where: list[str] = []
     for f in dsl.filters:
