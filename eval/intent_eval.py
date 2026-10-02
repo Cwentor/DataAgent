@@ -27,7 +27,8 @@ from config import settings
 
 _orch_nodes._resolve_llm = lambda: None
 
-from core.orchestrator.agent import run_agent  # noqa: E402  (需在 patch 后导入链路)
+from core.orchestrator.agent import AgentTrace, run_agent  # noqa: E402  (需在 patch 后导入链路)
+from core.orchestrator.state import AgentState  # noqa: E402
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "intent_golden.json"
 
@@ -85,7 +86,47 @@ def main() -> int:
         if not ok:
             failures.append(question)
             print(f"       report head: {report[:200]!r}")
-    print(f"\n{len(cases) - len(failures)}/{len(cases)} passed")
+
+    # 多轮混排回归锚点（docs/reviews/20261002-audit-clarify-pending-hijack.md）：
+    # 恢复"共享会话连续提问"场景——澄清挂起后新问题必须按新查询独立作答、
+    # 旧澄清卡仍可在本轮线程恢复（checkpointer 线程按轮隔离）。严禁用每用例
+    # 隔离会话掩盖多轮误路由。
+    mixed_session = "intent-eval-mixed"
+    paused = run_agent("海南省的GMV是多少", session_id=mixed_session, autonomy_level="L4")
+    ok = isinstance(paused, AgentState) and paused.phase == "clarify"
+    print(f"[{'PASS' if ok else 'FAIL'}] 混排#1 澄清挂起（海南GMV）")
+    if not ok:
+        failures.append("多轮混排#1 澄清挂起")
+
+    trace = run_agent("有多少个省份", session_id=mixed_session, autonomy_level="L4")
+    ok = (
+        isinstance(trace, AgentTrace)
+        and trace.phase == "done"
+        and "查询答案：8" in trace.report
+        and "用户补充" not in trace.report
+    )
+    print(f"[{'PASS' if ok else 'FAIL'}] 混排#2 挂起后新问题独立作答（省份计数）")
+    if not ok:
+        failures.append("多轮混排#2 挂起后新问题独立作答")
+
+    final = run_agent(
+        "海南省的GMV是多少",
+        session_id=mixed_session,
+        autonomy_level="L4",
+        resume_state=paused.apply(human_reply="广东省"),
+    )
+    ok = (
+        isinstance(final, AgentTrace)
+        and final.phase == "done"
+        and "广东" in final.report
+        and "有多少个省份" not in final.report
+    )
+    print(f"[{'PASS' if ok else 'FAIL'}] 混排#3 旧澄清卡按本轮恢复（广东GMV）")
+    if not ok:
+        failures.append("多轮混排#3 旧澄清卡按本轮恢复")
+
+    total_checks = len(cases) + 3  # 3 = 多轮混排回归锚点
+    print(f"\n{total_checks - len(failures)}/{total_checks} passed")
     return 1 if failures else 0
 
 
