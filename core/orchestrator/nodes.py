@@ -338,17 +338,24 @@ def _confirmed_filter_from_supplement(query: str, enums: dict[str, list[str]]) -
 
 
 def _degraded_parse(
-    query: str, profile: IntentProfile, enum_values: dict[str, list[str]] | None
-) -> tuple[str, Any]:
+    query: str,
+    profile: IntentProfile,
+    enum_values: dict[str, list[str]] | None,
+    assume_on_ambiguity: bool = False,
+) -> tuple[str, Any, list[str]]:
     """UNKNOWN 二次判定（分层降级兜底）。
 
-    输入为 classify_intent 的确定性画像（不信任 LLM 回传意图）。返回 (mode, payload)：
-    - ("not_exist", reason)：无指标锚 / 仅维度锚 / 跨表混合锚 => NOT_EXIST 拒答
+    输入为 classify_intent 的确定性画像（不信任 LLM 回传意图）。返回 (mode, payload, assumptions)：
+    - ("not_exist", reason, [])：无指标锚 / 仅维度锚 / 跨表混合锚 => NOT_EXIST 拒答
       （语义不存在，宁拒不错）；
-    - ("plan", steps)：唯一候选口径 => 降级计划（query+synthesize 两步结构，
-      严禁 analyze——禁多步组合是结构约束而非提示词约束）；
-    - ("clarify", (question, options))：筛选值多候选或缺失 => 选项式澄清
+    - ("plan", steps, assumptions)：唯一候选口径 => 降级计划（query+synthesize
+      两步结构，严禁 analyze——禁多步组合是结构约束而非提示词约束）；
+    - ("clarify", (question, options), [])：筛选值多候选或缺失 => 选项式澄清
       （用户回答经 human_reply 合并后重新解析，唯一化后进 plan_review）。
+
+    ``assume_on_ambiguity``（十九期 M3 分级透明作答）：二轮歧义不再拒答/反问
+    ——多候选筛选维度转分组统计，选定"分组、不筛选具体取值"的缺省口径，假设
+    逐条随 assumptions 返回（报告头部确定性呈现，绝不静默猜口径）。
 
     筛选条件来源白名单（强制）：显式时间解析 / 用户确认内容 / 枚举值精确命中
     （数据真实存在不算猜）；枚举未命中的取值一律留白交用户确认。
@@ -371,13 +378,15 @@ def _degraded_parse(
             return (
                 "not_exist",
                 f"识别到维度【{labels}】但未识别到任何可查询指标，无法构造查询",
+                [],
             )
-        return ("not_exist", "无法从语义目录识别问题意图（未命中任何指标/维度锚点）")
+        return ("not_exist", "无法从语义目录识别问题意图（未命中任何指标/维度锚点）", [])
     tables = {_SCALAR_ANCHOR_TABLE[a] for a in metrics_anchors}
     if len(tables) > 1:
         return (
             "not_exist",
             "识别到跨表指标锚点（如 GMV 与退款金额），单查询无法同口径构造",
+            [],
         )
     dim_anchors = tuple(a for a in profile.anchor_fields if a not in metrics_anchors)
 
@@ -402,7 +411,7 @@ def _degraded_parse(
             filters.append({"field": dim, "operator": "eq", "value": hits[0]})
         else:
             pending.append((dim, hits))
-    if pending:
+    if pending and not assume_on_ambiguity:
         metric_labels = "、".join(_metric_label(m) for m in metrics_anchors)
         question = (
             f"AI 规划暂不可用，已识别指标【{metric_labels}】，但以下维度的"
@@ -416,7 +425,14 @@ def _degraded_parse(
             else:
                 options.append(f"按{label}分组统计（不筛选具体取值）")
                 options.append(f"不限定{label}，查询全部")
-        return ("clarify", (question, options[:6]))
+        return ("clarify", (question, options[:6]), [])
+    assume_notes: list[str] = []
+    for dim, _hits in pending:
+        # 二轮歧义转带假设作答（分级透明）：多候选/未命中取值一律不猜——
+        # 该维度改按分组统计（全域口径），假设随报告头部呈现
+        label = _dimension_label(dim)
+        group_dims.append(dim)
+        assume_notes.append(f"已按{label}分组统计、不筛选具体取值（筛选口径假设）")
 
     explicit = parse_explicit_time_window(query)
     window = (
@@ -453,7 +469,7 @@ def _degraded_parse(
             depends_on=["s1"],
         ),
     ]
-    return ("plan", steps)
+    return ("plan", steps, assume_notes)
 
 
 def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
@@ -597,11 +613,15 @@ def planner_node(state: AgentState) -> AgentState:
         # 兜底准入（十八期）+ 分层降级二次判定（2026-09）：UNKNOWN 拆为
         # 弱解析（字段存在但无法自动拆解 => 交互确认）与 NOT_EXIST（语义
         # 不存在 => 拒答）。严禁猜测口径产计划（回归锚点：曾固定 sum(gmv)
-        # 答非所问）。
+        # 答非所问）。二轮起转带假设作答（十九期 M3 分级透明作答）：
+        # assume_on_ambiguity 下多候选筛选维度转分组，假设随计划透传报告。
         from core.retrieval.profiling import profile_enum_values
 
-        mode, payload = _degraded_parse(
-            state.user_query, classify_intent(state.user_query), profile_enum_values()
+        mode, payload, degraded_assumptions = _degraded_parse(
+            state.user_query,
+            classify_intent(state.user_query),
+            profile_enum_values(),
+            assume_on_ambiguity=state.clarification_rounds >= 1,
         )
         if mode == "plan":
             events.emit_event("degrade", {"outcome": "parse_hit", "query": state.user_query[:200]})
@@ -616,24 +636,13 @@ def planner_node(state: AgentState) -> AgentState:
                 answered_by=(
                     "degraded_auto" if state.autonomy_level == "L4" else "degraded_confirmed"
                 ),
+                # 口径假设合并（LLM 假设 + 降级解析假设），报告头部呈现
+                assumptions=[*state.assumptions, *degraded_assumptions],
                 # 新计划 = 新的执行授权需求：高危确认锚复位
                 high_risk_approved=False,
             )
         if mode == "clarify":
-            if state.clarification_rounds >= 1:
-                # 二轮澄清仍歧义 => 拒答（防循环；plan_edit_instruction 同类经验）
-                default_registry().record_degrade("rejected")
-                return state.apply(
-                    blocked_reason="经一轮澄清后查询条件仍无法唯一确定，已停止降级解析。"
-                    "请调整问法（明确指标与筛选条件），或等待 AI 规划服务恢复后重试。",
-                    answered_by="blocked",
-                    plan_steps=[],
-                    plan_edit_instruction=None,
-                    scratchpad=[
-                        *state.scratchpad,
-                        "[planner] blocked: degraded clarify round-limit",
-                    ],
-                )
+            # assume_on_ambiguity 下二轮不再返回 clarify；此处仅一轮首问路径
             question, options = payload
             events.emit_event("degrade", {"outcome": "parse_hit", "query": state.user_query[:200]})
             default_registry().record_degrade("parse_hit")
@@ -2727,6 +2736,20 @@ def _degradation_banner(state: AgentState, synth_llm_used: bool = False) -> str:
     )
 
 
+def _assumptions_header(state: AgentState) -> str:
+    """口径假设头部块（十九期 M3 分级透明作答）。
+
+    带假设作答 ≠ 静默降级：assumptions 必须在报告头部确定性呈现（LLM 综合
+    成功路径同样前置，不依赖 LLM 转述）——用户可据此追问修正口径。
+    """
+    if not state.assumptions:
+        return ""
+    items = "\n".join(f"> {i}. {a}" for i, a in enumerate(state.assumptions, start=1))
+    return (
+        "> ℹ️ **口径假设**（本报告按以下假设选定分析口径，可追问修正）：\n" + items + "\n\n"
+    )
+
+
 def synthesize_node(state: AgentState) -> AgentState:
     """综合节点：执行轨迹 + 产物 => 商业分析师口径的 Markdown 报告。
 
@@ -2854,7 +2877,11 @@ def synthesize_node(state: AgentState) -> AgentState:
 
     if llm_report:
         # LLM 综合成功：水印明示"计划离线、叙述由 AI 生成"（措辞精确化）
-        report = _degradation_banner(state, synth_llm_used=True) + llm_report
+        report = (
+            _degradation_banner(state, synth_llm_used=True)
+            + _assumptions_header(state)
+            + llm_report
+        )
         events.emit_event(
             events.EVENT_ARTIFACT_EMIT,
             {"artifact": {"type": "markdown_report", "title": "分析报告", "content": report}},
@@ -2876,6 +2903,10 @@ def synthesize_node(state: AgentState) -> AgentState:
         lines.append("")
     lines.append(f"## 分析报告：{state.user_query}")
     lines.append("")
+    assumptions_block = _assumptions_header(state)
+    if assumptions_block:
+        lines.append(assumptions_block.rstrip("\n"))
+        lines.append("")
     for summary in deduped_summaries:
         try:
             lines.extend(_summary_analyst_markdown(summary, state))

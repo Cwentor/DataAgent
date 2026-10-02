@@ -1648,3 +1648,66 @@ def test_planner_node_tolerates_invalid_assumptions(monkeypatch):
     state = planner_node(AgentState(user_query="5月GMV是多少"))
     assert state.assumptions == []
     assert state.plan_steps  # 规划不受阻
+
+
+def test_degraded_second_round_ambiguity_answers_with_assumptions(monkeypatch):
+    """M3-T2：二轮歧义不再拒答——多候选筛选维度转分组 + 口径假设。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: None)
+    # "海南省的GMV" 式问法一轮已澄清（rounds=1）仍多候选/未命中 => 带假设作答
+    state = planner_node(
+        AgentState(
+            user_query="海南省的GMV是多少",
+            clarification_rounds=1,
+            autonomy_level="L4",
+        )
+    )
+    assert state.phase == "query"
+    assert state.plan_steps, "二轮歧义必须产计划而非拒答"
+    assert state.assumptions, "口径假设必须非空"
+    assert any("分组" in a or "不筛选" in a for a in state.assumptions)
+
+
+def test_llm_second_round_clarification_hard_blocked(monkeypatch):
+    """M3-T2 Review Focus #3：LLM 二轮仍返回 clarification 必须被消费层拦截。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": {"question": "请再补充一下？", "options": []},
+        "steps": None,
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(
+        AgentState(user_query="海南省的GMV是多少", clarification_rounds=1, autonomy_level="L4")
+    )
+    assert state.phase != "clarify", "二轮澄清严禁再次挂起"
+    assert state.plan_steps, "拦截后必须转入带假设作答计划"
+
+
+def test_synthesize_report_prepends_assumptions(monkeypatch):
+    """M3-T2：口径假设在报告头部确定性呈现（LLM 成功路径同样前置）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.agent import run_agent
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {"id": "s1", "goal": "取5月GMV", "kind": "query",
+             "dsl": {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+                     "dimensions": [], "filters": [],
+                     "time_filter": {"range_type": "absolute",
+                                     "absolute": {"start": "2024-05-01", "end": "2024-06-01"}}}},
+            {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"]},
+        ],
+        "assumptions": ["时间窗口按 2024-05 全月假设"],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    trace = run_agent("5月GMV是多少", session_id="m3-assume", autonomy_level="L4")
+    assert trace.phase == "done"
+    assert "口径假设" in (trace.report or "")
+    assert "2024-05 全月" in (trace.report or "")
