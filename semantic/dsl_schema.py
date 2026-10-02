@@ -416,9 +416,7 @@ class QueryDSL(BaseModel):
         单层引用（禁指向 ratio/window/expression）结构性消除环依赖与深度
         链式展开；未声明别名一律拒绝（宁拒不错）。
         """
-        agg_aliases = {
-            m.alias for m in self.metrics if getattr(m, "kind", "") == "aggregate"
-        }
+        agg_aliases = {m.alias for m in self.metrics if getattr(m, "kind", "") == "aggregate"}
         for m in self.metrics:
             if getattr(m, "kind", "") != "expression":
                 continue

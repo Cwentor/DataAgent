@@ -49,7 +49,8 @@ def load_golden() -> list[dict[str, Any]]:
 def _golden_oracle(query: str) -> QueryDSL:
     """在未接入 LLM 前，直接按问题文本匹配 golden 中的预期 DSL，用于自闭环评测。"""
     for item in load_golden():
-        if item["question"] == query:
+        # multi_turn 用例无 question 键（问题在 turns 内），跳过而非崩溃
+        if item.get("question") == query:
             return QueryDSL.model_validate(item["dsl"])
     raise KeyError(f"golden dataset 中未找到问题: {query!r}")
 
