@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Any
+from typing import Any, ClassVar
 
 from agent.clarify import undefined_metric_terms
 from agent.errors import PipelineError
@@ -224,12 +224,12 @@ class DeterministicNL2DSL:
     # 指标
     # ------------------------------------------------------------------ #
     # 聚合后过滤阈值模式（十九期 M3）："只要GMV超过1000 / 订单量低于50"
-    _HAVING_THRESHOLD_RE = re.compile(
+    _HAVING_THRESHOLD_RE: ClassVar = re.compile(
         r"(GMV|销售额|订单量|订单数|买家数|退款金额)\s*"
         r"(超过|大于|高于|不少于|不低于|低于|小于|不足)\s*"
         r"([0-9][0-9,，.]*)\s*(万)?"
     )
-    _HAVING_OP_MAP = {
+    _HAVING_OP_MAP: ClassVar = {
         "超过": "gt",
         "大于": "gt",
         "高于": "gt",
@@ -239,7 +239,7 @@ class DeterministicNL2DSL:
         "小于": "lt",
         "不足": "lt",
     }
-    _HAVING_FIELD_ALIAS = {
+    _HAVING_FIELD_ALIAS: ClassVar = {
         "GMV": "gmv",
         "销售额": "gmv",
         "订单量": "order_count",
