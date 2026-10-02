@@ -152,7 +152,9 @@ def classify_intent(query: str) -> IntentProfile:
         return IntentProfile(IntentType.DIAGNOSTIC, metrics + dims, "hard")
     if _is_count_question(query) and not metrics and len(dims) == 1:
         return IntentProfile(IntentType.CARDINALITY, dims, "hard")
-    if _is_enumeration_question(query) and not metrics and len(dims) == 1:
+    if _is_enumeration_question(query) and not metrics and dims:
+        # 十九期 M2：多维枚举放开（单维 M1 已落地）——投影形态天然支持
+        # 多维 DISTINCT，字段序 = 词表提取序
         return IntentProfile(IntentType.ENUMERATION, dims, "hard")
     if metrics and not dims and not is_diagnostic:
         return IntentProfile(IntentType.METRIC_SCALAR, metrics, "hard")
@@ -202,7 +204,7 @@ def enumeration_dsl(query: str) -> dict | None:
     field = profile.anchor_fields[0]
     return {
         "metrics": [],
-        "dimensions": [{"field": field}],
+        "dimensions": [{"field": f} for f in profile.anchor_fields],
         "filters": [],
         "order_by": [{"field": field, "direction": "asc"}],
     }
