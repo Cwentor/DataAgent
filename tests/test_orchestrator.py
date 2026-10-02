@@ -1515,9 +1515,7 @@ def test_intent_dsl_mismatch_rejects_metrics_on_enumeration():
     ok_payload = {"metrics": [], "dimensions": [{"field": "brand"}], "filters": []}
     assert _orch_nodes._intent_dsl_mismatch(query, ok_payload) is None
     bad_payload = {
-        "metrics": [
-            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
-        ],
+        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
         "dimensions": [{"field": "brand"}],
         "filters": [],
     }

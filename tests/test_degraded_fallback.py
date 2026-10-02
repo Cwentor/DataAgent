@@ -586,9 +586,7 @@ def test_refusal_advice_distinguishes_cause(monkeypatch):
     monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
 
     # 能力边界类拒答（LLM 健康）：不得建议检查网关连通性
-    state_cap = AgentState(
-        user_query="流量表现怎么样", blocked_reason="无法从语义目录识别问题意图"
-    )
+    state_cap = AgentState(user_query="流量表现怎么样", blocked_reason="无法从语义目录识别问题意图")
     report_cap = _cannot_answer_report(state_cap)
     assert "能力边界" in report_cap
     assert "网关连通性" not in report_cap
