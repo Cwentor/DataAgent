@@ -504,3 +504,34 @@ def test_projection_dsl_valid_and_invalid_shapes():
                 },
             }
         )
+
+
+def test_projection_compiles_distinct_and_orders(conn):
+    """十九期 M1：纯维度投影编译 SELECT DISTINCT（无 GROUP BY），执行返回真实取值。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "dimensions": [{"field": "brand"}],
+            "order_by": [{"field": "brand", "direction": "asc"}],
+            "limit": 100,
+        }
+    )
+    sql = compile_sql(dsl)
+    assert "SELECT DISTINCT" in sql
+    assert "GROUP BY" not in sql
+    assert "ORDER BY" in sql
+    assert "LIMIT 100" in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) > 0
+    # dim_product 经 fact_orders JOIN 语义：返回的是订单事实中出现过的品牌
+    # （mock 数仓订单仅覆盖部分 DIMENSION_MEMBERS 品牌，小米必在）
+    values = {r[0] for r in rows}
+    assert "小米" in values
+
+
+def test_projection_respects_limit_cap(conn):
+    """十九期 M1 Review Focus #5：投影无界输出由 LIMIT 硬上限兜底。"""
+    dsl = QueryDSL.model_validate({"dimensions": [{"field": "brand"}], "limit": 3})
+    sql = compile_sql(dsl)
+    assert "LIMIT 3" in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) <= 3
