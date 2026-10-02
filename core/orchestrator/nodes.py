@@ -511,10 +511,7 @@ def planner_node(state: AgentState) -> AgentState:
     # 枚举直答预路由（十九期 M1）：ENUMERATION 为词表硬判定的确定性意图，
     # 而现行 LLM 规划契约（metrics 必填）无法表达维度投影——先走启发式
     # 直答；构造失败（如"列出有退款的品牌"含过滤线索）才放行 LLM 规划
-    if (
-        llm is not None
-        and classify_intent(state.user_query).intent == IntentType.ENUMERATION
-    ):
+    if llm is not None and classify_intent(state.user_query).intent == IntentType.ENUMERATION:
         steps = _heuristic_plan(state.user_query)
     if steps is None and llm is not None:
         # SchemaAgent 动态 profiling（后续项）：低基数字段枚举值注入规划上下文；
