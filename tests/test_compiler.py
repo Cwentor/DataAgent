@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from compiler.sql_compiler import CompileError, compile_sql
 from semantic.dsl_schema import QueryDSL
@@ -462,3 +463,44 @@ def test_comparison_yoy_time_dimension_pairing():
     assert "date_add(date_trunc('day', f.order_time), INTERVAL 1 YEAR) AS \"order_time\"" in sql
     assert 'LEFT JOIN prev USING ("order_time")' in sql
     assert 'AS "gmv_yoy"' in sql
+
+
+def test_projection_dsl_valid_and_invalid_shapes():
+    """十九期 M1：metrics 可空的纯维度投影契约（形态越界契约层即拒）。"""
+    # 合法：纯维度投影（无指标）
+    dsl = QueryDSL.model_validate({"dimensions": [{"field": "brand"}]})
+    assert dsl.metrics == []
+
+    # 非法：指标与维度同时为空（无查询目标）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate({})
+
+    # 非法：投影 + 分组 Top-N（无指标可排序）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "dimensions": [{"field": "province"}],
+                "top_n": {
+                    "n": 3,
+                    "partition_by": ["province"],
+                    "order_by": [{"field": "province", "direction": "asc"}],
+                },
+            }
+        )
+
+    # 非法：投影 + 日期补零（无指标可填充）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate({"dimensions": [{"field": "brand"}], "fill_gaps": True})
+
+    # 非法：投影 + 同比/环比（无指标可对比）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "dimensions": [{"field": "brand"}],
+                "time_filter": {
+                    "range_type": "absolute",
+                    "absolute": {"start": "2024-05-01", "end": "2024-06-01"},
+                    "comparison": "mom",
+                },
+            }
+        )
