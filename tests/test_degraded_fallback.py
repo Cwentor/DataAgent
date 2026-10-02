@@ -575,3 +575,29 @@ def test_protocol_js_whitelists_degrade_event():
     protocol = Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "protocol.js"
     text = protocol.read_text(encoding="utf-8")
     assert '"degrade"' in text
+
+
+def test_refusal_advice_distinguishes_cause(monkeypatch):
+    """十九期 M1：拒答建议按成因三分流（Review Focus #6）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import _cannot_answer_report
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+
+    # 能力边界类拒答（LLM 健康）：不得建议检查网关连通性
+    state_cap = AgentState(
+        user_query="流量表现怎么样", blocked_reason="无法从语义目录识别问题意图"
+    )
+    report_cap = _cannot_answer_report(state_cap)
+    assert "能力边界" in report_cap
+    assert "网关连通性" not in report_cap
+
+    # LLM 调用失败标记 => 保留连通性排查指引
+    state_llm = AgentState(
+        user_query="流量表现怎么样",
+        blocked_reason="无法从语义目录识别问题意图",
+        scratchpad=["[planner] llm-call-failed"],
+    )
+    report_llm = _cannot_answer_report(state_llm)
+    assert "网关连通性" in report_llm
