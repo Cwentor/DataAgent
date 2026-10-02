@@ -320,12 +320,47 @@ class QueryDSL(BaseModel):
     time_filter: TimeFilter | None = None
     filters: list[Filter] = Field(default_factory=list)
     order_by: list[OrderBy] = Field(default_factory=list)
+    having: list[Filter] = Field(
+        default_factory=list,
+        description="聚合后过滤（HAVING）：field 仅限本 DSL 指标别名，需带分组维度",
+    )
     limit: int = Field(default=100, ge=1, le=10000)
     fill_gaps: bool = Field(
         default=False,
         description="日期连续补零：按时间维度补齐缺失日期并用 0 填充指标",
     )
     top_n: TopN | None = Field(default=None, description="分组 Top-N（如每省 Top 3 品类）")
+
+    @model_validator(mode="after")
+    def _check_having(self) -> QueryDSL:
+        """HAVING 形态约束（十九期 M2）。
+
+        HAVING 是聚合后过滤：字段仅限本 DSL 指标别名（非物理列名/维度名）；
+        语义上要求分组维度非空（全局标量单行无聚合后过滤场景）；与窗口指标
+        /分组 Top-N/日期补零/同比环比互斥（这些形态的编译路径未接入 HAVING，
+        契约层显式拒绝而非静默忽略）。
+        """
+        if not self.having:
+            return self
+        alias_set = {m.alias for m in self.metrics}
+        for h in self.having:
+            if h.field not in alias_set:
+                raise ValueError(
+                    f"HAVING 字段 {h.field!r} 不是本查询声明的指标别名 {sorted(alias_set)}"
+                )
+        if not self.dimensions:
+            raise ValueError("HAVING 需要分组维度（全局标量查询不支持聚合后过滤）")
+        if not self.metrics:
+            raise ValueError("纯维度投影不支持 HAVING（无指标别名可过滤）")
+        if any(isinstance(m, WindowMetric) for m in self.metrics):
+            raise ValueError("HAVING 暂不支持窗口指标形态")
+        if self.top_n is not None:
+            raise ValueError("HAVING 不能与分组 Top-N 同时使用")
+        if self.fill_gaps:
+            raise ValueError("HAVING 不能与日期补零同时使用")
+        if self.time_filter is not None and self.time_filter.comparison != Comparison.NONE:
+            raise ValueError("HAVING 不能与同比/环比同时使用")
+        return self
 
     @model_validator(mode="after")
     def _check_projection_shape(self) -> QueryDSL:

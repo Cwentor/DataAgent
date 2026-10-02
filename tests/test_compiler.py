@@ -535,3 +535,57 @@ def test_projection_respects_limit_cap(conn):
     assert "LIMIT 3" in sql
     rows = conn.execute(sql).fetchall()
     assert len(rows) <= 3
+
+
+def test_having_filters_after_group_by(conn):
+    """十九期 M2：HAVING 聚合后过滤——按品类分组后过滤 GMV。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": [{"field": "category"}],
+            "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            "order_by": [{"field": "gmv", "direction": "desc"}],
+        }
+    )
+    sql = compile_sql(dsl)
+    assert "HAVING" in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) > 0
+    # 全部行的 gmv 均 > 0
+    assert all(r[1] > 0 for r in rows)
+
+
+def test_having_field_must_be_metric_alias():
+    """HAVING 字段仅限本 DSL 指标别名（非列名/维度名）。"""
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                ],
+                "dimensions": [{"field": "category"}],
+                "having": [{"field": "category", "operator": "gt", "value": 0}],
+            }
+        )
+
+
+def test_having_requires_grouping_and_metrics():
+    """HAVING 语义前提：必须带分组维度且指标非空；纯投影/标量拒绝。"""
+    base_metrics = [
+        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+    ]
+    # 无分组维度（全局标量）带 HAVING
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {"metrics": base_metrics, "having": [{"field": "gmv", "operator": "gt", "value": 0}]}
+        )
+    # 纯维度投影带 HAVING（无指标别名可过滤）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "dimensions": [{"field": "brand"}],
+                "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            }
+        )
