@@ -728,17 +728,27 @@ def compile_sql(dsl: QueryDSL) -> str:
     if comparison != Comparison.NONE:
         if has_window or dsl.fill_gaps or dsl.top_n is not None:
             raise CompileError("comparison 不能与窗口指标/补零/分组 Top-N 同时使用")
+        if not dsl.metrics:
+            raise CompileError("维度投影不支持该查询形态（comparison/top_n/fill_gaps）")
         return _compile_with_comparison(dsl)
 
     if dsl.top_n is not None:
         if has_window or dsl.fill_gaps:
             raise CompileError("分组 Top-N 不能与窗口指标/补零同时使用")
+        if not dsl.metrics:
+            raise CompileError("维度投影不支持该查询形态（comparison/top_n/fill_gaps）")
         return _compile_with_top_n(dsl)
 
     if dsl.fill_gaps:
         if has_window:
             raise CompileError("日期补零不能与窗口指标同时使用")
+        if not dsl.metrics:
+            raise CompileError("维度投影不支持该查询形态（comparison/top_n/fill_gaps）")
         return _compile_with_fill_gaps(dsl)
+
+    # 纯维度投影（十九期 M1）：metrics 为空且 dimensions 非空（契约层已保证
+    # 形态）——编译为 SELECT DISTINCT，跳过 GROUP BY；无界输出由 LIMIT 硬上限兜底
+    is_projection = not dsl.metrics
 
     # ---- 普通路径（聚合/比率/窗口指标） ----
     from_clause = _from_clause(dsl)
@@ -776,11 +786,11 @@ def compile_sql(dsl: QueryDSL) -> str:
     if tf is not None:
         where.append(_time_window_sql(tf))
 
-    sql = "SELECT " + ", ".join(selects)
+    sql = ("SELECT DISTINCT " if is_projection else "SELECT ") + ", ".join(selects)
     sql += "\n" + from_clause
     if where:
         sql += "\nWHERE " + " AND ".join(where)
-    if dim_exprs:
+    if dim_exprs and not is_projection:
         sql += "\nGROUP BY " + ", ".join(dim_exprs)
 
     if dsl.order_by and dim_exprs:
