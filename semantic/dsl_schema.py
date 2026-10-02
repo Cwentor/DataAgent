@@ -219,7 +219,85 @@ class WindowMetric(BaseModel):
         return self
 
 
-Metric = Annotated[AggregateMetric | RatioMetric | WindowMetric, Field(discriminator="kind")]
+class ExprOp(StrEnum):
+    """表达式指标函数白名单（十九期 M2，硬编码于契约而非自由字符串）。"""
+
+    ADD = "add"
+    SUB = "sub"
+    MUL = "mul"
+    DIV = "div"
+    COALESCE = "coalesce"
+    ROUND = "round"
+    ABS = "abs"
+
+
+# 各 op 的参数个数约束：(min, max)；max=None 表示不设上限
+_EXPR_OP_ARITY: dict[ExprOp, tuple[int, int | None]] = {
+    ExprOp.ADD: (2, 2),
+    ExprOp.SUB: (2, 2),
+    ExprOp.MUL: (2, 2),
+    ExprOp.DIV: (2, 2),
+    ExprOp.COALESCE: (2, None),
+    ExprOp.ROUND: (1, 2),
+    ExprOp.ABS: (1, 1),
+}
+
+
+class ExprArg(BaseModel):
+    """表达式节点（结构化 AST dict，禁止字符串表达式注入）。
+
+    三种互斥形态：
+    - op 节点：``{"op": "div", "args": [...]}``——函数白名单 + 参数个数约束；
+    - 指标引用：``{"ref": "<alias>"}``——仅可指向本 DSL 内 kind="aggregate"
+      指标的别名（QueryDSL._check_expression_refs 裁决），单层引用结构性消除环；
+    - 数值字面量：``{"lit": 10000}``。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: ExprOp | None = None
+    ref: str | None = Field(default=None, pattern=IDENTIFIER_PATTERN)
+    lit: int | float | None = None
+    args: list[ExprArg] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> ExprArg:
+        forms = sum(1 for v in (self.op, self.ref, self.lit) if v is not None)
+        if forms != 1:
+            raise ValueError("表达式节点必须恰好为 op / ref / lit 三种形态之一")
+        if self.op is None:
+            if self.args:
+                raise ValueError("ref/lit 形态不接受 args")
+            return self
+        lo, hi = _EXPR_OP_ARITY[self.op]
+        if len(self.args) < lo or (hi is not None and len(self.args) > hi):
+            raise ValueError(f"{self.op.value} 参数个数须为 {lo}" + (f"~{hi}" if hi else " 及以上"))
+        return self
+
+
+class ExpressionMetric(BaseModel):
+    """表达式指标：白名单函数对同 DSL 聚合指标的受控组合（十九期 M2）。
+
+    编译期把 ref 代入为对应聚合指标的 SQL 表达式（非输出别名引用），确定性
+    无注入；派生语义可正可负，质检负值断言与 ratio 同口径豁免。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["expression"] = "expression"
+    alias: str = Field(min_length=1, pattern=IDENTIFIER_PATTERN)
+    expr: ExprArg
+
+    @model_validator(mode="after")
+    def _check_expr_root(self) -> ExpressionMetric:
+        if self.expr.op is None:
+            raise ValueError("表达式指标的 expr 根节点必须是 op 形态")
+        return self
+
+
+Metric = Annotated[
+    AggregateMetric | RatioMetric | WindowMetric | ExpressionMetric, Field(discriminator="kind")
+]
 
 
 class Dimension(BaseModel):
@@ -330,6 +408,30 @@ class QueryDSL(BaseModel):
         description="日期连续补零：按时间维度补齐缺失日期并用 0 填充指标",
     )
     top_n: TopN | None = Field(default=None, description="分组 Top-N（如每省 Top 3 品类）")
+
+    @model_validator(mode="after")
+    def _check_expression_refs(self) -> QueryDSL:
+        """表达式指标引用裁决（十九期 M2）：ref 仅限同 DSL 聚合指标别名。
+
+        单层引用（禁指向 ratio/window/expression）结构性消除环依赖与深度
+        链式展开；未声明别名一律拒绝（宁拒不错）。
+        """
+        agg_aliases = {
+            m.alias for m in self.metrics if getattr(m, "kind", "") == "aggregate"
+        }
+        for m in self.metrics:
+            if getattr(m, "kind", "") != "expression":
+                continue
+            stack = [m.expr]
+            while stack:
+                node = stack.pop()
+                if node.ref is not None and node.ref not in agg_aliases:
+                    raise ValueError(
+                        f"表达式指标 {m.alias!r} 引用 {node.ref!r}：仅可指向本查询声明的"
+                        f"聚合指标别名 {sorted(agg_aliases)}"
+                    )
+                stack.extend(node.args)
+        return self
 
     @model_validator(mode="after")
     def _check_having(self) -> QueryDSL:

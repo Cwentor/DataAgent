@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from security.errors import SecurityError
 from security.policy import POLICIES, PRINCIPAL_ATTRS, Policy
 from semantic import catalog
@@ -42,16 +44,36 @@ def _resolve_row_filter(rf: dict, principal: str) -> dict:
 
 
 def _referenced_fields(dsl: QueryDSL) -> set[str]:
-    """收集 DSL 引用的全部逻辑字段（指标 + 维度 + 过滤）。"""
+    """收集 DSL 引用的全部逻辑字段（指标 + 维度 + 过滤）。
+
+    十九期 M2：表达式指标的字段经 ref 回溯到被引用的聚合指标——禁列不得
+    借表达式绕过列级权限（ref 已由契约层限定为同 DSL 聚合指标别名）。
+    """
     fields: set[str] = set()
+    agg_by_alias: dict[str, Any] = {}
     for m in dsl.metrics:
-        if isinstance(m, RatioMetric):
+        kind = getattr(m, "kind", "")
+        if kind == "expression":
+            continue
+        if kind == "ratio":
             fields.add(m.numerator.field)
             fields.add(m.denominator.field)
-        elif isinstance(m, WindowMetric):
+        elif kind == "window":
             fields.add(m.base.field)
         else:
             fields.add(m.field)
+        agg_by_alias[m.alias] = m
+    for m in dsl.metrics:
+        if getattr(m, "kind", "") != "expression":
+            continue
+        stack = [m.expr]
+        while stack:
+            node = stack.pop()
+            if node.ref is not None:
+                ref_metric = agg_by_alias.get(node.ref)
+                if ref_metric is not None and getattr(ref_metric, "field", None):
+                    fields.add(ref_metric.field)
+            stack.extend(getattr(node, "args", []))
     for d in dsl.dimensions:
         fields.add(d.field)
     for f in dsl.filters:

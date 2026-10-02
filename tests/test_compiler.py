@@ -589,3 +589,111 @@ def test_having_requires_grouping_and_metrics():
                 "having": [{"field": "gmv", "operator": "gt", "value": 0}],
             }
         )
+
+
+def test_expression_metric_div_compiles_and_executes(conn):
+    """十九期 M2：表达式指标——客单价 = GMV / 订单量（结构化 AST，除零 NULLIF）。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
+                {
+                    "kind": "expression",
+                    "alias": "aov",
+                    "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "orders"}]},
+                },
+            ],
+            "dimensions": [{"field": "category"}],
+        }
+    )
+    sql = compile_sql(dsl)
+    assert 'NULLIF("orders", 0)' in sql or "NULLIF" in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) > 0
+    # 数学正确性：aov = gmv / orders（有订单的品类）
+    gmv_idx, orders_idx, aov_idx = 1, 2, 3
+    for r in rows:
+        if r[orders_idx] and r[orders_idx] > 0:
+            assert abs(r[aov_idx] - r[gmv_idx] / r[orders_idx]) < 1e-6
+
+
+def test_expression_metric_nested_ops(conn):
+    """十九期 M2：嵌套 op 形态合法——round(div(ref, lit))。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                {
+                    "kind": "expression",
+                    "alias": "gmv_k",
+                    "expr": {
+                        "op": "round",
+                        "args": [
+                            {"op": "div", "args": [{"ref": "gmv"}, {"lit": 10000}]},
+                            {"lit": 2},
+                        ],
+                    },
+                },
+            ],
+            "dimensions": [],
+        }
+    )
+    sql = compile_sql(dsl)
+    assert "ROUND" in sql
+    row = conn.execute(sql).fetchone()
+    assert row is not None and row[1] is not None
+
+
+def test_expression_metric_contract_rejections():
+    """Review Focus #1：表达式契约层拒绝——op 白名单外 / ref 未声明 / ref 非聚合。"""
+    # op 白名单外（结构化 AST 不接受任意函数名）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "exec", "args": [{"ref": "gmv"}]},
+                    },
+                ]
+            }
+        )
+    # ref 未在本 DSL 声明
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "abs", "args": [{"ref": "ghost"}]},
+                    }
+                ]
+            }
+        )
+    # ref 指向非聚合指标（ratio）——单层引用结构性禁环
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
+                    {
+                        "kind": "ratio",
+                        "alias": "rate",
+                        "numerator": {
+                            "kind": "aggregate", "field": "order_amount", "agg": "sum"
+                        },
+                        "denominator": {"kind": "aggregate", "field": "order_id", "agg": "count"},
+                    },
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "abs", "args": [{"ref": "rate"}]},
+                    },
+                ]
+            }
+        )
