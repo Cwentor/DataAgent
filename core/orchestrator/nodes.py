@@ -537,6 +537,10 @@ def planner_node(state: AgentState) -> AgentState:
                 history_context=state.history_digest or None,
             ),
         )
+        if not payload:
+            # LLM 调用/解析失败标记（十九期 M1）：拒答建议按成因分流；
+            # 该标记仅在 blocked 路径存续（plan 产出时 scratchpad 被整体替换）
+            state = state.apply(scratchpad=[*state.scratchpad, "[planner] llm-call-failed"])
         if payload:
             if payload.get("clarification"):
                 clar_raw = payload["clarification"]
@@ -2636,6 +2640,8 @@ def _cannot_answer_report(state: AgentState) -> str:
     建议按 LLM 配置状态区分（2026-09 诊断修复）：旧版无条件建议"配置
     LLM 模型"——LLM 已配置但网关调用失败时误导用户重复配置；已配置
     分支如实告知"拒答由确定性兜底裁决"并给出连通性排查指引。
+    十九期 M1 进一步按成因三分流：能力边界类拒答（LLM 健康时的确定性
+    判定）与 LLM 服务状态无关，不得引导用户排查网关。
     """
     from core.orchestrator.intent import capability_catalog_lines
 
@@ -2654,15 +2660,21 @@ def _cannot_answer_report(state: AgentState) -> str:
     lines.append("**当前支持查询的能力清单：**")
     lines.extend(capability_catalog_lines())
     lines.append("")
+    llm_call_failed = "[planner] llm-call-failed" in state.scratchpad
     if _resolve_llm() is None:
         lines.append(
             "建议：请调整问法（明确指标或维度）。当前未配置 LLM 模型，"
             "语义理解由确定性兜底承担；配置 LLM 后重试可获得完整语义理解。"
         )
+    elif llm_call_failed:
+        lines.append(
+            "建议：请调整问法（明确指标或维度）。LLM 已配置但本次调用失败，"
+            "拒答由确定性兜底裁决；若持续出现，请检查 LLM 网关连通性或查看服务日志。"
+        )
     else:
         lines.append(
-            "建议：请调整问法（明确指标或维度）。LLM 已配置，本次拒答由"
-            "确定性兜底裁决；若持续出现，请检查 LLM 网关连通性或查看服务日志。"
+            "建议：请调整问法（明确指标或维度）。本次拒答源于问法超出当前可确定的"
+            "查询口径范围（能力边界），与 LLM 服务状态无关。"
         )
     return "\n".join(lines)
 
