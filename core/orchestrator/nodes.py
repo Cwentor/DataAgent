@@ -472,6 +472,67 @@ def _degraded_parse(
     return ("plan", steps, assume_notes)
 
 
+_LIFT_MAX_RETRIES = 2  # SQL 提升闸门内联自愈上限（拒升清单喂回重规划）
+
+
+def _lift_plan_sql(
+    steps: list[PlanStep],
+    llm: Any | None,
+    state: AgentState,
+) -> tuple[list[PlanStep] | None, list[str]]:
+    """SQL 步骤经提升闸门转译（十九期 M4）：拒升 ≠ 拒答。
+
+    可升步骤的 sql 转 dsl（置空 sql，sql-lifted 记入 scratchpad）；拒升清单
+    注入重规划提示词内联自愈 ≤2 次；仍拒升返回 None（调用方回落确定性兜底，
+    探索层执行留 M6）。LLM 产出的 SQL 永不出本函数直接执行。
+    """
+    from core.retrieval.profiling import profile_enum_values
+    from core.retrieval.sql_lift import lift_sql
+
+    notes: list[str] = []
+    attempts = 0
+    while True:
+        rejections: list[str] = []
+        lifted: list[PlanStep] = []
+        for step in steps:
+            if not step.sql:
+                lifted.append(step)
+                continue
+            result = lift_sql(step.sql)
+            if result.ok:
+                lifted.append(step.model_copy(update={"dsl": result.dsl, "sql": None}))
+                notes.append(f"[planner] sql-lifted: {step.id}")
+                notes.extend(f"[planner] lift-note: {n}" for n in result.notes)
+                continue
+            rejections.extend(f"[{r.clause}] {r.construct}: {r.reason}" for r in result.rejections)
+        if not rejections:
+            return lifted, notes
+        attempts += 1
+        if llm is None or attempts > _LIFT_MAX_RETRIES:
+            notes.append(f"[planner] sql-lift-failed: {'；'.join(rejections[:6])}")
+            return None, notes
+        retry_payload = _llm_json(
+            llm,
+            PLANNER_SYSTEM,
+            planner_prompt(
+                state.user_query,
+                schema_digest(profile_enum_values()),
+                error_context=(
+                    "SQL 提升闸门拒升清单（你的上一版计划含不可提升构造，必须据此改写）：\n"
+                    + "\n".join(rejections)
+                ),
+                history_context=state.history_digest or None,
+            ),
+        )
+        if not retry_payload:
+            notes.append("[planner] sql-lift-failed: 自愈重规划调用失败")
+            return None, notes
+        steps = _plan_from_llm(retry_payload)
+        if steps is None:
+            notes.append("[planner] sql-lift-failed: 重规划计划非法")
+            return None, notes
+
+
 def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
     """把 LLM 计划 JSON 契约化为 PlanStep 列表（非法即 None 走兜底）。"""
     steps_raw = payload.get("steps")
@@ -488,6 +549,7 @@ def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
             return None
         dsl = item.get("dsl") if isinstance(item.get("dsl"), dict) else None
         code = item.get("code") if isinstance(item.get("code"), str) else None
+        sql = item.get("sql") if isinstance(item.get("sql"), str) and item.get("sql") else None
         if kind == "query" and dsl is None and code is None:
             # query 步骤既无 DSL 也无兜底说明 => 交给 query 节点的启发式 DSL
             pass
@@ -503,6 +565,7 @@ def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
                 depends_on=[str(d) for d in item.get("depends_on", []) if isinstance(d, str)],
                 dsl=dsl,
                 code=code,
+                sql=sql,
             )
         )
     if len({s.id for s in steps}) != len(steps):
@@ -524,6 +587,7 @@ def planner_node(state: AgentState) -> AgentState:
     llm = _resolve_llm()
     steps: list[PlanStep] | None = None
     from_llm = False
+    lift_notes: list[str] = []  # SQL 提升闸门记录（M4）：scratchpad 注入
     # 枚举直答预路由（十九期 M1）：ENUMERATION 为词表硬判定的确定性意图，
     # 而现行 LLM 规划契约（metrics 必填）无法表达维度投影——先走启发式
     # 直答；构造失败（如"列出有退款的品牌"含过滤线索）才放行 LLM 规划
@@ -582,6 +646,9 @@ def planner_node(state: AgentState) -> AgentState:
                     )
             steps = _plan_from_llm(payload)
             from_llm = steps is not None
+            if steps is not None and any(s.sql for s in steps):
+                steps, lift_notes = _lift_plan_sql(steps, llm, state)
+                from_llm = steps is not None
             # 口径假设（十九期 M3 分级透明作答）：宽容消费（缺失/非法不阻塞）；
             # 报告头部呈现由 synthesize 承担
             raw_assumptions = payload.get("assumptions")
@@ -670,7 +737,7 @@ def planner_node(state: AgentState) -> AgentState:
     return state.apply(
         plan_steps=steps,
         phase="query",
-        scratchpad=[f"[planner] {planner_used}"],
+        scratchpad=[f"[planner] {planner_used}", *lift_notes],
         answered_by=planner_used,
         # 新计划 = 新的执行授权需求：高危确认锚复位（重规划后的 analyze 步骤
         # 需重新征求 L3 用户批准，严禁复用旧计划的授权放行新代码）
