@@ -21,6 +21,7 @@ lock_configuration 阻止后续解锁——fail-closed，设置失败抛 Securit
 from __future__ import annotations
 
 from collections import deque
+from itertools import pairwise
 from typing import Any
 
 from duckdb import DuckDBPyConnection
@@ -89,9 +90,9 @@ def _join_path(table: str, target: str) -> list[str] | None:
             if neighbor in visited:
                 continue
             if neighbor == target:
-                return path + [neighbor]
+                return [*path, neighbor]
             visited.add(neighbor)
-            queue.append((neighbor, path + [neighbor]))
+            queue.append((neighbor, [*path, neighbor]))
     return None
 
 
@@ -112,7 +113,7 @@ def _render_view_body(table: str, predicates: list[dict[str, Any]]) -> str:
                 raise SecurityError(
                     f"表 {table!r} 的行过滤字段 {field!r} 无受控连接路径（策略配置错误）"
                 )
-            for a, b in zip(path, path[1:]):
+            for a, b in pairwise(path):
                 if b in joined:
                     continue
                 local_col, remote_col = _JOIN_EDGES[a][b]
@@ -124,9 +125,7 @@ def _render_view_body(table: str, predicates: list[dict[str, Any]]) -> str:
             target_alias = catalog.ALIASES[meta.table]
         else:
             target_alias = catalog.ALIASES[table]
-        where_parts.append(
-            _render_predicate(field, pred["operator"], pred["value"], target_alias)
-        )
+        where_parts.append(_render_predicate(field, pred["operator"], pred["value"], target_alias))
     where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
     return from_sql + where_sql
 
@@ -185,9 +184,7 @@ def build_secure_views(principal: str | None) -> dict[str, str]:
                         and name not in policy.forbidden_columns
                         and name not in seen
                     ):
-                        projections.append(
-                            f'{catalog.ALIASES[dim]}."{meta.column}" AS "{name}"'
-                        )
+                        projections.append(f'{catalog.ALIASES[dim]}."{meta.column}" AS "{name}"')
                         seen.add(name)
         where_parts: list[str] = []
         if is_fact or table in catalog.FACT_JOIN_RULES:
@@ -201,7 +198,7 @@ def build_secure_views(principal: str | None) -> dict[str, str]:
                         raise SecurityError(
                             f"表 {table!r} 的行过滤字段 {rf['field']!r} 无受控连接路径"
                         )
-                    for a, b in zip(path, path[1:]):
+                    for a, b in pairwise(path):
                         if b in joined:
                             continue
                         local_col, remote_col = _JOIN_EDGES[a][b]
