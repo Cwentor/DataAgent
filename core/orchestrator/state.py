@@ -65,6 +65,9 @@ class PlanStep(BaseModel):
     dsl: dict[str, Any] | None = None
     # 分析步骤的代码草稿 / 技能调用（analyze 类型时给出）
     code: str | None = None
+    # SQL 双产出（十九期 M4）：LLM 在分析形态超出 DSL 契约时给出的只读 SELECT
+    # 表面语法——planner_node 经提升闸门转译为 dsl 后置空，绝不持久化/直执行
+    sql: str | None = None
     status: Literal["pending", "running", "done", "failed"] = "pending"
     # B 线（M3）fan-out 任务卡（规格 §6.3）：planner 产出时携带（三模式共用通道，
     # 由任务卡 mode 字段区分 attribution/hypothesis/comparison）；缺省 None=普通步骤

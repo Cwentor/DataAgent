@@ -1792,3 +1792,130 @@ def test_ambiguity_routing_state_machine(monkeypatch):
     monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload_assume)
     third = planner_node(AgentState(user_query="华南的表现怎么样"))
     assert third.phase == "query" and third.assumptions
+
+
+def test_planner_sql_step_lifted_to_dsl(monkeypatch):
+    """M4-T3：LLM 步骤带可升 SQL → 提升为 DSL（sql 置空，scratchpad 记录）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "sql": "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
+                "WHERE f.pay_status = 'SUCCESS'",
+            },
+        ],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.phase == "query"
+    assert state.plan_steps[0].dsl is not None
+    assert state.plan_steps[0].dsl["metrics"][0]["field"] == "order_amount"
+    assert state.plan_steps[0].sql is None, "提升后 sql 必须置空（永不持久化）"
+    assert any("sql-lifted" in s for s in state.scratchpad)
+
+
+def test_planner_sql_lift_retry_with_rejection_list(monkeypatch):
+    """M4-T3：拒升清单注入重规划提示词，第二次喂修正 SQL 后成功。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    bad = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "sql": "SELECT CASE WHEN f.pay_status = 'SUCCESS' THEN f.order_amount ELSE 0 END AS gmv "
+                "FROM fact_orders f",
+            },
+        ],
+    }
+    good = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "sql": "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
+                "WHERE f.pay_status = 'SUCCESS'",
+            },
+        ],
+    }
+    calls: list[str] = []
+
+    def fake_llm(system, user):
+        calls.append(user)
+        return bad if len(calls) == 1 else good
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda _llm, _sys, user: fake_llm(_sys, user))
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert len(calls) == 2
+    assert "拒升清单" in calls[1] and "CASE" in calls[1], "拒升清单必须喂回自愈提示词"
+    assert state.plan_steps[0].dsl is not None
+
+
+def test_planner_sql_lift_exhausted_falls_back_to_heuristic(monkeypatch):
+    """M4-T3 Review Focus #6：两次自愈仍拒升 → 回落确定性兜底（不无限循环）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    bad = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "sql": "SELECT CASE WHEN f.pay_status = 'SUCCESS' THEN f.order_amount ELSE 0 END AS gmv "
+                "FROM fact_orders f",
+            },
+        ],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda _llm, _sys, user: bad)
+    state = planner_node(AgentState(user_query="2024年5月GMV是多少", autonomy_level="L4"))
+    assert state.phase == "query"
+    assert state.answered_by == "heuristic", "自愈耗尽必须回落确定性兜底"
+    assert all(s.dsl is not None for s in state.plan_steps if s.kind == "query")
+    assert all(s.sql is None for s in state.plan_steps), "未转译的 sql 严禁带出 planner"
+
+
+def test_planner_dsl_takes_precedence_over_sql(monkeypatch):
+    """M4-T3：dsl 与 sql 同给时 dsl 优先（sql 字段被忽略并置空）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                },
+                "sql": "SELECT COUNT(*) AS x FROM fact_orders f",
+            },
+        ],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.plan_steps[0].dsl is not None
+    assert state.plan_steps[0].sql is None
+    assert not any("sql-lifted" in s for s in state.scratchpad), "dsl 优先时不走提升闸门"

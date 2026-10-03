@@ -81,6 +81,17 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
   或 {"range_type": "relative", "relative": {"unit": "day|week|month|quarter", "value": N, "offset": 0}}
 - 严禁出现任何 SQL；字段必须来自语义目录，禁止臆造
 
+# SQL 双产出（十九期 M4：仅当 DSL 确实表达不了时才允许）
+- 缺省必须产 dsl 步骤；仅当分析形态确定超出 DSL 契约（如 DSL 无法表达的复杂
+  构造）且能用一条只读 SELECT 表达时，query 步骤可改用 "sql": "SELECT ..."
+  替代 dsl 字段；
+- sql 会经提升闸门转译为 DSL 契约并由确定性编译器重新生成执行（你产出的 SQL
+  永不直接执行）：必须是受限可提升形态——FROM fact_orders 主表 + 语义目录
+  受控连接、聚合指标或 DISTINCT 纯维度投影、AND 连接的白名单比较谓词、
+  HAVING/ORDER BY/LIMIT；
+- 以下构造会被闸门拒升（拒绝清单将喂回给你改写）：CASE/OR/子查询/窗口函数/
+  COUNT(*)/无别名投影/UNION/多语句/写操作——能改写成 DSL 就改写为 dsl。
+
 # 规划规范（Few-Shot：指标分解树式诊断）
 用户问"为什么 GMV 下降"这类根因问题时，标准分解路径（**先因子后维度**，分层强制）：
 1. s1(query): 取两期（基线/当前）GMV 总量对比（同一 DSL，两窗口各一次或 between 两期过滤）；
