@@ -331,10 +331,7 @@ def test_static_check_blocks_duckdb_connect_bypass(code):
 
 def test_static_check_allows_duckdb_read_parquet():
     """合法用途不受影响：read_parquet 只读消费 ParquetRef 导出。"""
-    code = (
-        "import duckdb\n"
-        "con = duckdb.connect()  # 内存连接仅用于 read_parquet 消费导出\n"
-    )
+    code = "import duckdb\n" "con = duckdb.connect()  # 内存连接仅用于 read_parquet 消费导出\n"
     report = static_check(code)
     assert not report.ok, "connect 调用（含内存库）一律封死，防止以内存连接为跳板"
 

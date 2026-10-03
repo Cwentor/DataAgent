@@ -12,13 +12,13 @@ import pytest
 
 from compiler.sql_compiler import compile_sql
 from security.guard import apply_policy
-from security.views import build_secure_views, install_secure_views
+from security.views import install_secure_views
 from semantic.catalog import COLUMNS
 
 
 def _make_conn():
     """可写内存连接 + 确定性 mock 数据（与 conftest.conn 同源）。"""
-    from mock.init_duckdb import build_tables  # noqa: PLC0415  # 测试内导入避免循环
+    from mock.init_duckdb import build_tables  # 测试内导入避免循环
 
     c = duckdb.connect(":memory:")
     build_tables(c)
@@ -54,7 +54,9 @@ def test_admin_views_full_columns_no_row_filter(conn):
     cols = {row[0] for row in conn.execute("DESCRIBE sec_fact_orders").fetchall()}
     expected = {m.column for m in COLUMNS.values() if m.table == "fact_orders"}
     assert expected <= cols
-    provinces = {r[0] for r in conn.execute("SELECT DISTINCT province FROM sec_fact_orders").fetchall()}
+    provinces = {
+        r[0] for r in conn.execute("SELECT DISTINCT province FROM sec_fact_orders").fetchall()
+    }
     assert len(provinces) > 1
 
 
