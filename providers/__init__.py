@@ -15,7 +15,6 @@ from typing import Any
 from providers.adapters import (
     AnthropicAdapter,
     BaseAdapter,
-    GeminiAdapter,
     OpenAIChatAdapter,
     OpenAIResponsesAdapter,
     build_adapter,
@@ -119,7 +118,6 @@ __all__ = [
     "AuthenticationError",
     "BaseAdapter",
     "DispatchingAdapter",
-    "GeminiAdapter",
     "ModelItem",
     "OpenAIChatAdapter",
     "OpenAIResponsesAdapter",

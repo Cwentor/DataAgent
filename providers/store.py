@@ -13,7 +13,7 @@
   符合协议白名单，见 web 层校验）；``is_preset=True`` 的条目仅作为历史
   预置的标记存在（不可删除）；
 - 加载时自动清理全部历史预置条目（``is_preset=True``，含 OpenAI /
-  Anthropic / 智谱 / Gemini），自定义条目保留；清理前把原文件备份为
+  Anthropic / 智谱等），自定义条目保留；清理前把原文件备份为
   ``providers.json.bak``；
 - 历史明文文件在加载时自动迁移为加密格式（一次性写回）。
 """
@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
@@ -39,7 +40,7 @@ from providers.models import (
 PRESET_PROVIDERS: list[dict[str, Any]] = []
 
 # 预置白名单：系统零预置（空集），加载时清理全部历史预置条目
-# （is_preset=True，含 OpenAI / Anthropic / 智谱 / Gemini）；自定义供应商
+# （is_preset=True，含 OpenAI / Anthropic / 智谱等）；自定义供应商
 # （is_preset=False）不受影响，按协议白名单校验后自由添加。
 SUPPORTED_PRESET_IDS: frozenset[str] = frozenset(p["id"] for p in PRESET_PROVIDERS)
 
@@ -102,7 +103,7 @@ class ProviderStore:
                 pruned = bool(legacy_presets)
                 if pruned:
                     # 零预置迁移：清掉全部历史预置条目（OpenAI / Anthropic /
-                    # 智谱 / Gemini），自定义条目保留；原文件先备份，避免
+                    # 智谱等），自定义条目保留；原文件先备份，避免
                     # 密文配置不可恢复丢失。
                     try:
                         backup = self.path.with_suffix(self.path.suffix + ".bak")
@@ -110,9 +111,19 @@ class ProviderStore:
                     except OSError:
                         pass
                     items = [item for item in items if item not in legacy_presets]
-                self._providers = {
-                    item["id"]: ProviderConfig.model_validate(item) for item in items
-                }
+                loaded: dict[str, ProviderConfig] = {}
+                for item in items:
+                    try:
+                        cfg = ProviderConfig.model_validate(item)
+                    except ValidationError as exc:
+                        # 加载防毒：单枚脏条目（未知协议/契约非法）跳过并告警，
+                        # 不拒载整个文件（拒载会导致全部供应商不可用）
+                        logging.getLogger(__name__).warning(
+                            "跳过非法供应商条目 id=%s: %s", item.get("id"), exc
+                        )
+                        continue
+                    loaded[cfg.id] = cfg
+                self._providers = loaded
                 migrated = self._decrypt_all()
                 if pruned or migrated:
                     # 清理 / 明文迁移结果立即写回，避免下次加载重复迁移

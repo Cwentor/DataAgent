@@ -219,7 +219,85 @@ class WindowMetric(BaseModel):
         return self
 
 
-Metric = Annotated[AggregateMetric | RatioMetric | WindowMetric, Field(discriminator="kind")]
+class ExprOp(StrEnum):
+    """表达式指标函数白名单（十九期 M2，硬编码于契约而非自由字符串）。"""
+
+    ADD = "add"
+    SUB = "sub"
+    MUL = "mul"
+    DIV = "div"
+    COALESCE = "coalesce"
+    ROUND = "round"
+    ABS = "abs"
+
+
+# 各 op 的参数个数约束：(min, max)；max=None 表示不设上限
+_EXPR_OP_ARITY: dict[ExprOp, tuple[int, int | None]] = {
+    ExprOp.ADD: (2, 2),
+    ExprOp.SUB: (2, 2),
+    ExprOp.MUL: (2, 2),
+    ExprOp.DIV: (2, 2),
+    ExprOp.COALESCE: (2, None),
+    ExprOp.ROUND: (1, 2),
+    ExprOp.ABS: (1, 1),
+}
+
+
+class ExprArg(BaseModel):
+    """表达式节点（结构化 AST dict，禁止字符串表达式注入）。
+
+    三种互斥形态：
+    - op 节点：``{"op": "div", "args": [...]}``——函数白名单 + 参数个数约束；
+    - 指标引用：``{"ref": "<alias>"}``——仅可指向本 DSL 内 kind="aggregate"
+      指标的别名（QueryDSL._check_expression_refs 裁决），单层引用结构性消除环；
+    - 数值字面量：``{"lit": 10000}``。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: ExprOp | None = None
+    ref: str | None = Field(default=None, pattern=IDENTIFIER_PATTERN)
+    lit: int | float | None = None
+    args: list[ExprArg] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> ExprArg:
+        forms = sum(1 for v in (self.op, self.ref, self.lit) if v is not None)
+        if forms != 1:
+            raise ValueError("表达式节点必须恰好为 op / ref / lit 三种形态之一")
+        if self.op is None:
+            if self.args:
+                raise ValueError("ref/lit 形态不接受 args")
+            return self
+        lo, hi = _EXPR_OP_ARITY[self.op]
+        if len(self.args) < lo or (hi is not None and len(self.args) > hi):
+            raise ValueError(f"{self.op.value} 参数个数须为 {lo}" + (f"~{hi}" if hi else " 及以上"))
+        return self
+
+
+class ExpressionMetric(BaseModel):
+    """表达式指标：白名单函数对同 DSL 聚合指标的受控组合（十九期 M2）。
+
+    编译期把 ref 代入为对应聚合指标的 SQL 表达式（非输出别名引用），确定性
+    无注入；派生语义可正可负，质检负值断言与 ratio 同口径豁免。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["expression"] = "expression"
+    alias: str = Field(min_length=1, pattern=IDENTIFIER_PATTERN)
+    expr: ExprArg
+
+    @model_validator(mode="after")
+    def _check_expr_root(self) -> ExpressionMetric:
+        if self.expr.op is None:
+            raise ValueError("表达式指标的 expr 根节点必须是 op 形态")
+        return self
+
+
+Metric = Annotated[
+    AggregateMetric | RatioMetric | WindowMetric | ExpressionMetric, Field(discriminator="kind")
+]
 
 
 class Dimension(BaseModel):
@@ -315,17 +393,95 @@ class QueryDSL(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    metrics: list[Metric] = Field(min_length=1)
+    metrics: list[Metric] = Field(default_factory=list)
     dimensions: list[Dimension] = Field(default_factory=list)
     time_filter: TimeFilter | None = None
     filters: list[Filter] = Field(default_factory=list)
     order_by: list[OrderBy] = Field(default_factory=list)
+    having: list[Filter] = Field(
+        default_factory=list,
+        description="聚合后过滤（HAVING）：field 仅限本 DSL 指标别名，需带分组维度",
+    )
     limit: int = Field(default=100, ge=1, le=10000)
     fill_gaps: bool = Field(
         default=False,
         description="日期连续补零：按时间维度补齐缺失日期并用 0 填充指标",
     )
     top_n: TopN | None = Field(default=None, description="分组 Top-N（如每省 Top 3 品类）")
+
+    @model_validator(mode="after")
+    def _check_expression_refs(self) -> QueryDSL:
+        """表达式指标引用裁决（十九期 M2）：ref 仅限同 DSL 聚合指标别名。
+
+        单层引用（禁指向 ratio/window/expression）结构性消除环依赖与深度
+        链式展开；未声明别名一律拒绝（宁拒不错）。
+        """
+        agg_aliases = {m.alias for m in self.metrics if getattr(m, "kind", "") == "aggregate"}
+        for m in self.metrics:
+            if getattr(m, "kind", "") != "expression":
+                continue
+            stack = [m.expr]
+            while stack:
+                node = stack.pop()
+                if node.ref is not None and node.ref not in agg_aliases:
+                    raise ValueError(
+                        f"表达式指标 {m.alias!r} 引用 {node.ref!r}：仅可指向本查询声明的"
+                        f"聚合指标别名 {sorted(agg_aliases)}"
+                    )
+                stack.extend(node.args)
+        return self
+
+    @model_validator(mode="after")
+    def _check_having(self) -> QueryDSL:
+        """HAVING 形态约束（十九期 M2）。
+
+        HAVING 是聚合后过滤：字段仅限本 DSL 指标别名（非物理列名/维度名）；
+        语义上要求分组维度非空（全局标量单行无聚合后过滤场景）；与窗口指标
+        /分组 Top-N/日期补零/同比环比互斥（这些形态的编译路径未接入 HAVING，
+        契约层显式拒绝而非静默忽略）。
+        """
+        if not self.having:
+            return self
+        if not self.metrics:
+            raise ValueError("纯维度投影不支持 HAVING（无指标别名可过滤）")
+        alias_set = {m.alias for m in self.metrics}
+        for h in self.having:
+            if h.field not in alias_set:
+                raise ValueError(
+                    f"HAVING 字段 {h.field!r} 不是本查询声明的指标别名 {sorted(alias_set)}"
+                )
+        if not self.dimensions:
+            raise ValueError("HAVING 需要分组维度（全局标量查询不支持聚合后过滤）")
+        if any(isinstance(m, WindowMetric) for m in self.metrics):
+            raise ValueError("HAVING 暂不支持窗口指标形态")
+        if self.top_n is not None:
+            raise ValueError("HAVING 不能与分组 Top-N 同时使用")
+        if self.fill_gaps:
+            raise ValueError("HAVING 不能与日期补零同时使用")
+        if self.time_filter is not None and self.time_filter.comparison != Comparison.NONE:
+            raise ValueError("HAVING 不能与同比/环比同时使用")
+        return self
+
+    @model_validator(mode="after")
+    def _check_projection_shape(self) -> QueryDSL:
+        """纯维度投影（metrics 为空）的形态约束（十九期 M1）。
+
+        投影仅支持"全量 distinct 取值清单"形态：dimensions 必须非空
+        （指标与维度同时为空无查询目标）；分组 Top-N / 日期补零依赖指标
+        排序或填充，同比/环比按双窗口指标对比编译——投影均无语义，契约层
+        直接拒绝，编译器与执行层不再重复裁决。
+        """
+        if self.metrics:
+            return self
+        if not self.dimensions:
+            raise ValueError("查询必须包含至少一个指标或维度（metrics 与 dimensions 不能同时为空）")
+        if self.top_n is not None:
+            raise ValueError("维度投影不支持分组 Top-N（无指标可排序）")
+        if self.fill_gaps:
+            raise ValueError("维度投影不支持日期补零（无指标可填充）")
+        if self.time_filter is not None and self.time_filter.comparison != Comparison.NONE:
+            raise ValueError("维度投影不支持同比/环比对比（无指标可对比）")
+        return self
 
     @model_validator(mode="after")
     def _check_scalar_ordering(self) -> QueryDSL:

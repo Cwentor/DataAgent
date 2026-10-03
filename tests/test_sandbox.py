@@ -307,3 +307,35 @@ def test_run_code_str_title_still_ok(tmp_path):
     assert result.ok, result.error
     assert result.summary["title"] == "驱动因子分解"
     assert result.summary["metrics"]["gmv"] == 350.0
+
+
+# --------------------------------------------------------------------------- #
+# 沙箱 duckdb.connect 旁路封堵（十九期 M5，spec §6.1）：取数权只在执行层
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import duckdb\nduckdb.connect('analytics_sandbox.duckdb')",
+        "import duckdb as d\nd.connect('x.duckdb')",
+        "from duckdb import connect\nconnect('x.duckdb')",
+        "import duckdb\nduckdb.database('x.duckdb')",
+    ],
+)
+def test_static_check_blocks_duckdb_connect_bypass(code):
+    """duckdb 直连数仓的旁路必须被静态校验拒绝（AST 守卫拦不住 C 扩展的
+    connect 调用，必须在代码层封死）。"""
+    report = static_check(code)
+    assert not report.ok, report.summary()
+    assert any("connect" in v["detail"] or "database" in v["detail"] for v in report.violations)
+
+
+def test_static_check_allows_duckdb_read_parquet():
+    """合法用途不受影响：read_parquet 只读消费 ParquetRef 导出。"""
+    code = "import duckdb\n" "con = duckdb.connect()  # 内存连接仅用于 read_parquet 消费导出\n"
+    report = static_check(code)
+    assert not report.ok, "connect 调用（含内存库）一律封死，防止以内存连接为跳板"
+
+
+def test_static_check_allows_pandas_read_parquet():
+    report = static_check("import pandas as pd\ndf = pd.read_parquet('inputs/s1.parquet')")
+    assert report.ok, report.summary()

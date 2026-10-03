@@ -1105,5 +1105,89 @@
         "sql": "SELECT p.category AS \"category\", SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_product p ON p.product_id = f.product_id\nWHERE f.order_time >= TIMESTAMP '2024-05-01 00:00:00' AND f.order_time < TIMESTAMP '2024-06-01 00:00:00'\nGROUP BY p.category\nLIMIT 100"
       }
     ]
+  },
+  {
+    "id": "Q26",
+    "question": "按品类统计GMV，只要GMV超过1000的品类",
+    "scenario": "HAVING 聚合后过滤（十九期 M2）",
+    "dsl": {
+      "metrics": [
+        {
+          "kind": "aggregate",
+          "field": "order_amount",
+          "agg": "sum",
+          "alias": "gmv"
+        }
+      ],
+      "dimensions": [
+        {
+          "field": "category"
+        }
+      ],
+      "having": [
+        {
+          "field": "gmv",
+          "operator": "gt",
+          "value": 1000
+        }
+      ],
+      "order_by": [
+        {
+          "field": "gmv",
+          "direction": "desc"
+        }
+      ],
+      "limit": 100
+    },
+    "sql": "SELECT p.category AS \"category\", SUM(f.order_amount) AS \"gmv\"\nFROM fact_orders f\nJOIN dim_product p ON p.product_id = f.product_id\nGROUP BY p.category\nHAVING \"gmv\" > 1000.0\nORDER BY \"gmv\" DESC\nLIMIT 100"
+  },
+  {
+    "id": "Q27",
+    "question": "各品类的客单价是多少",
+    "scenario": "表达式指标：客单价 = GMV/订单量（十九期 M2）",
+    "dsl": {
+      "metrics": [
+        {
+          "kind": "aggregate",
+          "field": "order_amount",
+          "agg": "sum",
+          "alias": "gmv"
+        },
+        {
+          "kind": "aggregate",
+          "field": "order_id",
+          "agg": "count",
+          "alias": "orders"
+        },
+        {
+          "kind": "expression",
+          "alias": "aov",
+          "expr": {
+            "op": "div",
+            "args": [
+              {
+                "ref": "gmv"
+              },
+              {
+                "ref": "orders"
+              }
+            ]
+          }
+        }
+      ],
+      "dimensions": [
+        {
+          "field": "category"
+        }
+      ],
+      "limit": 100,
+      "order_by": [
+        {
+          "field": "gmv",
+          "direction": "desc"
+        }
+      ]
+    },
+    "sql": "SELECT p.category AS \"category\", SUM(f.order_amount) AS \"gmv\", COUNT(f.order_id) AS \"orders\", (SUM(f.order_amount) / NULLIF(COUNT(f.order_id), 0)) AS \"aov\"\nFROM fact_orders f\nJOIN dim_product p ON p.product_id = f.product_id\nGROUP BY p.category\nORDER BY \"gmv\" DESC\nLIMIT 100"
   }
 ]

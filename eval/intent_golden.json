@@ -32,5 +32,23 @@
   {
     "question": "帮我看看最近情况",
     "expect": "refusal"
+  },
+  {
+    "question": "把全部品牌名列举给我",
+    "expect": "list_answer",
+    "expected_contains": "TCL"
+  },
+  {
+    "question": "有哪些品类",
+    "expect": "list_answer",
+    "expected_contains": "数码"
+  },
+  {
+    "question": "列出所有省份和品牌",
+    "expect": "list_answer"
+  },
+  {
+    "question": "华南的表现怎么样",
+    "expect": "refusal"
   }
 ]

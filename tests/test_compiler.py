@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from compiler.sql_compiler import CompileError, compile_sql
 from semantic.dsl_schema import QueryDSL
@@ -462,3 +463,292 @@ def test_comparison_yoy_time_dimension_pairing():
     assert "date_add(date_trunc('day', f.order_time), INTERVAL 1 YEAR) AS \"order_time\"" in sql
     assert 'LEFT JOIN prev USING ("order_time")' in sql
     assert 'AS "gmv_yoy"' in sql
+
+
+def test_projection_dsl_valid_and_invalid_shapes():
+    """十九期 M1：metrics 可空的纯维度投影契约（形态越界契约层即拒）。"""
+    # 合法：纯维度投影（无指标）
+    dsl = QueryDSL.model_validate({"dimensions": [{"field": "brand"}]})
+    assert dsl.metrics == []
+
+    # 非法：指标与维度同时为空（无查询目标）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate({})
+
+    # 非法：投影 + 分组 Top-N（无指标可排序）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "dimensions": [{"field": "province"}],
+                "top_n": {
+                    "n": 3,
+                    "partition_by": ["province"],
+                    "order_by": [{"field": "province", "direction": "asc"}],
+                },
+            }
+        )
+
+    # 非法：投影 + 日期补零（无指标可填充）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate({"dimensions": [{"field": "brand"}], "fill_gaps": True})
+
+    # 非法：投影 + 同比/环比（无指标可对比）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "dimensions": [{"field": "brand"}],
+                "time_filter": {
+                    "range_type": "absolute",
+                    "absolute": {"start": "2024-05-01", "end": "2024-06-01"},
+                    "comparison": "mom",
+                },
+            }
+        )
+
+
+def test_projection_compiles_distinct_and_orders(conn):
+    """十九期 M1：纯维度投影编译 SELECT DISTINCT（无 GROUP BY），执行返回真实取值。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "dimensions": [{"field": "brand"}],
+            "order_by": [{"field": "brand", "direction": "asc"}],
+            "limit": 100,
+        }
+    )
+    sql = compile_sql(dsl)
+    assert "SELECT DISTINCT" in sql
+    assert "GROUP BY" not in sql
+    assert "ORDER BY" in sql
+    assert "LIMIT 100" in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) > 0
+    # dim_product 经 fact_orders JOIN 语义：返回的是订单事实中出现过的品牌
+    # （mock 数仓订单仅覆盖部分 DIMENSION_MEMBERS 品牌，小米必在）
+    values = {r[0] for r in rows}
+    assert "小米" in values
+
+
+def test_projection_respects_limit_cap(conn):
+    """十九期 M1 Review Focus #5：投影无界输出由 LIMIT 硬上限兜底。"""
+    dsl = QueryDSL.model_validate({"dimensions": [{"field": "brand"}], "limit": 3})
+    sql = compile_sql(dsl)
+    assert "LIMIT 3" in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) <= 3
+
+
+def test_having_filters_after_group_by(conn):
+    """十九期 M2：HAVING 聚合后过滤——按品类分组后过滤 GMV。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": [{"field": "category"}],
+            "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            "order_by": [{"field": "gmv", "direction": "desc"}],
+        }
+    )
+    sql = compile_sql(dsl)
+    assert "HAVING" in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) > 0
+    # 全部行的 gmv 均 > 0
+    assert all(r[1] > 0 for r in rows)
+
+
+def test_having_field_must_be_metric_alias():
+    """HAVING 字段仅限本 DSL 指标别名（非列名/维度名）。"""
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                ],
+                "dimensions": [{"field": "category"}],
+                "having": [{"field": "category", "operator": "gt", "value": 0}],
+            }
+        )
+
+
+def test_having_requires_grouping_and_metrics():
+    """HAVING 语义前提：必须带分组维度且指标非空；纯投影/标量拒绝。"""
+    base_metrics = [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]
+    # 无分组维度（全局标量）带 HAVING
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {"metrics": base_metrics, "having": [{"field": "gmv", "operator": "gt", "value": 0}]}
+        )
+    # 纯维度投影带 HAVING（无指标别名可过滤）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "dimensions": [{"field": "brand"}],
+                "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            }
+        )
+
+
+def test_expression_metric_div_compiles_and_executes(conn):
+    """十九期 M2：表达式指标——客单价 = GMV / 订单量（结构化 AST，除零 NULLIF）。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
+                {
+                    "kind": "expression",
+                    "alias": "aov",
+                    "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "orders"}]},
+                },
+            ],
+            "dimensions": [{"field": "category"}],
+        }
+    )
+    sql = compile_sql(dsl)
+    assert 'NULLIF("orders", 0)' in sql or "NULLIF" in sql
+    rows = conn.execute(sql).fetchall()
+    assert len(rows) > 0
+    # 数学正确性：aov = gmv / orders（有订单的品类）
+    gmv_idx, orders_idx, aov_idx = 1, 2, 3
+    for r in rows:
+        if r[orders_idx] and r[orders_idx] > 0:
+            assert abs(r[aov_idx] - r[gmv_idx] / r[orders_idx]) < 1e-6
+
+
+def test_expression_metric_nested_ops(conn):
+    """十九期 M2：嵌套 op 形态合法——round(div(ref, lit))。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                {
+                    "kind": "expression",
+                    "alias": "gmv_k",
+                    "expr": {
+                        "op": "round",
+                        "args": [
+                            {"op": "div", "args": [{"ref": "gmv"}, {"lit": 10000}]},
+                            {"lit": 2},
+                        ],
+                    },
+                },
+            ],
+            "dimensions": [],
+        }
+    )
+    sql = compile_sql(dsl)
+    assert "ROUND" in sql
+    row = conn.execute(sql).fetchone()
+    assert row is not None and row[1] is not None
+
+
+def test_expression_metric_contract_rejections():
+    """Review Focus #1：表达式契约层拒绝——op 白名单外 / ref 未声明 / ref 非聚合。"""
+    # op 白名单外（结构化 AST 不接受任意函数名）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "exec", "args": [{"ref": "gmv"}]},
+                    },
+                ]
+            }
+        )
+    # ref 未在本 DSL 声明
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "abs", "args": [{"ref": "ghost"}]},
+                    }
+                ]
+            }
+        )
+    # ref 指向非聚合指标（ratio）——单层引用结构性禁环
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
+                    {
+                        "kind": "ratio",
+                        "alias": "rate",
+                        "numerator": {"kind": "aggregate", "field": "order_amount", "agg": "sum"},
+                        "denominator": {"kind": "aggregate", "field": "order_id", "agg": "count"},
+                    },
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "abs", "args": [{"ref": "rate"}]},
+                    },
+                ]
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "payload, match",
+    [
+        # HAVING × 纯投影（无指标别名可过滤）
+        (
+            {
+                "dimensions": [{"field": "brand"}],
+                "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            },
+            "纯维度投影",
+        ),
+        # HAVING × 无分组维度（全局标量）
+        (
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                ],
+                "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            },
+            "分组维度",
+        ),
+        # HAVING × 窗口指标
+        (
+            {
+                "metrics": [
+                    {
+                        "kind": "window",
+                        "base": {"field": "order_amount", "agg": "sum", "alias": "gmv_base"},
+                        "func": "cumsum",
+                        "alias": "gmv_cum",
+                    },
+                    {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
+                ],
+                "dimensions": [{"field": "order_time"}],
+                "having": [{"field": "orders", "operator": "gt", "value": 0}],
+            },
+            "窗口",
+        ),
+        # 表达式 ref 未声明别名
+        (
+            {
+                "metrics": [
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "abs", "args": [{"ref": "ghost"}]},
+                    }
+                ]
+            },
+            "聚合指标别名",
+        ),
+    ],
+)
+def test_m2_mutual_exclusion_matrix(payload, match):
+    """十九期 M2 验收：互斥组合在契约层显式拒绝（CompileError/ValidationError 矩阵）。"""
+    with pytest.raises(ValidationError, match=match):
+        QueryDSL.model_validate(payload)

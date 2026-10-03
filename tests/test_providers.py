@@ -5,8 +5,8 @@
   对外视图不含 api_key（仅 has_api_key）、历史脱敏串不覆盖明文、预置拒绝删除；
 - extract_json_object：裸 JSON / Markdown 围栏 / 前后杂文本的安全清洗；
 - 适配器：openai_chat 透传 response_format + 降级重试、openai_responses 的
-  input/text.format 规范、anthropic 的 system 顶级字段与 x-api-key 鉴权头、
-  gemini 的 responseMimeType；401 -> AuthenticationError、429 -> RateLimitError；
+  input/text.format 规范、anthropic 的 system 顶级字段与 x-api-key 鉴权头；
+  401 -> AuthenticationError、429 -> RateLimitError；
 - ProviderFactory：显式分派 / 无 Key 供应商不参与默认分派 / 失效缓存；
 - 请求级模型切换：ContextVar 绑定 -> DispatchingAdapter 转发目标供应商；
 - HTTP API：未认证 401、CRUD 全流程（响应不含 api_key）、reveal 查看密钥、
@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import json
 import threading
+from typing import ClassVar
 
 import pytest
 
 from providers.adapters import (
+    _SSE_MAX_LINE_BYTES,
     AnthropicAdapter,
-    GeminiAdapter,
     OpenAIChatAdapter,
     OpenAIResponsesAdapter,
+    _consume_stream,
+    _http_post_sse,
+    _iter_sse_payloads,
     extract_json_object,
 )
 from providers.context import (
@@ -34,9 +38,12 @@ from providers.context import (
 )
 from providers.errors import (
     AuthenticationError,
+    ProtocolError,
     ProviderError,
     ProviderNotConfiguredError,
+    ProviderTimeoutError,
     RateLimitError,
+    StreamHandshakeRejected,
     error_message,
 )
 from providers.factory import ProviderFactory
@@ -397,30 +404,6 @@ def test_openai_responses_payload_shape(monkeypatch):
     assert payload["input"][0]["role"] == "user"
     assert payload["text"]["format"] == {"type": "json_object"}
     assert resp.parsed_json == {"r": 2}
-
-
-def test_gemini_payload_and_url(monkeypatch):
-    stub = _HttpStub(
-        body={
-            "candidates": [{"content": {"parts": [{"text": '{"g": 3}'}]}}],
-            "usageMetadata": {"totalTokenCount": 9},
-        }
-    )
-    monkeypatch.setattr("providers.adapters._http_post", stub)
-    adapter = GeminiAdapter(
-        _provider(protocol="gemini", base_url="https://gai.googleapis.com"), "gemini-x"
-    )
-    resp = adapter.chat(
-        UnifiedChatRequest(
-            messages=[{"role": "user", "content": "hi"}],
-            model="gemini-x",
-            response_format={"type": "json_object"},
-        )
-    )
-    url, payload = stub.calls[0]
-    assert "gemini-x:generateContent" in url
-    assert payload["generationConfig"]["responseMimeType"] == "application/json"
-    assert resp.parsed_json == {"g": 3}
 
 
 # --------------------------------------------------------------------------- #
@@ -810,24 +793,6 @@ def test_anthropic_chat_timeout_override(monkeypatch):
     assert captured["timeout"] == 180
 
 
-def test_gemini_chat_timeout_override(monkeypatch):
-    from providers.adapters import GeminiAdapter
-    from providers.models import UnifiedChatRequest
-
-    captured: dict = {}
-
-    def stub(url, *, payload, headers, timeout, api_key=None):
-        captured["timeout"] = timeout
-        return 200, {}, json.dumps({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
-
-    monkeypatch.setattr("providers.adapters._http_post", stub)
-    adapter = GeminiAdapter(_provider(), "m-1")
-    adapter.chat(
-        UnifiedChatRequest(messages=[{"role": "user", "content": "x"}], model="m-1", timeout=180)
-    )
-    assert captured["timeout"] == 180
-
-
 def test_openai_responses_chat_timeout_override(monkeypatch):
     from providers.adapters import OpenAIResponsesAdapter
     from providers.models import UnifiedChatRequest
@@ -909,3 +874,925 @@ def test_chat_facade_no_retry_on_other_errors(monkeypatch):
     with pytest.raises(ProviderError):
         chat_text(_Broken(), [{"role": "user", "content": "x"}])
     assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 流式契约（ProviderConfig.stream / 总时长上限）
+# --------------------------------------------------------------------------- #
+def test_provider_config_stream_defaults_false_and_roundtrips(tmp_path):
+    cfg = _provider()
+    assert cfg.stream is False  # 存量配置缺省关闭，行为不变
+    cfg2 = _provider(stream=True)
+    assert cfg2.stream is True
+    # 序列化往返（public_view 透传给前端）
+    dumped = cfg2.model_dump(mode="json")
+    assert dumped["stream"] is True
+    assert ProviderConfig.model_validate(dumped).stream is True
+
+
+def test_settings_stream_max_seconds_exists():
+    from config import settings
+
+    assert isinstance(settings.PROVIDER_STREAM_MAX_SECONDS, int)
+    assert settings.PROVIDER_STREAM_MAX_SECONDS > 0
+
+
+# --------------------------------------------------------------------------- #
+# SSE 流式（纯函数 / 读取器 / 聚合器）
+# --------------------------------------------------------------------------- #
+def test_iter_sse_payloads_ignores_noise_and_yields_data():
+    lines = [
+        ": keep-alive",
+        "event: response.output_text.delta",
+        'data: {"a": 1}',
+        "",
+        "data: [DONE]",
+    ]
+    assert list(_iter_sse_payloads(lines)) == ['{"a": 1}', "[DONE]"]
+
+
+def test_consume_stream_aggregates_and_collects_usage():
+    frames = [
+        json.dumps({"choices": [{"delta": {"content": "he"}}]}),
+        json.dumps({"choices": [{"delta": {"content": "llo"}}]}),
+        json.dumps(
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+        ),
+        "[DONE]",
+    ]
+    content, usage = _consume_stream(
+        frames,
+        extract_delta=lambda f: ((f.get("choices") or [{}])[0].get("delta") or {}).get("content")
+        or "",
+        terminal=lambda f: False,
+        extract_usage=lambda f: f.get("usage"),
+    )
+    assert content == "hello"
+    assert usage["total_tokens"] == 3
+
+
+def test_consume_stream_eof_without_terminal_raises():
+    # 流中途断连：EOF 先于终止帧 => ProviderError，绝不返回半截内容
+    with pytest.raises(ProviderError):
+        _consume_stream(
+            [json.dumps({"choices": [{"delta": {"content": "half"}}]})],
+            extract_delta=lambda f: ((f.get("choices") or [{}])[0].get("delta") or {}).get(
+                "content"
+            )
+            or "",
+            terminal=lambda f: False,
+            extract_usage=lambda f: None,
+        )
+
+
+def test_consume_stream_empty_content_raises_protocol_error():
+    # DeepSeek 系网关内容进 reasoning_content 的形态：content 为空必须报错走兜底
+    frames = [json.dumps({"choices": [{"delta": {}}]}), "[DONE]"]
+    with pytest.raises(ProtocolError):
+        _consume_stream(
+            frames,
+            extract_delta=lambda f: ((f.get("choices") or [{}])[0].get("delta") or {}).get(
+                "content"
+            )
+            or "",
+            terminal=lambda f: False,
+            extract_usage=lambda f: None,
+        )
+
+
+def test_consume_stream_error_frame_maps_429():
+    frames = [json.dumps({"error": {"code": "429", "message": "rate limited"}})]
+    with pytest.raises(RateLimitError):
+        _consume_stream(
+            frames,
+            extract_delta=lambda f: "",
+            terminal=lambda f: False,
+            extract_usage=lambda f: None,
+        )
+
+
+def test_consume_stream_protocol_terminal_frame_collects_usage():
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": "ok"}),
+        json.dumps({"type": "response.completed", "response": {"usage": {"total_tokens": 7}}}),
+    ]
+    content, usage = _consume_stream(
+        frames,
+        extract_delta=lambda f: (
+            (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
+        ),
+        terminal=lambda f: f.get("type") == "response.completed",
+        extract_usage=lambda f: f.get("response", {}).get("usage"),
+    )
+    assert content == "ok"
+    assert usage["total_tokens"] == 7
+
+
+class _SSEResponse:
+    """SSE 读取器测试桩响应：按预置行序列逐行 readline。"""
+
+    def __init__(self, lines, status=200):
+        self.status = status
+        self._lines = lines
+        self._i = 0
+
+    def readline(self, limit=-1):
+        if self._i >= len(self._lines):
+            return b""
+        item = self._lines[self._i]
+        self._i += 1
+        return item.encode("utf-8")
+
+    def read(self):
+        return b'{"error": "bad request"}'
+
+    def getheaders(self):
+        return {}
+
+
+class _SSEConnStub:
+    """SSE 读取器测试桩连接：记录请求体/头，返回类属性 lines 组成的响应。"""
+
+    lines: ClassVar[list[str]] = []
+    last: ClassVar[dict | None] = None
+
+    def __init__(self, host, port, timeout=None):
+        self.host = host
+
+    def request(self, method, path, body=None, headers=None):
+        _SSEConnStub.last = {"body": json.loads(body), "headers": headers}
+
+    def getresponse(self):
+        return _SSEResponse(_SSEConnStub.lines)
+
+    def close(self):
+        pass
+
+
+def test_http_post_sse_yields_data_lines_and_sends_stream_payload(monkeypatch):
+    _SSEConnStub.lines = [": ping", 'data: {"x": 1}', "data: [DONE]", ""]
+    monkeypatch.setattr("http.client.HTTPSConnection", _SSEConnStub)
+    out = list(
+        _http_post_sse(
+            "https://gw.example.com/v1/chat/completions",
+            payload={"stream": True, "messages": []},
+            headers={"X-Custom": "1"},
+            timeout=5,
+            max_seconds=30,
+            api_key="k-test",
+        )
+    )
+    assert out == ['{"x": 1}', "[DONE]"]
+    assert _SSEConnStub.last["body"]["stream"] is True
+    assert _SSEConnStub.last["headers"]["Authorization"] == "Bearer k-test"
+    assert _SSEConnStub.last["headers"]["Accept"] == "text/event-stream"
+
+
+def test_http_post_sse_idle_timeout_maps_to_provider_timeout(monkeypatch):
+    class IdleResp:
+        status = 200
+
+        def readline(self, limit=-1):
+            raise TimeoutError("read timed out")
+
+    class IdleConn(_SSEConnStub):
+        def getresponse(self):
+            return IdleResp()
+
+    monkeypatch.setattr("http.client.HTTPSConnection", IdleConn)
+    with pytest.raises(ProviderTimeoutError):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=1, max_seconds=30
+            )
+        )
+
+
+def test_http_post_sse_total_limit_raises(monkeypatch):
+    _SSEConnStub.lines = ['data: {"a": 1}', 'data: {"b": 2}']
+    monkeypatch.setattr("http.client.HTTPSConnection", _SSEConnStub)
+    with pytest.raises(ProviderTimeoutError):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=0
+            )
+        )
+
+
+def test_http_post_sse_first_packet_401_maps(monkeypatch):
+    class UnauthorizedResp:
+        status = 401
+
+        def read(self):
+            return b"unauthorized"
+
+        def readline(self, limit=-1):
+            return b""
+
+    class UnauthorizedConn(_SSEConnStub):
+        def getresponse(self):
+            return UnauthorizedResp()
+
+    monkeypatch.setattr("http.client.HTTPSConnection", UnauthorizedConn)
+    with pytest.raises(AuthenticationError):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=30
+            )
+        )
+
+
+# --------------------------------------------------------------------------- #
+# OpenAIChatAdapter 流式分支
+# --------------------------------------------------------------------------- #
+def test_openai_chat_stream_aggregates(monkeypatch):
+    provider = _provider(stream=True)
+    frames = [
+        json.dumps({"choices": [{"delta": {"content": '{"ok"'}}]}),
+        json.dumps({"choices": [{"delta": {"content": ": 1}"}}]}),
+        json.dumps(
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            }
+        ),
+        "[DONE]",
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["url"] = url
+        captured["payload"] = payload
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert captured["url"].endswith("/chat/completions")
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["stream_options"] == {"include_usage": True}
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+    assert resp.content == '{"ok": 1}'
+    assert resp.parsed_json == {"ok": 1}
+    assert resp.usage.total_tokens == 5
+
+
+def test_openai_chat_stream_degrades_without_stream_options(monkeypatch):
+    # Review Focus #3：网关不认 stream_options -> 去参保流式重试
+    provider = _provider(stream=True)
+    frames = [json.dumps({"choices": [{"delta": {"content": '{"a": 1}'}}]}), "[DONE]"]
+    calls: list[dict] = []
+
+    def flaky_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        calls.append(dict(payload))
+        if "stream_options" in payload:
+            raise StreamHandshakeRejected(
+                "模型服务返回 HTTP 400: stream_options not supported", code="provider_error"
+            )
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", flaky_sse)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert "stream_options" not in calls[-1]
+    assert calls[-1]["stream"] is True  # 保流式，仅去参数
+    assert resp.parsed_json == {"a": 1}
+
+
+def test_openai_chat_stream_falls_back_to_non_stream_on_400(monkeypatch):
+    # Review Focus #4：网关整体拒绝 stream -> 回退非流式重试一次
+    provider = _provider(stream=True)
+
+    stream_calls: list[int] = []
+
+    def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
+        raise StreamHandshakeRejected(
+            "模型服务返回 HTTP 400: stream is not supported", code="provider_error"
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
+    stub = _HttpStub(body={"choices": [{"message": {"content": '{"ok": 1}'}}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert stream_calls  # 流式桩确被先调用（先拒绝后回退）
+    assert stub.calls  # 确实走了非流式路径
+    assert resp.parsed_json == {"ok": 1}
+
+
+def test_openai_chat_stream_eof_propagates_without_fallback(monkeypatch):
+    # 断连不是"网关拒绝流式"：不得触发非流式回退（避免重复计费长请求）
+    provider = _provider(stream=True)
+
+    def eof_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        return iter([json.dumps({"choices": [{"delta": {"content": "half"}}]})])
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", eof_stream)
+    stub = _HttpStub(body={"choices": [{"message": {"content": "{}"}}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    with pytest.raises(ProviderError):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert not stub.calls
+
+
+# --------------------------------------------------------------------------- #
+# OpenAIResponsesAdapter 流式分支
+# --------------------------------------------------------------------------- #
+def test_openai_responses_stream_aggregates(monkeypatch):
+    provider = _provider(protocol="openai_responses", stream=True)
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": '{"r": '}),
+        json.dumps({"type": "response.output_text.delta", "delta": "2}"}),
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {"usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}},
+            }
+        ),
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["url"] = url
+        captured["payload"] = payload
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert captured["url"].endswith("/responses")
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["text"]["format"] == {"type": "json_object"}
+    assert resp.content == '{"r": 2}'
+    assert resp.parsed_json == {"r": 2}
+    assert resp.usage.total_tokens == 3
+
+
+def test_openai_responses_stream_falls_back_to_non_stream_on_400(monkeypatch):
+    provider = _provider(protocol="openai_responses", stream=True)
+
+    stream_calls: list[int] = []
+
+    def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
+        raise StreamHandshakeRejected(
+            "模型服务返回 HTTP 400: streaming not supported here", code="provider_error"
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
+    stub = _HttpStub(
+        body={
+            "output": [{"content": [{"type": "output_text", "text": '{"r": 2}'}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    )
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert stream_calls  # 流式桩确被先调用（先拒绝后回退）
+    assert stub.calls
+    assert "stream" not in stub.calls[0][1]  # 回退请求不带 stream 参数
+    assert resp.parsed_json == {"r": 2}
+
+
+# --------------------------------------------------------------------------- #
+# AnthropicAdapter 流式分支
+# --------------------------------------------------------------------------- #
+def test_anthropic_stream_aggregates_and_merges_usage(monkeypatch):
+    provider = _provider(protocol="anthropic", stream=True)
+    frames = [
+        json.dumps({"type": "message_start", "message": {"usage": {"input_tokens": 4}}}),
+        json.dumps({"type": "content_block_delta", "delta": {"text": '{"a": '}}),
+        json.dumps({"type": "content_block_delta", "delta": {"text": "1}"}}),
+        json.dumps({"type": "message_delta", "usage": {"output_tokens": 6}}),
+        json.dumps({"type": "message_stop"}),
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["url"] = url
+        captured["payload"] = payload
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "system", "content": "你是助手"}, {"role": "user", "content": "hi"}],
+            model="claude-x",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert captured["url"].endswith("/v1/messages")
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["system"].startswith("你是助手")  # system 顶级字段照旧
+    assert resp.content == '{"a": 1}'
+    assert resp.parsed_json == {"a": 1}
+    assert resp.usage.prompt_tokens == 4
+    assert resp.usage.completion_tokens == 6
+    assert resp.usage.total_tokens == 10
+
+
+def test_anthropic_stream_falls_back_to_non_stream_on_400(monkeypatch):
+    provider = _provider(protocol="anthropic", stream=True)
+
+    stream_calls: list[int] = []
+
+    def reject_stream(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        stream_calls.append(1)  # 证明流式桩确被先调用（先拒绝后回退）
+        raise StreamHandshakeRejected(
+            "模型服务返回 HTTP 400: streaming is not supported", code="provider_error"
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", reject_stream)
+    stub = _HttpStub(
+        body={
+            "content": [{"type": "text", "text": '{"a": 1}'}],
+            "usage": {"input_tokens": 4, "output_tokens": 6},
+        }
+    )
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-x",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert stream_calls  # 流式桩确被先调用（先拒绝后回退）
+    assert stub.calls
+    assert "stream" not in stub.calls[0][1]
+    assert resp.parsed_json == {"a": 1}
+
+
+# --------------------------------------------------------------------------- #
+# 流式鉴权头（修复轮）：三协议流式调用必须与非流式路径同源鉴权
+# --------------------------------------------------------------------------- #
+def test_openai_chat_stream_passes_api_key(monkeypatch):
+    # openai_chat 流式：api_key 经 _http_post_sse 参数透传（网关 401 防线）
+    provider = _provider(stream=True)
+    frames = [json.dumps({"choices": [{"delta": {"content": '{"ok": 1}'}}]}), "[DONE]"]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["api_key"] = api_key
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert resp.parsed_json == {"ok": 1}
+    assert captured["api_key"] == provider.api_key
+    assert captured["api_key"] is not None  # 区分"传了/没传"
+
+
+def test_openai_responses_stream_passes_api_key(monkeypatch):
+    # openai_responses 流式：同 openai_chat 的 api_key 透传要求
+    provider = _provider(protocol="openai_responses", stream=True)
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": '{"r": 2}'}),
+        json.dumps({"type": "response.completed", "response": {"usage": {"total_tokens": 1}}}),
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["api_key"] = api_key
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert resp.parsed_json == {"r": 2}
+    assert captured["api_key"] == provider.api_key
+    assert captured["api_key"] is not None
+
+
+def test_anthropic_stream_passes_auth_headers(monkeypatch):
+    # anthropic 流式：headers 内联 x-api-key + anthropic-version（api_key 参数保持 None）
+    provider = _provider(protocol="anthropic", stream=True)
+    frames = [
+        json.dumps({"type": "content_block_delta", "delta": {"text": '{"a": 1}'}}),
+        json.dumps({"type": "message_stop"}),
+    ]
+    captured: dict = {}
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        captured["headers"] = headers
+        captured["api_key"] = api_key
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-x",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert resp.parsed_json == {"a": 1}
+    assert captured["headers"]["x-api-key"] == provider.api_key
+    assert captured["headers"]["anthropic-version"] == "2023-06-01"
+    assert captured["api_key"] is None
+
+
+# --------------------------------------------------------------------------- #
+# store 加载防毒 + gemini 移除回归
+# --------------------------------------------------------------------------- #
+def test_store_skips_invalid_protocol_entry_with_warning(tmp_path, caplog):
+    # Review Focus #5：存量文件含 gemini 等未知协议条目 -> 跳过并告警，不拒载
+    import logging
+
+    raw = [
+        {
+            "id": "bad",
+            "name": "坏条目",
+            "protocol": "gemini",
+            "base_url": "https://x.example.com",
+        },
+        {
+            "id": "ok",
+            "name": "好条目",
+            "protocol": "openai_chat",
+            "base_url": "https://y.example.com",
+        },
+    ]
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="providers.store"):
+        store = ProviderStore(path)
+    assert [p.id for p in store.list_providers()] == ["ok"]
+
+
+def test_gemini_protocol_removed_from_contract():
+    from providers.models import ApiProtocol
+
+    assert "GEMINI" not in ApiProtocol.__members__
+    with pytest.raises(Exception):  # noqa: B017 - pydantic ValidationError
+        _provider(protocol="gemini")
+
+
+def test_gemini_adapter_removed_from_package():
+    import providers
+
+    assert not hasattr(providers, "GeminiAdapter")
+    assert "GeminiAdapter" not in providers.__all__
+
+
+def test_http_post_sse_overlong_line_without_newline_raises(monkeypatch):
+    # 无换行慢滴流：单行达到行字节上限且无换行 => ProviderError 熔断，防内存无界增长
+    class DripResp:
+        status = 200
+
+        def readline(self, limit=-1):
+            return b"x" * _SSE_MAX_LINE_BYTES  # 恰为行上限且不以 b"\n" 结尾
+
+    class DripConn(_SSEConnStub):
+        def getresponse(self):
+            return DripResp()
+
+    monkeypatch.setattr("http.client.HTTPSConnection", DripConn)
+    with pytest.raises(ProviderError, match="SSE 行超长"):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=1
+            )
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 回退判定收紧（PR1）：仅握手阶段 400 可回退，mid-stream 永不重发
+# --------------------------------------------------------------------------- #
+def test_http_post_sse_handshake_400_raises_dedicated_type(monkeypatch):
+    """首包 400 必须抛 StreamHandshakeRejected（回退资格判定的唯一依据）。"""
+
+    class BadRequestResp:
+        status = 400
+
+        def read(self):
+            return b"stream is not supported"
+
+        def readline(self, limit=-1):
+            return b""
+
+    class BadRequestConn(_SSEConnStub):
+        def getresponse(self):
+            return BadRequestResp()
+
+    monkeypatch.setattr("http.client.HTTPSConnection", BadRequestConn)
+    with pytest.raises(StreamHandshakeRejected):
+        list(
+            _http_post_sse(
+                "https://gw.example.com/x", payload={}, headers={}, timeout=5, max_seconds=30
+            )
+        )
+
+
+def _midstream_fail_sse(frame: str):
+    """构造 mid-stream 错误桩：先产出半个 delta，再抛文本含 400/stream 特征的错误帧。"""
+
+    def _stub(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        yield frame
+        raise ProviderError(
+            "流式响应错误帧: HTTP 400 stream response_format not supported",
+            code="provider_error",
+        )
+
+    return _stub
+
+
+def test_midstream_error_never_falls_back_openai_chat(monkeypatch):
+    # 事项 5 回归：mid-stream 错误文本巧合含 "HTTP 400"/"stream" 不得触发非流式重发
+    provider = _provider(stream=True)
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _midstream_fail_sse(json.dumps({"choices": [{"delta": {"content": "he"}}]})),
+    )
+    stub = _HttpStub(body={"choices": [{"message": {"content": "{}"}}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIChatAdapter(provider, "m-1")
+    with pytest.raises(ProviderError):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert not stub.calls  # 绝不重发
+
+
+def test_midstream_error_never_falls_back_openai_responses(monkeypatch):
+    provider = _provider(protocol="openai_responses", stream=True)
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _midstream_fail_sse(json.dumps({"type": "response.output_text.delta", "delta": "he"})),
+    )
+    stub = _HttpStub(body={"output": [{"content": [{"type": "output_text", "text": "{}"}]}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    with pytest.raises(ProviderError):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert not stub.calls
+
+
+def test_midstream_error_never_falls_back_anthropic(monkeypatch):
+    provider = _provider(protocol="anthropic", stream=True)
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _midstream_fail_sse(json.dumps({"type": "content_block_delta", "delta": {"text": "he"}})),
+    )
+    stub = _HttpStub(body={"content": [{"type": "text", "text": "{}"}]})
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    with pytest.raises(ProviderError):
+        adapter.chat(
+            UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="claude-x")
+        )
+    assert not stub.calls
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        AuthenticationError("鉴权失败（HTTP 401）"),
+        ProviderError("模型服务返回 HTTP 403: forbidden", code="provider_error"),
+        ProviderError("模型服务返回 HTTP 500: internal error", code="provider_error"),
+        ProviderTimeoutError("请求超时: read timed out"),
+    ],
+    ids=["401", "403", "500", "timeout"],
+)
+def test_stream_non_handshake400_never_falls_back(monkeypatch, exc):
+    """事项 7 矩阵：非握手 400（401/403/500/超时）三协议一律不回退非流式。"""
+    cases = [
+        (
+            OpenAIChatAdapter,
+            _provider(stream=True),
+            "m-1",
+            {"output": None},
+        ),
+        (
+            OpenAIResponsesAdapter,
+            _provider(protocol="openai_responses", stream=True),
+            "m-1",
+            None,
+        ),
+        (
+            AnthropicAdapter,
+            _provider(protocol="anthropic", stream=True),
+            "claude-x",
+            None,
+        ),
+    ]
+    for adapter_cls, provider, model_id, _ in cases:
+
+        def reject(url, *, payload, headers, timeout, max_seconds, api_key=None, _exc=exc):
+            raise _exc
+
+        monkeypatch.setattr("providers.adapters._http_post_sse", reject)
+        stub = _HttpStub(body={"choices": [{"message": {"content": "{}"}}]})
+        monkeypatch.setattr("providers.adapters._http_post", stub)
+        adapter = adapter_cls(provider, model_id)
+        with pytest.raises(ProviderError):
+            adapter.chat(
+                UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model=model_id)
+            )
+        assert not stub.calls, f"{adapter_cls.__name__} 在 {type(exc).__name__} 下误回退"
+
+
+def test_responses_handshake_400_json_hint_falls_back(monkeypatch):
+    # 事项 6：responses 回退判定补齐 JSON hints——报文无 "stream" 字样也回退
+    provider = _provider(protocol="openai_responses", stream=True)
+
+    def reject_json_mode(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        raise StreamHandshakeRejected(
+            "模型服务返回 HTTP 400: text.format not supported", code="provider_error"
+        )
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", reject_json_mode)
+    stub = _HttpStub(
+        body={
+            "output": [{"content": [{"type": "output_text", "text": '{"r": 2}'}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    )
+    monkeypatch.setattr("providers.adapters._http_post", stub)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    resp = adapter.chat(
+        UnifiedChatRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="m-1",
+            response_format={"type": "json_object"},
+        )
+    )
+    assert stub.calls
+    assert resp.parsed_json == {"r": 2}
+
+
+# --------------------------------------------------------------------------- #
+# SSE 解析协议对齐（PR2）：空 data 行忽略 / responses 错误帧识别 / 行上限
+# --------------------------------------------------------------------------- #
+def test_iter_sse_payloads_skips_empty_data_lines():
+    # 事项 1：SSE 规范中空 data: 字段（仅冒号或纯空白）应忽略，不产出空负载
+    lines = ["data:", "data: ", "data:\t", 'data: {"a": 1}', "data: [DONE]"]
+    assert list(_iter_sse_payloads(lines)) == ['{"a": 1}', "[DONE]"]
+
+
+def test_sse_line_limit_is_256kb():
+    # 事项 8：行上限从 64KB 放宽到 256KB——合法大 payload 单行（带换行）不被误杀
+    assert _SSE_MAX_LINE_BYTES == 256 * 1024
+
+
+def test_consume_stream_extract_error_responses_error_event():
+    # 事项 3：responses 协议 {"type": "error"} 事件须识别为错误帧而非"断连"
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": "he"}),
+        json.dumps({"type": "error", "code": "server_error", "message": "boom"}),
+    ]
+    with pytest.raises(ProviderError, match="boom"):
+
+        def _extract_error(frame):
+            if frame.get("type") == "error":
+                return frame
+            if frame.get("type") == "response.failed":
+                return (frame.get("response") or {}).get("error") or frame
+            return None
+
+        _consume_stream(
+            frames,
+            extract_delta=lambda f: (
+                (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
+            ),
+            terminal=lambda f: f.get("type") == "response.completed",
+            extract_usage=lambda f: None,
+            extract_error=_extract_error,
+        )
+
+
+def test_consume_stream_extract_error_response_failed_maps_429():
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": "he"}),
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {"error": {"code": "rate_limit_exceeded", "message": "slow down"}},
+            }
+        ),
+    ]
+
+    def _extract_error(frame):
+        if frame.get("type") == "error":
+            return frame
+        if frame.get("type") == "response.failed":
+            return (frame.get("response") or {}).get("error") or frame
+        return None
+
+    with pytest.raises(RateLimitError):
+        _consume_stream(
+            frames,
+            extract_delta=lambda f: (
+                (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
+            ),
+            terminal=lambda f: f.get("type") == "response.completed",
+            extract_usage=lambda f: None,
+            extract_error=_extract_error,
+        )
+
+
+def test_openai_responses_stream_error_event_raises_not_disconnect(monkeypatch):
+    # 适配器级回归：responses 流中段错误事件不再归因为"中途断连"
+    provider = _provider(protocol="openai_responses", stream=True)
+    frames = [
+        json.dumps({"type": "response.output_text.delta", "delta": "he"}),
+        json.dumps({"type": "error", "code": "server_error", "message": "upstream blew up"}),
+    ]
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = OpenAIResponsesAdapter(provider, "m-1")
+    with pytest.raises(ProviderError, match="upstream blew up"):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+
+
+# --------------------------------------------------------------------------- #
+# 配置防呆与 usage 契约一致（PR3）
+# --------------------------------------------------------------------------- #
+def test_settings_stream_max_seconds_guards_nonpositive(monkeypatch):
+    # 事项 2：env 误配 0/负数时回落安全默认 300（仿 SYNTHESIZER_TIMEOUT 先例）
+    import importlib
+
+    from config import settings as settings_mod
+
+    for bad in ("0", "-5"):
+        monkeypatch.setenv("PROVIDER_STREAM_MAX_SECONDS", bad)
+        try:
+            importlib.reload(settings_mod)
+            assert settings_mod.PROVIDER_STREAM_MAX_SECONDS == 300
+        finally:
+            monkeypatch.delenv("PROVIDER_STREAM_MAX_SECONDS")
+            importlib.reload(settings_mod)
+
+
+def test_anthropic_stream_usage_none_when_absent(monkeypatch):
+    # 事项 4：流式未收到 usage 帧 => usage=None（与非流式空 usage 语义一致）
+    provider = _provider(protocol="anthropic", stream=True)
+    frames = [
+        json.dumps({"type": "content_block_delta", "delta": {"text": '{"a": 1}'}}),
+        json.dumps({"type": "message_stop"}),
+    ]
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        return iter(frames)
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", fake_sse)
+    adapter = AnthropicAdapter(provider, "claude-x")
+    resp = adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="claude-x")
+    )
+    assert resp.content == '{"a": 1}'
+    assert resp.usage is None  # 本测试焦点：无 usage 帧 => None
+    assert resp.parsed_json is None  # 请求未启用 json_mode，解析关闭属预期

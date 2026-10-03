@@ -89,6 +89,11 @@ FORBIDDEN_CALLS: frozenset[str] = frozenset(
         "super",
         "delattr",
         "setattr",
+        # 十九期 M5（spec §6.1）：duckdb.connect/database 直连数仓旁路封堵——
+        # 取数权只在执行层（治理管道），沙箱永远是脱敏导出的只读消费者；
+        # AST 守卫拦不住 C 扩展的运行时行为，必须在代码层封死调用入口
+        "connect",
+        "database",
     }
 )
 

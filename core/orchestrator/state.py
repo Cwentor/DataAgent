@@ -65,6 +65,9 @@ class PlanStep(BaseModel):
     dsl: dict[str, Any] | None = None
     # 分析步骤的代码草稿 / 技能调用（analyze 类型时给出）
     code: str | None = None
+    # SQL 双产出（十九期 M4）：LLM 在分析形态超出 DSL 契约时给出的只读 SELECT
+    # 表面语法——planner_node 经提升闸门转译为 dsl 后置空，绝不持久化/直执行
+    sql: str | None = None
     status: Literal["pending", "running", "done", "failed"] = "pending"
     # B 线（M3）fan-out 任务卡（规格 §6.3）：planner 产出时携带（三模式共用通道，
     # 由任务卡 mode 字段区分 attribution/hypothesis/comparison）；缺省 None=普通步骤
@@ -180,7 +183,11 @@ class AgentState(BaseModel):
         default_factory=list, description="选项式澄清候选（前端 pill 按钮，点击即答复）"
     )
     clarification_rounds: int = Field(
-        default=0, description="降级澄清已发生轮次（二轮仍歧义则拒答，防循环）"
+        default=0, description="澄清已发生轮次（二轮仍歧义转带假设作答，防循环）"
+    )
+    assumptions: list[str] = Field(
+        default_factory=list,
+        description="口径假设（分级透明作答，十九期 M3）：选定合理口径的理由说明，报告头部呈现",
     )
     human_reply: str | None = Field(default=None, description="HITL 恢复时的用户答复")
     # 执行轨迹

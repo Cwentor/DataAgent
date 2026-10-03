@@ -19,6 +19,7 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
 # 输出契约（必须是且仅是一个 JSON 对象，禁止任何其他文本）
 {
   "clarification": null | "仅当问题歧义到无法选出任何合理默认口径时的一句澄清问题（判定纪律见下节）",
+  "assumptions": ["口径假设（可选）：选定合理口径时列出的全部假设，如『仅统计成功支付订单』『时间窗口取数仓最近完整期』"],
   "intent": {"type": "diagnostic|cardinality|metric_scalar|unknown", "anchors": ["命中的语义字段"]},
   "steps": [
     {
@@ -47,6 +48,9 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
   直接作为答复发送的完整表述；用户可能无候选时 options 给空数组；
 - 中置信路径：问题可理解但存在口径歧义（如"销售额"含/不含退款、多指标
   同名）时，优先选项澄清而非拒答——把选择权交给用户，不替用户做主。
+- 二轮硬性纪律：上下文注入了"用户已答复过一轮澄清"时，**严禁再次输出
+  clarification**——必须选定最合理口径直接规划，并把全部口径取舍逐条写入
+  assumptions（报告头部会向用户完整呈现；静默猜口径是严重违纪）。
 
 # 意图回传（可选，尽力而为）
 - intent 字段是你对问题意图的判断回传，仅用于系统诊断观测，不影响计划合法性；
@@ -56,6 +60,16 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
 
 # DSL 契约要点（完整 Schema 见系统注入的语义目录；字段名与结构必须逐字对齐，写错即整计划被拒）
 - metrics: [{"kind": "aggregate", "field": "<语义字段>", "agg": "sum|count|avg|min|max|count_distinct", "alias": "<英文标识符>"}]
+- 纯维度投影（维度取值枚举，如"列出全部品牌"）：metrics 允许为空数组，只给
+  dimensions（契约层校验投影形态；无指标时严禁再配 having/top_n/fill_gaps）
+- having（聚合后过滤，如"只要GMV超过1000的品类"）：[{"field": "<本计划内指标别名>", "operator": "gt|gte|lt|lte|eq|ne", "value": <数值>}]
+  —— field 只能引用同一 DSL 的 metrics 别名，且必须带 dimensions 分组；
+  与窗口指标/分组 Top-N/日期补零/同比环比互斥
+- 表达式指标（受控函数组合，如"客单价"）：{"kind": "expression", "alias": "<英文标识符>", "expr": <表达式节点>}
+  —— 表达式节点三种形态：{"op": "add|sub|mul|div|coalesce|round|abs", "args": [...]} /
+  {"ref": "<同 DSL 聚合指标别名>"} / {"lit": <数值>}；
+  ref 仅可指向本 DSL 内 kind="aggregate" 指标别名（单层引用，禁止嵌套引用
+  ratio/window/expression）；除法 div 自带除零防护，勿手写 NULLIF
 - dimensions: [{"field": "<语义维度字段>", "alias": "<可选英文标识符>"}]
   —— 注意是对象数组，每个维度形如 {"field": "province"}，严禁写成裸字符串 "province"
 - filters: [{"field": ..., "operator": "eq|ne|in|gt|gte|lt|lte|between", "value": ...}]（没有 like/ge/le）
@@ -66,6 +80,17 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
   {"range_type": "absolute", "absolute": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}
   或 {"range_type": "relative", "relative": {"unit": "day|week|month|quarter", "value": N, "offset": 0}}
 - 严禁出现任何 SQL；字段必须来自语义目录，禁止臆造
+
+# SQL 双产出（十九期 M4：仅当 DSL 确实表达不了时才允许）
+- 缺省必须产 dsl 步骤；仅当分析形态确定超出 DSL 契约（如 DSL 无法表达的复杂
+  构造）且能用一条只读 SELECT 表达时，query 步骤可改用 "sql": "SELECT ..."
+  替代 dsl 字段；
+- sql 会经提升闸门转译为 DSL 契约并由确定性编译器重新生成执行（你产出的 SQL
+  永不直接执行）：必须是受限可提升形态——FROM fact_orders 主表 + 语义目录
+  受控连接、聚合指标或 DISTINCT 纯维度投影、AND 连接的白名单比较谓词、
+  HAVING/ORDER BY/LIMIT；
+- 以下构造会被闸门拒升（拒绝清单将喂回给你改写）：CASE/OR/子查询/窗口函数/
+  COUNT(*)/无别名投影/UNION/多语句/写操作——能改写成 DSL 就改写为 dsl。
 
 # 规划规范（Few-Shot：指标分解树式诊断）
 用户问"为什么 GMV 下降"这类根因问题时，标准分解路径（**先因子后维度**，分层强制）：
@@ -221,6 +246,7 @@ def planner_prompt(
     schema_digest: str,
     error_context: str | None = None,
     history_context: str | None = None,
+    clarify_context: str | None = None,
 ) -> str:
     """组装 Planner 的用户消息（问题 + 语义目录摘要 + 会话历史 + 自愈错误上下文 + Few-Shot）。
 
@@ -231,11 +257,23 @@ def planner_prompt(
     ``history_context``：同会话最近几轮对话摘要（多轮上下文）——供 LLM 理解
     追问与省略指代（如「那华南呢」「再来一份按季度的」）；None 时不注入该
     小节，提示词与单轮契约逐字一致。
+
+    ``clarify_context``：澄清轮次上下文（十九期 M3 分级透明作答）——用户已
+    答复过一轮澄清仍不唯一时注入二轮硬性指令：严禁再次反问，必须选定最合理
+    口径并把全部假设写入 assumptions；None 时不注入该小节。
     """
     parts = [
         f"# 用户问题\n{user_query}",
         f"# 语义目录（可用字段）\n{schema_digest}",
     ]
+    if clarify_context:
+        parts.append(
+            "# 澄清轮次上下文（二轮硬性纪律）\n"
+            "用户已答复过一轮澄清，查询口径仍无法唯一确定。**严禁再次澄清**"
+            "（再次输出 clarification 会把用户逼进死循环）：必须选定最合理的缺省"
+            "口径直接规划，并把全部口径假设逐条写入 assumptions 数组（报告头部"
+            "会向用户完整呈现，静默猜口径是严重违纪）：\n" + clarify_context
+        )
     if history_context:
         parts.append(
             "# 会话历史（最近对话，供理解追问与省略指代）\n"

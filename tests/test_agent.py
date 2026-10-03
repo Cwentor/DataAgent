@@ -16,7 +16,10 @@ from semantic.dsl_schema import QueryDSL
 # 启发式兜底
 # --------------------------------------------------------------------------- #
 def test_heuristic_covers_all_golden_questions():
-    """启发式应能复现 golden 中全部**单轮**问题的预期 DSL。"""
+    """启发式应能复现 golden 中全部**单轮**问题的预期 DSL。
+
+    十九期 M3：HAVING / 表达式指标已接入确定性启发式，豁免移除（全量覆盖）。
+    """
     h = DeterministicNL2DSL()
     for item in load_golden():
         if item.get("type") == "multi_turn":

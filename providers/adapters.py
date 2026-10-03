@@ -4,14 +4,12 @@
 - ``BaseAdapter``：统一抽象（``chat`` / ``test_connection`` / ``chat_text``）；
 - ``OpenAIChatAdapter``：POST {baseUrl}/chat/completions（标准 OpenAI 兼容）；
 - ``OpenAIResponsesAdapter``：POST {baseUrl}/responses（新版 Responses 规范）；
-- ``AnthropicAdapter``：POST {baseUrl}/v1/messages（System Prompt 提取至顶级字段）；
-- ``GeminiAdapter``：POST {baseUrl}/v1beta/models/{model}:generateContent。
+- ``AnthropicAdapter``：POST {baseUrl}/v1/messages（System Prompt 提取至顶级字段）。
 
 结构化输出保障（JSON Mode）：
 - 请求侧：支持原生 JSON Schema 的协议透传原生参数（openai_chat 的
-  ``response_format`` / responses 的 ``text.format`` / gemini 的
-  ``responseMimeType``），anthropic 与所有兜底路径在 System Prompt 注入
-  Strict JSON 约束；
+  ``response_format`` / responses 的 ``text.format``），anthropic 与所有
+  兜底路径在 System Prompt 注入 Strict JSON 约束；
 - 响应侧：统一正则安全清洗提取 JSON（``extract_json_object``），对带
   ```json 围栏 / 前后杂文本的响应一律可用；
 - 降级：透传原生结构化参数被服务端拒绝（400 且模型不支持）时，自动去掉
@@ -25,10 +23,12 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import re
 import time
 import urllib.parse
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from providers.errors import (
@@ -37,6 +37,7 @@ from providers.errors import (
     ProviderError,
     ProviderTimeoutError,
     RateLimitError,
+    StreamHandshakeRejected,
 )
 from providers.models import (
     ApiProtocol,
@@ -50,6 +51,8 @@ from providers.models import (
 BT = chr(96)  # backtick
 FENCE = BT * 3
 _JSON_FENCE = re.compile(FENCE + r"(?:json)?\s*(.*?)\s*" + FENCE, re.DOTALL)
+
+logger = logging.getLogger(__name__)
 
 # System Prompt 注入的 Strict JSON 约束（JSON Mode 兜底，协议无关）
 _STRICT_JSON_PROMPT = (
@@ -164,21 +167,195 @@ def _http_post(
         raise ProviderError(f"网络请求失败: {exc}", code="provider_error") from exc
     finally:
         conn.close()
-    if resp.status == 401:
-        raise AuthenticationError(f"鉴权失败（HTTP 401）: {_brief(raw)}")
-    if resp.status == 429:
-        raise RateLimitError(f"配额超限或请求过于频繁（HTTP 429）: {_brief(raw)}")
-    if resp.status >= 400:
-        raise ProviderError(
-            f"模型服务返回 HTTP {resp.status}: {_brief(raw)}", code="provider_error"
-        )
+    _raise_for_status(resp.status, raw)
     return resp.status, dict(resp.getheaders()), raw
+
+
+def _raise_for_status(status: int, raw: str) -> None:
+    """HTTP 状态 -> 标准错误族映射（_http_post 与 SSE 读取器共用）。"""
+    if status == 401:
+        raise AuthenticationError(f"鉴权失败（HTTP 401）: {_brief(raw)}")
+    if status == 429:
+        raise RateLimitError(f"配额超限或请求过于频繁（HTTP 429）: {_brief(raw)}")
+    if status >= 400:
+        raise ProviderError(f"模型服务返回 HTTP {status}: {_brief(raw)}", code="provider_error")
 
 
 def _brief(raw: str, limit: int = 300) -> str:
     """压缩错误响应体为单行摘要（防审计日志膨胀 / 前端泄露敏感信息）。"""
     text = raw.replace("\n", " ").strip()
     return text[:limit]
+
+
+# --------------------------------------------------------------------------- #
+# SSE 流式传输（stream=True：块间空闲超时 + 总时长上限，客户端聚合）
+# --------------------------------------------------------------------------- #
+# 单行字节上限：网关永不换行的慢滴流会在该处被截断并熔断（防内存无界增长）
+# 单行字节上限（256KB）：防无换行慢滴流内存无界增长；取值需容纳合法的
+# 超长单行大 payload（如伪流式整包网关把完整 JSON 放一行），故远大于常规帧
+_SSE_MAX_LINE_BYTES = 256 * 1024
+
+
+def _iter_sse_payloads(lines: Iterable[str]) -> Iterator[str]:
+    """从 SSE 行序列提取 data 负载（协议中立纯函数，便于单测）。
+
+    忽略空行 / event: / comment:（: 开头）行；`data: <payload>` 产出 payload
+    原文（含 "[DONE]" 字面量——终止语义由消费方判读，本函数不解析 JSON）。
+    空 data: 字段（仅冒号或纯空白）按 SSE 规范忽略，不产出空负载。
+    """
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith(":") or text.startswith("event:"):
+            continue
+        if text.startswith("data:"):
+            payload = text[len("data:") :].strip()
+            if payload:
+                yield payload
+
+
+def _raise_for_error_frame(err: Any) -> None:
+    """流式错误帧 -> 标准错误族映射（429/鉴权特征 -> 专用异常，其余 ProviderError）。"""
+    text = err if isinstance(err, str) else json.dumps(err, ensure_ascii=False)
+    lowered = str(text).lower()
+    if "429" in lowered or "rate_limit" in lowered or "ratelimit" in lowered:
+        raise RateLimitError(f"流式限流（429 特征）: {_brief(text)}")
+    if "401" in lowered or "authentication" in lowered or "invalid_api_key" in lowered:
+        raise AuthenticationError(f"流式鉴权失败: {_brief(text)}")
+    raise ProviderError(f"流式响应错误帧: {_brief(text)}", code="provider_error")
+
+
+def _stream_fallback_eligible(exc: BaseException, *extra_hints: str) -> bool:
+    """流式回退非流式的资格判定：仅限握手阶段 400 且报文命中特征。
+
+    StreamHandshakeRejected 只在 _http_post_sse 首包（未产出任何 chunk 前）
+    抛出——mid-stream 错误帧 / 断连 / 超时永远是其他错误类型，即使其文本
+    巧合包含 "HTTP 400"/"stream" 字样也绝不触发非流式重发（防重复计费）。
+    特征词：stream 前缀族 + JSON Mode 参数族（_UNSUPPORTED_JSON_HINTS）+
+    调用方附加 hints（如 openai_chat 的 stream_options）。
+    """
+    return isinstance(exc, StreamHandshakeRejected) and any(
+        h in str(exc).lower() for h in (*extra_hints, "stream", *_UNSUPPORTED_JSON_HINTS)
+    )
+
+
+def _http_post_sse(
+    url: str,
+    *,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int,
+    max_seconds: int,
+    api_key: str | None = None,
+) -> Iterator[str]:
+    """发送流式 JSON POST，逐条产出 SSE data 负载（惰性生成器）。
+
+    两道防无限流防线：
+    - 块间空闲上限 timeout 与流总剩余预算取最小值，经 sock.settimeout 收紧
+      单次 readline 的等待上限（慢滴流持续供字节也无法拖过总预算）；
+    - 单行字节上限 _SSE_MAX_LINE_BYTES：网关永不换行时 readline 在该处被
+      截断，达到上限仍无换行 => ProviderError 熔断（防内存无界增长）。
+    总预算耗尽抛 ProviderTimeoutError。首包 HTTP 状态非 2xx 与 _http_post
+    同映射；EOF（b""）正常结束迭代——终止帧校验归消费方（_consume_stream）。
+    """
+    body = json.dumps(payload).encode("utf-8")
+    merged_headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        **headers,
+    }
+    if api_key:
+        merged_headers["Authorization"] = f"Bearer {api_key}"
+    parsed = _validate_outbound_url(url)
+    conn_cls = (
+        http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    )
+    conn = conn_cls(parsed.hostname, parsed.port, timeout=timeout)
+    started = time.perf_counter()
+    try:
+        conn.request("POST", parsed.path or "/", body=body, headers=merged_headers)
+        resp = conn.getresponse()
+        if resp.status >= 400:
+            raw = resp.read().decode("utf-8", errors="replace")
+            if resp.status == 400:
+                # 握手阶段 400 专用类型：回退资格判定只认它——此时尚未产出
+                # 任何 chunk，重发无重复计费风险；mid-stream 错误帧/断连永远
+                # 是其他错误类型，结构上不可能误触发回退
+                raise StreamHandshakeRejected(
+                    f"模型服务返回 HTTP 400: {_brief(raw)}", code="provider_error"
+                )
+            _raise_for_status(resp.status, raw)
+        while True:
+            # 防线一：剩余预算语义——块间空闲上限与总剩余取最小值收紧单次读
+            remaining = max_seconds - (time.perf_counter() - started)
+            if remaining <= 0:
+                raise ProviderTimeoutError(f"流式总时长超限（>{max_seconds}s）")
+            sock = getattr(conn, "sock", None)
+            if sock is not None:
+                sock.settimeout(min(timeout, remaining))
+            # 防线二：行字节上限——无换行慢滴流单行熔断
+            line = resp.readline(_SSE_MAX_LINE_BYTES)
+            if not line:
+                return  # EOF：终止帧校验归消费方
+            if len(line) == _SSE_MAX_LINE_BYTES and not line.endswith(b"\n"):
+                raise ProviderError("SSE 行超长（无换行慢滴流），已熔断", code="provider_error")
+            yield from _iter_sse_payloads([line.decode("utf-8", errors="replace")])
+    except TimeoutError as exc:  # socket.timeout（块间空闲超时）
+        raise ProviderTimeoutError(f"请求超时: {exc}") from exc
+    except (http.client.HTTPException, OSError) as exc:
+        raise ProviderError(f"网络请求失败: {exc}", code="provider_error") from exc
+    finally:
+        conn.close()
+
+
+def _consume_stream(
+    payloads: Iterable[str],
+    *,
+    extract_delta: Callable[[dict[str, Any]], str],
+    terminal: Callable[[dict[str, Any]], bool],
+    extract_usage: Callable[[dict[str, Any]], dict[str, Any] | None],
+    extract_error: Callable[[dict[str, Any]], Any] | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """聚合 SSE 帧：返回 (content, usage_raw)；终止校验与错误裁决统一在此。
+
+    - "[DONE]" 字面量视为优雅终止（仅 OpenAI 系协议发送，anthropic 不发）；
+    - 协议终止帧由 terminal(frame) 判定；EOF 先于终止帧 => ProviderError（断连）；
+    - 帧内 error 字段 => _raise_for_error_frame 映射标准错误族；
+    - extract_error（可选）：协议专属错误帧识别（如 responses 的
+      {"type": "error"} / response.failed——无 "error" 顶层键，普通检测
+      漏判后会退化成"断连"），返回真值即按错误帧映射；
+    - 终止时 content 为空 => ProtocolError（如内容全部落在 reasoning_content）。
+    """
+    parts: list[str] = []
+    usage: dict[str, Any] | None = None
+    for raw in payloads:
+        text = raw.strip()
+        if text == "[DONE]":
+            break
+        try:
+            frame = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ProtocolError(f"SSE 帧解析失败: {exc}") from exc
+        if not isinstance(frame, dict):
+            raise ProtocolError(f"SSE 帧非 JSON 对象: {type(frame).__name__}")
+        if frame.get("error"):
+            _raise_for_error_frame(frame["error"])
+        if extract_error is not None:
+            protocol_error = extract_error(frame)
+            if protocol_error:
+                _raise_for_error_frame(protocol_error)
+        if terminal(frame):
+            usage = extract_usage(frame) or usage
+            break
+        piece = extract_delta(frame)
+        if piece:
+            parts.append(piece)
+        usage = extract_usage(frame) or usage
+    else:
+        raise ProviderError("流式响应中途断连（未收到终止帧）", code="provider_error")
+    content = "".join(parts)
+    if not content:
+        raise ProtocolError("流式响应未产出内容（content 为空）")
+    return content, usage
 
 
 # --------------------------------------------------------------------------- #
@@ -270,7 +447,13 @@ class OpenAIChatAdapter(BaseAdapter):
     """
 
     def chat(self, request: UnifiedChatRequest) -> UnifiedChatResponse:
-        """发送 Chat Completions 请求并解析 choices[0].message.content。"""
+        """发送 Chat Completions 请求并解析 choices[0].message.content。
+
+        provider.stream=True 时走 SSE 流式聚合（超时语义=块间空闲+总上限）；
+        网关在握手阶段拒绝流式（StreamHandshakeRejected 且报文含
+        stream/JSON 参数特征）时自动回退非流式重试一次；mid-stream 错误帧/
+        断连/超时永远原样上抛不回退（防重复计费）。
+        """
         messages, system_prompt = self._split_messages(request)
         want_json = (
             request.response_format is not None and request.response_format.type == "json_object"
@@ -280,16 +463,26 @@ class OpenAIChatAdapter(BaseAdapter):
         if system_prompt is not None:
             messages = [{"role": "system", "content": system_prompt}, *messages]
 
-        base_payload: dict[str, Any] = {
-            "model": request.model,
-            "messages": messages,
-            "temperature": request.temperature if request.temperature is not None else 0.0,
-        }
         from config import settings
 
         # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
         timeout = request.timeout or settings.PROVIDER_TIMEOUT
-        status, _, raw = self._post(base_payload, want_json=want_json, timeout=timeout)
+        if self.provider.stream:
+            try:
+                return self._chat_via_stream(request, messages, want_json, timeout)
+            except ProviderError as exc:
+                if not _stream_fallback_eligible(exc, "stream_options"):
+                    raise
+                logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
+        status, _, raw = self._post(
+            {
+                "model": request.model,
+                "messages": messages,
+                "temperature": request.temperature if request.temperature is not None else 0.0,
+            },
+            want_json=want_json,
+            timeout=timeout,
+        )
         try:
             data = json.loads(raw)
             content = data["choices"][0]["message"]["content"]
@@ -297,6 +490,76 @@ class OpenAIChatAdapter(BaseAdapter):
             return self._build_response(content, usage, json_mode=want_json)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise ProtocolError(f"Chat Completions 响应解析失败（HTTP {status}）: {exc}") from exc
+
+    def _chat_via_stream(
+        self,
+        request: UnifiedChatRequest,
+        messages: list[dict[str, Any]],
+        want_json: bool,
+        timeout: int,
+    ) -> UnifiedChatResponse:
+        """SSE 流式调用并聚合为完整 content（provider.stream=True 专用路径）。
+
+        中转站不认 stream_options（HTTP 400 提及该参数）时：去掉该参数保
+        流式重试一次（usage 丢失可接受——上层仅可观测消费）。
+        """
+        from config import settings
+
+        url = f"{self.provider.base_url.rstrip('/')}/chat/completions"
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "messages": messages,
+            "temperature": request.temperature if request.temperature is not None else 0.0,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if want_json:
+            # JSON Mode 原生参数流式下照常透传；被网关拒绝时交由外层回退非流式
+            # （非流式 _post 自带原生参数降级链，行为与现状一致）
+            payload["response_format"] = {"type": "json_object"}
+        headers = self._build_headers()
+        max_seconds = settings.PROVIDER_STREAM_MAX_SECONDS
+
+        def _delta(frame: dict[str, Any]) -> str:
+            return ((frame.get("choices") or [{}])[0].get("delta") or {}).get("content") or ""
+
+        try:
+            content, usage = _consume_stream(
+                _http_post_sse(
+                    url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=timeout,
+                    max_seconds=max_seconds,
+                    api_key=self.provider.api_key,
+                ),
+                extract_delta=_delta,
+                terminal=lambda f: False,  # 终止帧 = [DONE]，_consume_stream 内建处理
+                extract_usage=lambda f: f.get("usage"),
+            )
+        except ProviderError as exc:
+            # 仅握手阶段 400 且报文提及 stream_options 才去参重试；mid-stream
+            # 错误（StreamHandshakeRejected 之外）原样上抛
+            if not (
+                isinstance(exc, StreamHandshakeRejected) and "stream_options" in str(exc).lower()
+            ):
+                raise
+            payload.pop("stream_options", None)
+            logger.info("网关不认 stream_options，去参数保流式重试")
+            content, usage = _consume_stream(
+                _http_post_sse(
+                    url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=timeout,
+                    max_seconds=max_seconds,
+                    api_key=self.provider.api_key,
+                ),
+                extract_delta=_delta,
+                terminal=lambda f: False,
+                extract_usage=lambda f: f.get("usage"),
+            )
+        return self._build_response(content, usage, json_mode=want_json)
 
     def _post(
         self,
@@ -392,7 +655,12 @@ class OpenAIResponsesAdapter(BaseAdapter):
     """
 
     def chat(self, request: UnifiedChatRequest) -> UnifiedChatResponse:
-        """按 /responses 规范组装请求并解析 output 文本。"""
+        """按 /responses 规范组装请求并解析 output 文本。
+
+        provider.stream=True 时走 SSE 流式聚合；网关在握手阶段拒绝流式
+        （StreamHandshakeRejected 且报文含 stream/JSON 参数特征）时回退
+        非流式重试一次。
+        """
         messages, system_prompt = self._split_messages(request)
         want_json = (
             request.response_format is not None and request.response_format.type == "json_object"
@@ -404,15 +672,22 @@ class OpenAIResponsesAdapter(BaseAdapter):
             input_blocks.append({"role": "system", "content": system_prompt})
         input_blocks.extend({"role": m["role"], "content": m["content"]} for m in messages)
 
+        from config import settings
+
+        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
+        timeout = request.timeout or settings.PROVIDER_TIMEOUT
+        if self.provider.stream:
+            try:
+                return self._chat_via_stream(request, input_blocks, want_json, timeout)
+            except ProviderError as exc:
+                if not _stream_fallback_eligible(exc):
+                    raise
+                logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
         payload: dict[str, Any] = {
             "model": request.model,
             "input": input_blocks,
             "temperature": request.temperature if request.temperature is not None else 0.0,
         }
-        from config import settings
-
-        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
-        timeout = request.timeout or settings.PROVIDER_TIMEOUT
         status, _, raw = self._post(payload, want_json=want_json, timeout=timeout)
         try:
             data = json.loads(raw)
@@ -427,6 +702,55 @@ class OpenAIResponsesAdapter(BaseAdapter):
             return self._build_response(content, usage, json_mode=want_json)
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
             raise ProtocolError(f"Responses API 响应解析失败（HTTP {status}）: {exc}") from exc
+
+    def _chat_via_stream(
+        self,
+        request: UnifiedChatRequest,
+        input_blocks: list[dict[str, Any]],
+        want_json: bool,
+        timeout: int,
+    ) -> UnifiedChatResponse:
+        """SSE 流式调用：delta 取 response.output_text.delta，usage 取 response.completed。"""
+        from config import settings
+
+        url = f"{self.provider.base_url.rstrip('/')}/responses"
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "input": input_blocks,
+            "temperature": request.temperature if request.temperature is not None else 0.0,
+            "stream": True,
+        }
+        if want_json:
+            # JSON Mode 原生参数流式下照常透传（被拒时交由外层回退非流式降级链）
+            payload["text"] = {"format": {"type": "json_object"}}
+
+        def _extract_error(frame: dict[str, Any]) -> Any:
+            """responses 协议错误帧：{"type":"error"} 与 response.failed 无顶层
+            "error" 键，普通检测漏判后会退化成"断连"——此处显式识别。"""
+            ftype = frame.get("type")
+            if ftype == "error":
+                return frame
+            if ftype == "response.failed":
+                return (frame.get("response") or {}).get("error") or frame
+            return None
+
+        content, usage = _consume_stream(
+            _http_post_sse(
+                url,
+                payload=payload,
+                headers=self._build_headers(),
+                timeout=timeout,
+                max_seconds=settings.PROVIDER_STREAM_MAX_SECONDS,
+                api_key=self.provider.api_key,
+            ),
+            extract_delta=lambda f: (
+                (f.get("delta") or "") if f.get("type") == "response.output_text.delta" else ""
+            ),
+            terminal=lambda f: f.get("type") == "response.completed",
+            extract_usage=lambda f: (f.get("response") or {}).get("usage"),
+            extract_error=_extract_error,
+        )
+        return self._build_response(content, usage, json_mode=want_json)
 
     def _post(
         self,
@@ -552,6 +876,13 @@ class AnthropicAdapter(BaseAdapter):
 
         # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
         timeout = request.timeout or settings.PROVIDER_TIMEOUT
+        if self.provider.stream:
+            try:
+                return self._chat_via_stream(payload, want_json, timeout)
+            except ProviderError as exc:
+                if not _stream_fallback_eligible(exc):
+                    raise
+                logger.info("网关拒绝流式请求，回退非流式重试: %s", _brief(str(exc)))
         status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=timeout)
         try:
             data = json.loads(raw)
@@ -585,6 +916,69 @@ class AnthropicAdapter(BaseAdapter):
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
             raise ProtocolError(f"Anthropic 响应解析失败（HTTP {status}）: {exc}") from exc
 
+    def _chat_via_stream(
+        self, payload_base: dict[str, Any], want_json: bool, timeout: int
+    ) -> UnifiedChatResponse:
+        """SSE 流式调用：delta 取 content_block_delta，usage 由 message_start/message_delta 合并。"""
+        from config import settings
+
+        url = f"{self.provider.base_url.rstrip('/')}/v1/messages"
+        payload = {**payload_base, "stream": True}
+        # 鉴权与非流式路径同源：内联 x-api-key + anthropic-version（api_key 参数保持 None）
+        headers = {**self._build_headers()}
+        if self.provider.api_key:
+            headers["x-api-key"] = self.provider.api_key
+            headers["anthropic-version"] = "2023-06-01"
+        usage_acc: dict[str, int] = {}
+
+        def _extract_usage(frame: dict[str, Any]) -> dict[str, Any] | None:
+            ftype = frame.get("type")
+            if ftype == "message_start":
+                start = (frame.get("message") or {}).get("usage") or {}
+                usage_acc["input_tokens"] = int(start.get("input_tokens") or 0)
+            elif ftype == "message_delta":
+                delta_usage = frame.get("usage") or {}
+                usage_acc["output_tokens"] = int(delta_usage.get("output_tokens") or 0)
+            return dict(usage_acc) if usage_acc else None
+
+        content, usage = _consume_stream(
+            _http_post_sse(
+                url,
+                payload=payload,
+                headers=headers,
+                timeout=timeout,
+                max_seconds=settings.PROVIDER_STREAM_MAX_SECONDS,
+            ),
+            extract_delta=lambda f: (
+                (f.get("delta") or {}).get("text") or ""
+                if f.get("type") == "content_block_delta"
+                else ""
+            ),
+            terminal=lambda f: f.get("type") == "message_stop",
+            extract_usage=_extract_usage,
+        )
+        parsed = None
+        if want_json:
+            try:
+                parsed = extract_json_object(content)
+            except ProtocolError:
+                parsed = None
+        # usage 契约与非流式一致：上游未产出 usage 帧 => None（不造 Usage(0,0,0)）
+        usage_model = None
+        if usage:
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+            usage_model = Usage(
+                prompt_tokens=input_tokens,
+                completion_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+            )
+        return UnifiedChatResponse(
+            content=content,
+            parsed_json=parsed,
+            usage=usage_model,
+        )
+
     def test_connection(self) -> TestConnectionResult:
         """发送极小 ping 文本，验证 HTTP 200 与延时。"""
         from config import settings
@@ -616,117 +1010,12 @@ class AnthropicAdapter(BaseAdapter):
 
 
 # --------------------------------------------------------------------------- #
-# Gemini 适配器
-# --------------------------------------------------------------------------- #
-class GeminiAdapter(BaseAdapter):
-    """Google Gemini 协议（``/v1beta/models/{model}:generateContent``）。
-
-    JSON Mode：透传 ``generationConfig.responseMimeType="application/json"``
-    并注入 System Prompt 约束（双保险）。
-    """
-
-    def chat(self, request: UnifiedChatRequest) -> UnifiedChatResponse:
-        """组装 Gemini 请求（contents + systemInstruction）并解析候选文本。"""
-        messages, system_prompt = self._split_messages(request)
-        want_json = (
-            request.response_format is not None and request.response_format.type == "json_object"
-        )
-        if want_json and system_prompt is not None:
-            system_prompt = _inject_strict_json(system_prompt)
-
-        contents: list[dict[str, Any]] = []
-        for m in messages:
-            role = "model" if m["role"] == "assistant" else "user"
-            contents.append({"role": role, "parts": [{"text": m["content"]}]})
-        if not contents:
-            contents = [{"role": "user", "parts": [{"text": "ping"}]}]
-        payload: dict[str, Any] = {"contents": contents}
-        if system_prompt:
-            payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
-        generation: dict[str, Any] = {}
-        if request.temperature is not None:
-            generation["temperature"] = request.temperature
-        if want_json:
-            generation["responseMimeType"] = "application/json"
-        if generation:
-            payload["generationConfig"] = generation
-
-        url = f"{self.provider.base_url.rstrip('/')}/v1beta/models/{request.model}:generateContent"
-        headers = {**self._build_headers()}
-        if self.provider.api_key:
-            headers["x-goog-api-key"] = self.provider.api_key
-        from config import settings
-
-        # 读超时：请求级覆盖优先，回退网关默认（PROVIDER_TIMEOUT 配置面）
-        timeout = request.timeout or settings.PROVIDER_TIMEOUT
-        status, _, raw = _http_post(url, payload=payload, headers=headers, timeout=timeout)
-        try:
-            data = json.loads(raw)
-            candidates = data.get("candidates") or []
-            content = ""
-            for cand in candidates:
-                for part in (cand.get("content") or {}).get("parts", []) or []:
-                    if isinstance(part, dict) and part.get("text"):
-                        content += part["text"]
-            usage = data.get("usageMetadata") or {}
-            parsed = None
-            if want_json:
-                try:
-                    parsed = extract_json_object(content)
-                except ProtocolError:
-                    parsed = None
-            return UnifiedChatResponse(
-                content=content,
-                parsed_json=parsed,
-                usage=(
-                    Usage(
-                        prompt_tokens=int(usage.get("promptTokenCount") or 0),
-                        completion_tokens=int(usage.get("candidatesTokenCount") or 0),
-                        total_tokens=int(usage.get("totalTokenCount") or 0),
-                    )
-                    if usage
-                    else None
-                ),
-            )
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise ProtocolError(f"Gemini 响应解析失败（HTTP {status}）: {exc}") from exc
-
-    def test_connection(self) -> TestConnectionResult:
-        """发送极小 ping 文本，验证 HTTP 200 与延时。"""
-        from config import settings
-
-        started = time.perf_counter()
-        try:
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
-                "generationConfig": {"maxOutputTokens": 1},
-            }
-            url = f"{self.provider.base_url.rstrip('/')}/v1beta/models/{self.model_id}:generateContent"
-            headers = {**self._build_headers()}
-            if self.provider.api_key:
-                headers["x-goog-api-key"] = self.provider.api_key
-            status, _, _ = _http_post(
-                url, payload=payload, headers=headers, timeout=settings.PROVIDER_TIMEOUT
-            )
-            return TestConnectionResult(
-                success=status == 200, latency_ms=round((time.perf_counter() - started) * 1000.0, 1)
-            )
-        except ProviderError as exc:
-            return TestConnectionResult(
-                success=False,
-                latency_ms=round((time.perf_counter() - started) * 1000.0, 1),
-                error=str(exc),
-            )
-
-
-# --------------------------------------------------------------------------- #
 # 适配器工厂表
 # --------------------------------------------------------------------------- #
 ADAPTER_BY_PROTOCOL: dict[ApiProtocol, type[BaseAdapter]] = {
     ApiProtocol.OPENAI_CHAT: OpenAIChatAdapter,
     ApiProtocol.OPENAI_RESPONSES: OpenAIResponsesAdapter,
     ApiProtocol.ANTHROPIC: AnthropicAdapter,
-    ApiProtocol.GEMINI: GeminiAdapter,
 }
 
 
@@ -742,7 +1031,6 @@ __all__ = [
     "ADAPTER_BY_PROTOCOL",
     "AnthropicAdapter",
     "BaseAdapter",
-    "GeminiAdapter",
     "OpenAIChatAdapter",
     "OpenAIResponsesAdapter",
     "build_adapter",

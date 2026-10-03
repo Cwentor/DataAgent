@@ -37,6 +37,7 @@ from core.orchestrator.intent import (
     IntentType,
     classify_intent,
     dimension_terms,
+    enumeration_dsl,
 )
 from core.orchestrator.prompts import (
     DEGRADED_SUMMARIZER_SYSTEM,
@@ -205,6 +206,7 @@ def _heuristic_plan(query: str) -> list[PlanStep] | None:
 
     - DIAGNOSTIC => 诊断式 DAG（总量对比 -> 因子分解 -> 维度下钻 -> 综合）；
     - CARDINALITY => count_distinct 直答（DSL 由 intent 模块构造）；
+    - ENUMERATION => 纯维度投影直答（十九期 M1，DSL 由 intent 模块构造）；
     - METRIC_SCALAR => 按锚点直答（跨表混合锚等不可构造时 None）；
     - UNKNOWN => None（planner 置 blocked_reason，critic/synthesize 短路拒答）。
     """
@@ -226,6 +228,20 @@ def _heuristic_plan(query: str) -> list[PlanStep] | None:
                 dsl=dsl,
             ),
             PlanStep(id="s2", goal="直接报告计数结果", kind="synthesize", depends_on=["s1"]),
+        ]
+    if profile.intent == IntentType.ENUMERATION:
+        dsl = enumeration_dsl(query)
+        if dsl is None:
+            return None
+        field = dsl["dimensions"][0]["field"]
+        return [
+            PlanStep(
+                id="s1",
+                goal=f"列出{_dimension_label(field)}的全部取值",
+                kind="query",
+                dsl=dsl,
+            ),
+            PlanStep(id="s2", goal="直接报告维度取值清单", kind="synthesize", depends_on=["s1"]),
         ]
     if profile.intent == IntentType.METRIC_SCALAR:
         dsl = _scalar_dsl(profile.anchor_fields, query)
@@ -322,17 +338,24 @@ def _confirmed_filter_from_supplement(query: str, enums: dict[str, list[str]]) -
 
 
 def _degraded_parse(
-    query: str, profile: IntentProfile, enum_values: dict[str, list[str]] | None
-) -> tuple[str, Any]:
+    query: str,
+    profile: IntentProfile,
+    enum_values: dict[str, list[str]] | None,
+    assume_on_ambiguity: bool = False,
+) -> tuple[str, Any, list[str]]:
     """UNKNOWN 二次判定（分层降级兜底）。
 
-    输入为 classify_intent 的确定性画像（不信任 LLM 回传意图）。返回 (mode, payload)：
-    - ("not_exist", reason)：无指标锚 / 仅维度锚 / 跨表混合锚 => NOT_EXIST 拒答
+    输入为 classify_intent 的确定性画像（不信任 LLM 回传意图）。返回 (mode, payload, assumptions)：
+    - ("not_exist", reason, [])：无指标锚 / 仅维度锚 / 跨表混合锚 => NOT_EXIST 拒答
       （语义不存在，宁拒不错）；
-    - ("plan", steps)：唯一候选口径 => 降级计划（query+synthesize 两步结构，
-      严禁 analyze——禁多步组合是结构约束而非提示词约束）；
-    - ("clarify", (question, options))：筛选值多候选或缺失 => 选项式澄清
+    - ("plan", steps, assumptions)：唯一候选口径 => 降级计划（query+synthesize
+      两步结构，严禁 analyze——禁多步组合是结构约束而非提示词约束）；
+    - ("clarify", (question, options), [])：筛选值多候选或缺失 => 选项式澄清
       （用户回答经 human_reply 合并后重新解析，唯一化后进 plan_review）。
+
+    ``assume_on_ambiguity``（十九期 M3 分级透明作答）：二轮歧义不再拒答/反问
+    ——多候选筛选维度转分组统计，选定"分组、不筛选具体取值"的缺省口径，假设
+    逐条随 assumptions 返回（报告头部确定性呈现，绝不静默猜口径）。
 
     筛选条件来源白名单（强制）：显式时间解析 / 用户确认内容 / 枚举值精确命中
     （数据真实存在不算猜）；枚举未命中的取值一律留白交用户确认。
@@ -355,13 +378,15 @@ def _degraded_parse(
             return (
                 "not_exist",
                 f"识别到维度【{labels}】但未识别到任何可查询指标，无法构造查询",
+                [],
             )
-        return ("not_exist", "无法从语义目录识别问题意图（未命中任何指标/维度锚点）")
+        return ("not_exist", "无法从语义目录识别问题意图（未命中任何指标/维度锚点）", [])
     tables = {_SCALAR_ANCHOR_TABLE[a] for a in metrics_anchors}
     if len(tables) > 1:
         return (
             "not_exist",
             "识别到跨表指标锚点（如 GMV 与退款金额），单查询无法同口径构造",
+            [],
         )
     dim_anchors = tuple(a for a in profile.anchor_fields if a not in metrics_anchors)
 
@@ -386,7 +411,7 @@ def _degraded_parse(
             filters.append({"field": dim, "operator": "eq", "value": hits[0]})
         else:
             pending.append((dim, hits))
-    if pending:
+    if pending and not assume_on_ambiguity:
         metric_labels = "、".join(_metric_label(m) for m in metrics_anchors)
         question = (
             f"AI 规划暂不可用，已识别指标【{metric_labels}】，但以下维度的"
@@ -400,7 +425,14 @@ def _degraded_parse(
             else:
                 options.append(f"按{label}分组统计（不筛选具体取值）")
                 options.append(f"不限定{label}，查询全部")
-        return ("clarify", (question, options[:6]))
+        return ("clarify", (question, options[:6]), [])
+    assume_notes: list[str] = []
+    for dim, _hits in pending:
+        # 二轮歧义转带假设作答（分级透明）：多候选/未命中取值一律不猜——
+        # 该维度改按分组统计（全域口径），假设随报告头部呈现
+        label = _dimension_label(dim)
+        group_dims.append(dim)
+        assume_notes.append(f"已按{label}分组统计、不筛选具体取值（筛选口径假设）")
 
     explicit = parse_explicit_time_window(query)
     window = (
@@ -437,7 +469,68 @@ def _degraded_parse(
             depends_on=["s1"],
         ),
     ]
-    return ("plan", steps)
+    return ("plan", steps, assume_notes)
+
+
+_LIFT_MAX_RETRIES = 2  # SQL 提升闸门内联自愈上限（拒升清单喂回重规划）
+
+
+def _lift_plan_sql(
+    steps: list[PlanStep],
+    llm: Any | None,
+    state: AgentState,
+) -> tuple[list[PlanStep] | None, list[str]]:
+    """SQL 步骤经提升闸门转译（十九期 M4）：拒升 ≠ 拒答。
+
+    可升步骤的 sql 转 dsl（置空 sql，sql-lifted 记入 scratchpad）；拒升清单
+    注入重规划提示词内联自愈 ≤2 次；仍拒升返回 None（调用方回落确定性兜底，
+    探索层执行留 M6）。LLM 产出的 SQL 永不出本函数直接执行。
+    """
+    from core.retrieval.profiling import profile_enum_values
+    from core.retrieval.sql_lift import lift_sql
+
+    notes: list[str] = []
+    attempts = 0
+    while True:
+        rejections: list[str] = []
+        lifted: list[PlanStep] = []
+        for step in steps:
+            if not step.sql:
+                lifted.append(step)
+                continue
+            result = lift_sql(step.sql)
+            if result.ok:
+                lifted.append(step.model_copy(update={"dsl": result.dsl, "sql": None}))
+                notes.append(f"[planner] sql-lifted: {step.id}")
+                notes.extend(f"[planner] lift-note: {n}" for n in result.notes)
+                continue
+            rejections.extend(f"[{r.clause}] {r.construct}: {r.reason}" for r in result.rejections)
+        if not rejections:
+            return lifted, notes
+        attempts += 1
+        if llm is None or attempts > _LIFT_MAX_RETRIES:
+            notes.append(f"[planner] sql-lift-failed: {'；'.join(rejections[:6])}")
+            return None, notes
+        retry_payload = _llm_json(
+            llm,
+            PLANNER_SYSTEM,
+            planner_prompt(
+                state.user_query,
+                schema_digest(profile_enum_values()),
+                error_context=(
+                    "SQL 提升闸门拒升清单（你的上一版计划含不可提升构造，必须据此改写）：\n"
+                    + "\n".join(rejections)
+                ),
+                history_context=state.history_digest or None,
+            ),
+        )
+        if not retry_payload:
+            notes.append("[planner] sql-lift-failed: 自愈重规划调用失败")
+            return None, notes
+        steps = _plan_from_llm(retry_payload)
+        if steps is None:
+            notes.append("[planner] sql-lift-failed: 重规划计划非法")
+            return None, notes
 
 
 def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
@@ -456,6 +549,7 @@ def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
             return None
         dsl = item.get("dsl") if isinstance(item.get("dsl"), dict) else None
         code = item.get("code") if isinstance(item.get("code"), str) else None
+        sql = item.get("sql") if isinstance(item.get("sql"), str) and item.get("sql") else None
         if kind == "query" and dsl is None and code is None:
             # query 步骤既无 DSL 也无兜底说明 => 交给 query 节点的启发式 DSL
             pass
@@ -471,6 +565,7 @@ def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
                 depends_on=[str(d) for d in item.get("depends_on", []) if isinstance(d, str)],
                 dsl=dsl,
                 code=code,
+                sql=sql,
             )
         )
     if len({s.id for s in steps}) != len(steps):
@@ -491,7 +586,14 @@ def planner_node(state: AgentState) -> AgentState:
     """
     llm = _resolve_llm()
     steps: list[PlanStep] | None = None
-    if llm is not None:
+    from_llm = False
+    lift_notes: list[str] = []  # SQL 提升闸门记录（M4）：scratchpad 注入
+    # 枚举直答预路由（十九期 M1）：ENUMERATION 为词表硬判定的确定性意图，
+    # 而现行 LLM 规划契约（metrics 必填）无法表达维度投影——先走启发式
+    # 直答；构造失败（如"列出有退款的品牌"含过滤线索）才放行 LLM 规划
+    if llm is not None and classify_intent(state.user_query).intent == IntentType.ENUMERATION:
+        steps = _heuristic_plan(state.user_query)
+    if steps is None and llm is not None:
         # SchemaAgent 动态 profiling（后续项）：低基数字段枚举值注入规划上下文；
         # 探查失败降级为空 dict（不阻断规划主链路），离线/无库环境无副作用
         from core.retrieval.profiling import profile_enum_values
@@ -510,25 +612,50 @@ def planner_node(state: AgentState) -> AgentState:
                 schema_digest(profile_enum_values()),
                 error_context=error_context,
                 history_context=state.history_digest or None,
+                clarify_context=(
+                    f"已澄清轮次：{state.clarification_rounds}"
+                    if state.clarification_rounds >= 1
+                    else None
+                ),
             ),
         )
+        if not payload:
+            # LLM 调用/解析失败标记（十九期 M1）：拒答建议按成因分流；
+            # 该标记仅在 blocked 路径存续（plan 产出时 scratchpad 被整体替换）
+            state = state.apply(scratchpad=[*state.scratchpad, "[planner] llm-call-failed"])
         if payload:
             if payload.get("clarification"):
-                clar_raw = payload["clarification"]
-                options: list[str] = []
-                if isinstance(clar_raw, dict):
-                    question = str(clar_raw.get("question") or "").strip()
-                    raw_opts = clar_raw.get("options")
-                    if isinstance(raw_opts, list):
-                        options = [str(o) for o in raw_opts if isinstance(o, str) and o.strip()]
-                else:
-                    question = str(clar_raw).strip()
-                return state.apply(
-                    phase="clarify",
-                    clarification=question or "请补充分析需求",
-                    clarification_options=options,
-                )
+                # 二轮硬拦截（M3-T2 Review Focus #3）：提示词是软约束，消费层
+                # 强制——二轮仍反问视为无效响应，忽略 clarification 落入下方
+                # steps=None 兜底（degraded assume 模式带假设作答），严禁二轮
+                # 澄清挂起死循环
+                if state.clarification_rounds < 1:
+                    clar_raw = payload["clarification"]
+                    options: list[str] = []
+                    if isinstance(clar_raw, dict):
+                        question = str(clar_raw.get("question") or "").strip()
+                        raw_opts = clar_raw.get("options")
+                        if isinstance(raw_opts, list):
+                            options = [str(o) for o in raw_opts if isinstance(o, str) and o.strip()]
+                    else:
+                        question = str(clar_raw).strip()
+                    return state.apply(
+                        phase="clarify",
+                        clarification=question or "请补充分析需求",
+                        clarification_options=options,
+                    )
             steps = _plan_from_llm(payload)
+            from_llm = steps is not None
+            if steps is not None and any(s.sql for s in steps):
+                steps, lift_notes = _lift_plan_sql(steps, llm, state)
+                from_llm = steps is not None
+            # 口径假设（十九期 M3 分级透明作答）：宽容消费（缺失/非法不阻塞）；
+            # 报告头部呈现由 synthesize 承担
+            raw_assumptions = payload.get("assumptions")
+            if isinstance(raw_assumptions, list):
+                cleaned = [str(a).strip() for a in raw_assumptions if str(a).strip()]
+                if cleaned:
+                    state = state.apply(assumptions=cleaned)
             # intent 回传（十八期）：仅诊断可观测，宽容消费（缺失/非法不阻塞）；
             # L3 守卫不依赖它（用 intent 模块确定性重判）
             intent_payload = payload.get("intent")
@@ -546,18 +673,20 @@ def planner_node(state: AgentState) -> AgentState:
                 )
     if steps is None:
         steps = _heuristic_plan(state.user_query)
-        planner_used = "heuristic"
-    else:
-        planner_used = "llm"
+    planner_used = "llm" if from_llm else "heuristic"
     if steps is None:
         # 兜底准入（十八期）+ 分层降级二次判定（2026-09）：UNKNOWN 拆为
         # 弱解析（字段存在但无法自动拆解 => 交互确认）与 NOT_EXIST（语义
         # 不存在 => 拒答）。严禁猜测口径产计划（回归锚点：曾固定 sum(gmv)
-        # 答非所问）。
+        # 答非所问）。二轮起转带假设作答（十九期 M3 分级透明作答）：
+        # assume_on_ambiguity 下多候选筛选维度转分组，假设随计划透传报告。
         from core.retrieval.profiling import profile_enum_values
 
-        mode, payload = _degraded_parse(
-            state.user_query, classify_intent(state.user_query), profile_enum_values()
+        mode, payload, degraded_assumptions = _degraded_parse(
+            state.user_query,
+            classify_intent(state.user_query),
+            profile_enum_values(),
+            assume_on_ambiguity=state.clarification_rounds >= 1,
         )
         if mode == "plan":
             events.emit_event("degrade", {"outcome": "parse_hit", "query": state.user_query[:200]})
@@ -572,24 +701,13 @@ def planner_node(state: AgentState) -> AgentState:
                 answered_by=(
                     "degraded_auto" if state.autonomy_level == "L4" else "degraded_confirmed"
                 ),
+                # 口径假设合并（LLM 假设 + 降级解析假设），报告头部呈现
+                assumptions=[*state.assumptions, *degraded_assumptions],
                 # 新计划 = 新的执行授权需求：高危确认锚复位
                 high_risk_approved=False,
             )
         if mode == "clarify":
-            if state.clarification_rounds >= 1:
-                # 二轮澄清仍歧义 => 拒答（防循环；plan_edit_instruction 同类经验）
-                default_registry().record_degrade("rejected")
-                return state.apply(
-                    blocked_reason="经一轮澄清后查询条件仍无法唯一确定，已停止降级解析。"
-                    "请调整问法（明确指标与筛选条件），或等待 AI 规划服务恢复后重试。",
-                    answered_by="blocked",
-                    plan_steps=[],
-                    plan_edit_instruction=None,
-                    scratchpad=[
-                        *state.scratchpad,
-                        "[planner] blocked: degraded clarify round-limit",
-                    ],
-                )
+            # assume_on_ambiguity 下二轮不再返回 clarify；此处仅一轮首问路径
             question, options = payload
             events.emit_event("degrade", {"outcome": "parse_hit", "query": state.user_query[:200]})
             default_registry().record_degrade("parse_hit")
@@ -619,7 +737,7 @@ def planner_node(state: AgentState) -> AgentState:
     return state.apply(
         plan_steps=steps,
         phase="query",
-        scratchpad=[f"[planner] {planner_used}"],
+        scratchpad=[f"[planner] {planner_used}", *lift_notes],
         answered_by=planner_used,
         # 新计划 = 新的执行授权需求：高危确认锚复位（重规划后的 analyze 步骤
         # 需重新征求 L3 用户批准，严禁复用旧计划的授权放行新代码）
@@ -779,6 +897,10 @@ def _intent_dsl_mismatch(query: str, dsl_payload: dict[str, Any]) -> str | None:
         ):
             return None
         return "基数类问题的查询目标必须是锚定维度上的 count_distinct 聚合"
+    if profile.intent == IntentType.ENUMERATION:
+        if len(metrics) == 0:
+            return None
+        return "枚举类问题的查询必须是纯维度投影（不得携带聚合指标）"
     if profile.intent == IntentType.METRIC_SCALAR:
         outside = [
             str(m.get("field")) for m in metrics if m.get("field") not in profile.anchor_fields
@@ -2602,7 +2724,14 @@ def _cannot_answer_report(state: AgentState) -> str:
     """意图不可确定的诚实拒答报告（十八期）。
 
     与 _no_data_report 同哲学：严禁让 LLM 在无理解依据时编造答案。
-    说明原因 + 能力清单引导 + 可行动建议；纯确定性字符串构造，零 LLM 调用。
+    说明原因 + 能力清单引导 + 可行动建议；纯确定性字符串构造，零 LLM
+    调用（_resolve_llm 仅做配置解析，不发起网络请求）。
+
+    建议按 LLM 配置状态区分（2026-09 诊断修复）：旧版无条件建议"配置
+    LLM 模型"——LLM 已配置但网关调用失败时误导用户重复配置；已配置
+    分支如实告知"拒答由确定性兜底裁决"并给出连通性排查指引。
+    十九期 M1 进一步按成因三分流：能力边界类拒答（LLM 健康时的确定性
+    判定）与 LLM 服务状态无关，不得引导用户排查网关。
     """
     from core.orchestrator.intent import capability_catalog_lines
 
@@ -2621,7 +2750,22 @@ def _cannot_answer_report(state: AgentState) -> str:
     lines.append("**当前支持查询的能力清单：**")
     lines.extend(capability_catalog_lines())
     lines.append("")
-    lines.append("建议：请调整问法（明确指标或维度），或配置 LLM 模型后重试以获得完整语义理解。")
+    llm_call_failed = "[planner] llm-call-failed" in state.scratchpad
+    if _resolve_llm() is None:
+        lines.append(
+            "建议：请调整问法（明确指标或维度）。当前未配置 LLM 模型，"
+            "语义理解由确定性兜底承担；配置 LLM 后重试可获得完整语义理解。"
+        )
+    elif llm_call_failed:
+        lines.append(
+            "建议：请调整问法（明确指标或维度）。LLM 已配置但本次调用失败，"
+            "拒答由确定性兜底裁决；若持续出现，请检查 LLM 网关连通性或查看服务日志。"
+        )
+    else:
+        lines.append(
+            "建议：请调整问法（明确指标或维度）。本次拒答源于问法超出当前可确定的"
+            "查询口径范围（能力边界），与 LLM 服务状态无关。"
+        )
     return "\n".join(lines)
 
 
@@ -2655,6 +2799,18 @@ def _degradation_banner(state: AgentState, synth_llm_used: bool = False) -> str:
         "> ⚠️ **本次回答由离线兜底引擎生成**（LLM 规划不可用），"
         "分析口径与报告均为确定性规则结果，仅供参考。\n\n"
     )
+
+
+def _assumptions_header(state: AgentState) -> str:
+    """口径假设头部块（十九期 M3 分级透明作答）。
+
+    带假设作答 ≠ 静默降级：assumptions 必须在报告头部确定性呈现（LLM 综合
+    成功路径同样前置，不依赖 LLM 转述）——用户可据此追问修正口径。
+    """
+    if not state.assumptions:
+        return ""
+    items = "\n".join(f"> {i}. {a}" for i, a in enumerate(state.assumptions, start=1))
+    return "> ℹ️ **口径假设**（本报告按以下假设选定分析口径，可追问修正）：\n" + items + "\n\n"
 
 
 def synthesize_node(state: AgentState) -> AgentState:
@@ -2784,7 +2940,11 @@ def synthesize_node(state: AgentState) -> AgentState:
 
     if llm_report:
         # LLM 综合成功：水印明示"计划离线、叙述由 AI 生成"（措辞精确化）
-        report = _degradation_banner(state, synth_llm_used=True) + llm_report
+        report = (
+            _degradation_banner(state, synth_llm_used=True)
+            + _assumptions_header(state)
+            + llm_report
+        )
         events.emit_event(
             events.EVENT_ARTIFACT_EMIT,
             {"artifact": {"type": "markdown_report", "title": "分析报告", "content": report}},
@@ -2806,6 +2966,10 @@ def synthesize_node(state: AgentState) -> AgentState:
         lines.append("")
     lines.append(f"## 分析报告：{state.user_query}")
     lines.append("")
+    assumptions_block = _assumptions_header(state)
+    if assumptions_block:
+        lines.append(assumptions_block.rstrip("\n"))
+        lines.append("")
     for summary in deduped_summaries:
         try:
             lines.extend(_summary_analyst_markdown(summary, state))

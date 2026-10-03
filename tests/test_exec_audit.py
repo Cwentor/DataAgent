@@ -144,3 +144,47 @@ def test_execute_sql_integration_clean_query(conn):
     result = execute_sql(conn, "SELECT province FROM orders WHERE id = 1 LIMIT 1")
     assert result.rows == [["广东"]]
     assert result.findings == []
+
+
+def test_m2_new_shapes_pass_audit_gate(conn):
+    """十九期 M2：投影 / HAVING / 表达式指标三种新形态编译产物过审计门零 REJECTED。"""
+    from compiler.sql_compiler import compile_sql
+    from exec.audit import audit_compiled_sql
+    from semantic.dsl_schema import QueryDSL
+
+    projection_sql = compile_sql(QueryDSL.model_validate({"dimensions": [{"field": "brand"}]}))
+    having_sql = compile_sql(
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                ],
+                "dimensions": [{"field": "category"}],
+                "having": [{"field": "gmv", "operator": "gt", "value": 0}],
+            }
+        )
+    )
+    expression_sql = compile_sql(
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
+                    {
+                        "kind": "expression",
+                        "alias": "aov",
+                        "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "orders"}]},
+                    },
+                ],
+                "dimensions": [{"field": "category"}],
+            }
+        )
+    )
+    for name, sql in [
+        ("projection", projection_sql),
+        ("having", having_sql),
+        ("expression", expression_sql),
+    ]:
+        findings = audit_compiled_sql(sql)
+        rejected = [f for f in findings if f.severity == "rejected"]
+        assert rejected == [], (name, [f.to_dict() for f in rejected])

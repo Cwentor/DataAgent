@@ -24,7 +24,6 @@ class ApiProtocol(StrEnum):
     OPENAI_CHAT = "openai_chat"  # POST {baseUrl}/chat/completions
     OPENAI_RESPONSES = "openai_responses"  # POST {baseUrl}/responses
     ANTHROPIC = "anthropic"  # POST {baseUrl}/v1/messages
-    GEMINI = "gemini"  # POST {baseUrl}/v1beta/models/{model}:generateContent
 
 
 # --------------------------------------------------------------------------- #
@@ -50,6 +49,7 @@ class ProviderConfig(BaseModel):
     name: str
     is_preset: bool = False  # 预置供应商不可删除（可禁用）
     enabled: bool = True
+    stream: bool = False  # SSE 流式传输（网关对长请求整包读超时时开启）
     base_url: str
     api_key: str = ""
     protocol: ApiProtocol = ApiProtocol.OPENAI_CHAT

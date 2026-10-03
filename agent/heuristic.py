@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Any
+from typing import Any, ClassVar
 
 from agent.clarify import undefined_metric_terms
 from agent.errors import PipelineError
@@ -162,6 +162,9 @@ class DeterministicNL2DSL:
                 dsl["time_filter"]["time_field"] = self._time_dim_field(q)
             if self._fill_gaps(q):
                 dsl["fill_gaps"] = True
+            having = self._having(q, metrics)
+            if having:
+                dsl["having"] = having
             if top_n:
                 dsl["top_n"] = top_n
             parsed = QueryDSL.model_validate(dsl)
@@ -185,7 +188,12 @@ class DeterministicNL2DSL:
         """
         allowed = scoped_fields(principal)
         referenced: set[str] = set()
+        # 表达式指标（十九期 M3）：ref 回溯到被引用聚合指标的字段（与
+        # security.guard._referenced_fields 同口径，禁列不得借表达式绕过）
+        agg_by_alias = {}
         for m in dsl.metrics:
+            if getattr(m, "kind", "") == "expression":
+                continue
             if isinstance(m, RatioMetric):
                 referenced.add(m.numerator.field)
                 referenced.add(m.denominator.field)
@@ -193,6 +201,17 @@ class DeterministicNL2DSL:
                 referenced.add(m.base.field)
             else:
                 referenced.add(m.field)
+            agg_by_alias[m.alias] = m
+        for m in dsl.metrics:
+            if getattr(m, "kind", "") != "expression":
+                continue
+            stack = [m.expr]
+            while stack:
+                node = stack.pop()
+                ref_metric = agg_by_alias.get(getattr(node, "ref", None))
+                if ref_metric is not None:
+                    referenced.add(ref_metric.field)
+                stack.extend(getattr(node, "args", []))
         for d in dsl.dimensions:
             referenced.add(d.field)
         for f in dsl.filters:
@@ -204,6 +223,58 @@ class DeterministicNL2DSL:
     # ------------------------------------------------------------------ #
     # 指标
     # ------------------------------------------------------------------ #
+    # 聚合后过滤阈值模式（十九期 M3）："只要GMV超过1000 / 订单量低于50"
+    _HAVING_THRESHOLD_RE: ClassVar = re.compile(
+        r"(GMV|销售额|订单量|订单数|买家数|退款金额)\s*"
+        r"(超过|大于|高于|不少于|不低于|低于|小于|不足)\s*"
+        r"([0-9][0-9,，.]*)\s*(万)?"
+    )
+    _HAVING_OP_MAP: ClassVar = {
+        "超过": "gt",
+        "大于": "gt",
+        "高于": "gt",
+        "不少于": "gte",
+        "不低于": "gte",
+        "低于": "lt",
+        "小于": "lt",
+        "不足": "lt",
+    }
+    _HAVING_FIELD_ALIAS: ClassVar = {
+        "GMV": "gmv",
+        "销售额": "gmv",
+        "订单量": "order_count",
+        "订单数": "order_count",
+        "买家数": "buyers",
+        "退款金额": "refund_amount",
+    }
+
+    def _having(self, q: str, metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """HAVING 阈值解析（十九期 M3）："只要GMV超过1000" -> gmv > 1000。
+
+        仅当阈值指向的指标别名确已在本问句解析出的 metrics 中时才产出
+        having（宁缺毋滥）；无数值阈值不产出；"万"尾缀按 1e4 折算。
+        """
+        m = self._HAVING_THRESHOLD_RE.search(q)
+        if not m:
+            return []
+        alias = self._HAVING_FIELD_ALIAS.get(m.group(1))
+        if alias is None or not any(x.get("alias") == alias for x in metrics):
+            return []
+        raw = m.group(3).replace(",", "").replace("，", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            return []
+        if m.group(4):
+            value *= 10000
+        return [
+            {
+                "field": alias,
+                "operator": self._HAVING_OP_MAP[m.group(2)],
+                "value": value,
+            }
+        ]
+
     def _metrics(self, q: str) -> list[dict[str, Any]]:
         ql = q.lower()
 
@@ -279,13 +350,22 @@ class DeterministicNL2DSL:
             metrics.append(
                 {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "order_count"}
             )
-        if "客单价" in q:
+        if "客单价" in q and not any(m.get("alias") == "aov" for m in metrics):
+            # 十九期 M3：客单价 = GMV / 订单数（表达式指标形态，除零由编译器
+            # NULLIF 防护）——口径与 golden Q27 对齐，取代 avg 近似
+            if not any(m.get("alias") == "gmv" for m in metrics):
+                metrics.append(
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                )
+            if not any(m.get("alias") == "orders" for m in metrics):
+                metrics.append(
+                    {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"}
+                )
             metrics.append(
                 {
-                    "kind": "aggregate",
-                    "field": "order_amount",
-                    "agg": "avg",
-                    "alias": "avg_order_amount",
+                    "kind": "expression",
+                    "alias": "aov",
+                    "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "orders"}]},
                 }
             )
 

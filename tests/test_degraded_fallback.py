@@ -27,7 +27,7 @@ ENUMS = {"province": ["北京", "上海", "海南", "广东"], "category": ["服
 def test_compound_query_with_enum_hit_yields_plan():
     """复合问句"海南省的GMV"（指标+维度锚）=> 枚举命中唯一 => 降级计划。"""
     profile = classify_intent("海南省的GMV")
-    mode, payload = _degraded_parse("海南省的GMV", profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse("海南省的GMV", profile, ENUMS)
     assert mode == "plan"
     s1, s2 = payload
     assert s1.kind == "query" and s1.dsl is not None
@@ -42,7 +42,7 @@ def test_grouping_form_yields_dimensions():
     """ "各省份的GMV" => 分组用法（各+别名）=> dimensions 分组、无筛选。"""
     query = "各省份的GMV"
     profile = classify_intent(query)
-    mode, payload = _degraded_parse(query, profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse(query, profile, ENUMS)
     assert mode == "plan"
     assert payload[0].dsl["dimensions"] == [{"field": "province"}]
     assert all(f["field"] != "province" for f in payload[0].dsl["filters"])
@@ -57,7 +57,7 @@ def test_enum_miss_asks_for_clarification():
     """
     query = "西藏省的GMV"
     profile = classify_intent(query)
-    mode, payload = _degraded_parse(query, profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse(query, profile, ENUMS)
     assert mode == "clarify"
     question, options = payload
     assert "AI 规划暂不可用" in question
@@ -68,7 +68,7 @@ def test_multi_enum_hits_asks_for_clarification():
     """多枚举命中（"北京和上海的GMV"）=> 多候选澄清，不擅自多值筛选。"""
     query = "北京和上海的GMV"
     profile = classify_intent(query)
-    mode, payload = _degraded_parse(query, profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse(query, profile, ENUMS)
     assert mode == "clarify"
     _, options = payload
     assert any("北京" in o for o in options) and any("上海" in o for o in options)
@@ -77,7 +77,7 @@ def test_multi_enum_hits_asks_for_clarification():
 def test_dimension_only_anchor_is_not_exist():
     """只识别到维度无指标 => NOT_EXIST（区分文案：识别到维度但缺指标）。"""
     profile = classify_intent("按省份看一下")
-    mode, payload = _degraded_parse("按省份看一下", profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse("按省份看一下", profile, ENUMS)
     assert mode == "not_exist"
     assert "维度" in payload and "指标" in payload
 
@@ -85,7 +85,7 @@ def test_dimension_only_anchor_is_not_exist():
 def test_no_anchor_is_not_exist():
     """完全无锚点 => NOT_EXIST（原拒答语义保留）。"""
     profile = classify_intent("随便看看")
-    mode, payload = _degraded_parse("随便看看", profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse("随便看看", profile, ENUMS)
     assert mode == "not_exist"
     assert "未命中" in payload
 
@@ -94,7 +94,7 @@ def test_cross_table_anchors_are_not_exist():
     """跨表混合锚（GMV+退款金额）=> NOT_EXIST，严禁硬造单查询 DSL。"""
     query = "海南省的GMV和退款金额"
     profile = classify_intent(query)
-    mode, payload = _degraded_parse(query, profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse(query, profile, ENUMS)
     assert mode == "not_exist"
     assert "跨表" in payload
 
@@ -103,7 +103,7 @@ def test_metric_only_unknown_gets_scalar_dsl():
     """纯指标锚 UNKNOWN（如"GMV趋势"）=> 无维度标量 DSL（不视为猜条件）。"""
     query = "GMV趋势"
     profile = classify_intent(query)
-    mode, payload = _degraded_parse(query, profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse(query, profile, ENUMS)
     assert mode == "plan"
     dsl = payload[0].dsl
     assert dsl["metrics"][0]["field"] == "order_amount"
@@ -118,7 +118,7 @@ def test_explicit_time_window_wins_over_default():
     """
     query = "海南省的GMV 2024年3月1日到3月31日"
     profile = classify_intent(query)
-    mode, payload = _degraded_parse(query, profile, ENUMS)
+    mode, payload, _assumed = _degraded_parse(query, profile, ENUMS)
     assert mode == "plan"
     window = payload[0].dsl["time_filter"]["absolute"]
     assert window["start"] == "2024-03-01" and window["end"].startswith("2024-04-01")
@@ -126,7 +126,7 @@ def test_explicit_time_window_wins_over_default():
 
 def test_default_window_and_pay_status_scope():
     """无显式时间 => 缺省 2024-05 锚；fact_orders 锚带 pay_status 口径。"""
-    mode, payload = _degraded_parse("海南省的GMV", classify_intent("海南省的GMV"), ENUMS)
+    mode, payload, _assumed = _degraded_parse("海南省的GMV", classify_intent("海南省的GMV"), ENUMS)
     assert mode == "plan"
     dsl = payload[0].dsl
     assert dsl["time_filter"]["absolute"]["start"] == "2024-05-01"
@@ -187,10 +187,12 @@ def test_planner_unknown_without_anchor_blocks(monkeypatch, tmp_path):
 
 
 def test_planner_clarify_round_limit_blocks_second_round(monkeypatch, tmp_path):
-    """二轮澄清仍歧义 => 拒答（防循环）。
+    """二轮澄清仍歧义 => 带假设作答（十九期 M3 分级透明修订，原为拒答）。
 
     措辞同 Task 3："西藏的GMV"会被判 METRIC_SCALAR（无维度锚），澄清用例
     改用"西藏省的GMV"（"省"命中 province 锚、"西藏"未命中枚举）。
+    修订依据：spec §3.6——澄清后仍不确定转"选定合理口径 + assumptions
+    标注作答"，拒答降为最后手段（用户 2026-10 拍板）。
     """
     from config import settings
     from core.orchestrator import nodes as orch
@@ -206,8 +208,10 @@ def test_planner_clarify_round_limit_blocks_second_round(monkeypatch, tmp_path):
         clarification_rounds=1,  # 已澄清过一轮
     )
     out = orch.planner_node(state)
-    assert out.answered_by == "blocked"
-    assert "澄清" in out.blocked_reason or "确认" in out.blocked_reason
+    assert out.answered_by in ("degraded_confirmed", "degraded_auto")
+    assert out.plan_steps, "二轮歧义必须产计划而非拒答"
+    assert out.assumptions, "口径假设必须非空（严禁静默猜口径）"
+    assert any("不筛选" in a or "分组" in a for a in out.assumptions)
 
 
 def test_planner_clarify_first_round_emits_options(monkeypatch, tmp_path):
@@ -405,10 +409,10 @@ def test_degraded_clarify_option_receipt_closes_loop():
     按系统选项操作却走进死路，spec §3.3 闭环承诺落空。
     """
     base = "北京和上海的GMV"
-    mode, payload = _degraded_parse(base, classify_intent(base), ENUMS)
+    mode, payload, _assumed = _degraded_parse(base, classify_intent(base), ENUMS)
     assert mode == "clarify"
     merged = f"{base}（用户补充：省份=北京）"
-    mode, payload = _degraded_parse(merged, classify_intent(merged), ENUMS)
+    mode, payload, _assumed = _degraded_parse(merged, classify_intent(merged), ENUMS)
     assert mode == "plan"
     dsl = payload[0].dsl
     assert {"field": "province", "operator": "eq", "value": "北京"} in dsl["filters"]
@@ -419,10 +423,10 @@ def test_degraded_clarify_option_receipt_closes_loop():
 def test_degraded_clarify_invalid_receipt_ignored():
     """无效回执忽略（宁缺毋滥）：label 无法反查 / value 未命中枚举均维持原判定。"""
     merged_bad_value = "北京和上海的GMV（用户补充：省份=西藏）"
-    mode, _ = _degraded_parse(merged_bad_value, classify_intent(merged_bad_value), ENUMS)
+    mode, _, _assumed = _degraded_parse(merged_bad_value, classify_intent(merged_bad_value), ENUMS)
     assert mode == "clarify"  # value 未命中枚举 => 补充无效，维持歧义判定
     merged_bad_label = "北京和上海的GMV（用户补充：颜色=红色）"
-    mode2, _ = _degraded_parse(merged_bad_label, classify_intent(merged_bad_label), ENUMS)
+    mode2, _, _assumed = _degraded_parse(merged_bad_label, classify_intent(merged_bad_label), ENUMS)
     assert mode2 == "clarify"  # label 反查不中维度 => 忽略补充
 
 
@@ -575,3 +579,27 @@ def test_protocol_js_whitelists_degrade_event():
     protocol = Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "protocol.js"
     text = protocol.read_text(encoding="utf-8")
     assert '"degrade"' in text
+
+
+def test_refusal_advice_distinguishes_cause(monkeypatch):
+    """十九期 M1：拒答建议按成因三分流（Review Focus #6）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import _cannot_answer_report
+    from core.orchestrator.state import AgentState
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+
+    # 能力边界类拒答（LLM 健康）：不得建议检查网关连通性
+    state_cap = AgentState(user_query="流量表现怎么样", blocked_reason="无法从语义目录识别问题意图")
+    report_cap = _cannot_answer_report(state_cap)
+    assert "能力边界" in report_cap
+    assert "网关连通性" not in report_cap
+
+    # LLM 调用失败标记 => 保留连通性排查指引
+    state_llm = AgentState(
+        user_query="流量表现怎么样",
+        blocked_reason="无法从语义目录识别问题意图",
+        scratchpad=["[planner] llm-call-failed"],
+    )
+    report_llm = _cannot_answer_report(state_llm)
+    assert "网关连通性" in report_llm

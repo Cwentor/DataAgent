@@ -284,6 +284,10 @@ def _aggregate_metrics(m: Metric) -> list[AggregateMetric]:
         return [m.numerator, m.denominator]
     if isinstance(m, WindowMetric):
         return [m.base]
+    if getattr(m, "kind", "") == "expression":
+        # 表达式指标自身不产生聚合，其引用由 QueryDSL._check_expression_refs
+        # 保证仅指向本 DSL 聚合指标——表收集由那些聚合指标承担
+        return []
     return [m]
 
 
@@ -302,6 +306,38 @@ def _aggregate_expr(am: AggregateMetric) -> str:
     if am.agg == AggFunc.MAX:
         return f"MAX({col})"
     raise CompileError(f"不支持的聚合函数: {am.agg!r}")
+
+
+def _expr_sql(node, resolve) -> str:
+    """表达式 AST -> SQL 片段（十九期 M2）。
+
+    op 白名单与参数个数已由契约层裁决；div 产出 ``(a / NULLIF(b, 0))`` 与
+    比率指标除零口径对齐（除零得 NULL 而非 inf/NaN）。
+    """
+    from semantic.dsl_schema import ExprOp
+
+    if node.ref is not None:
+        return resolve(node.ref)
+    if node.lit is not None:
+        return repr(float(node.lit)) if isinstance(node.lit, float) else str(node.lit)
+    rendered = [_expr_sql(a, resolve) for a in node.args]
+    if node.op == ExprOp.DIV:
+        return f"({rendered[0]} / NULLIF({rendered[1]}, 0))"
+    if node.op == ExprOp.ADD:
+        return f"({rendered[0]} + {rendered[1]})"
+    if node.op == ExprOp.SUB:
+        return f"({rendered[0]} - {rendered[1]})"
+    if node.op == ExprOp.MUL:
+        return f"({rendered[0]} * {rendered[1]})"
+    if node.op == ExprOp.COALESCE:
+        return f"COALESCE({', '.join(rendered)})"
+    if node.op == ExprOp.ROUND:
+        if len(rendered) == 2:
+            return f"ROUND({rendered[0]}, {rendered[1]})"
+        return f"ROUND({rendered[0]})"
+    if node.op == ExprOp.ABS:
+        return f"ABS({rendered[0]})"
+    raise CompileError(f"不支持的表达式操作: {node.op!r}")
 
 
 def _metric_expr(m: Metric) -> tuple[str, str]:
@@ -728,17 +764,27 @@ def compile_sql(dsl: QueryDSL) -> str:
     if comparison != Comparison.NONE:
         if has_window or dsl.fill_gaps or dsl.top_n is not None:
             raise CompileError("comparison 不能与窗口指标/补零/分组 Top-N 同时使用")
+        if not dsl.metrics:
+            raise CompileError("维度投影不支持该查询形态（comparison/top_n/fill_gaps）")
         return _compile_with_comparison(dsl)
 
     if dsl.top_n is not None:
         if has_window or dsl.fill_gaps:
             raise CompileError("分组 Top-N 不能与窗口指标/补零同时使用")
+        if not dsl.metrics:
+            raise CompileError("维度投影不支持该查询形态（comparison/top_n/fill_gaps）")
         return _compile_with_top_n(dsl)
 
     if dsl.fill_gaps:
         if has_window:
             raise CompileError("日期补零不能与窗口指标同时使用")
+        if not dsl.metrics:
+            raise CompileError("维度投影不支持该查询形态（comparison/top_n/fill_gaps）")
         return _compile_with_fill_gaps(dsl)
+
+    # 纯维度投影（十九期 M1）：metrics 为空且 dimensions 非空（契约层已保证
+    # 形态）——编译为 SELECT DISTINCT，跳过 GROUP BY；无界输出由 LIMIT 硬上限兜底
+    is_projection = not dsl.metrics
 
     # ---- 普通路径（聚合/比率/窗口指标） ----
     from_clause = _from_clause(dsl)
@@ -759,7 +805,18 @@ def compile_sql(dsl: QueryDSL) -> str:
             time_dim_expr = expr
 
     metric_aliases: set[str] = set()
+    # 两遍渲染（十九期 M2）：先聚合/比率指标建立 别名->SQL 表达式 映射，
+    # 再把表达式指标的 ref 代入为底层聚合表达式（非输出别名引用，可移植）
+    alias_expr: dict[str, str] = {}
+
+    def _resolve_ref(ref: str) -> str:
+        if ref not in alias_expr:
+            raise CompileError(f"表达式引用了未知指标别名: {ref!r}")
+        return alias_expr[ref]
+
     for m in dsl.metrics:
+        if getattr(m, "kind", "") == "expression":
+            continue
         if isinstance(m, WindowMetric):
             if time_dim_expr is None:
                 raise CompileError("窗口指标需要时间维度（order_time/refund_time/register_time）")
@@ -769,6 +826,17 @@ def compile_sql(dsl: QueryDSL) -> str:
             expr, alias = _metric_expr(m)
         selects.append(f"{expr} AS {_quote_ident(alias)}")
         metric_aliases.add(alias)
+        alias_expr[alias] = expr
+
+    for m in dsl.metrics:
+        if getattr(m, "kind", "") != "expression":
+            continue
+        if m.alias in metric_aliases:
+            raise CompileError(f"指标别名冲突: {m.alias!r}")
+        expr = _expr_sql(m.expr, _resolve_ref)
+        selects.append(f"{expr} AS {_quote_ident(m.alias)}")
+        metric_aliases.add(m.alias)
+        alias_expr[m.alias] = expr
 
     where: list[str] = []
     for f in dsl.filters:
@@ -776,12 +844,42 @@ def compile_sql(dsl: QueryDSL) -> str:
     if tf is not None:
         where.append(_time_window_sql(tf))
 
-    sql = "SELECT " + ", ".join(selects)
+    sql = ("SELECT DISTINCT " if is_projection else "SELECT ") + ", ".join(selects)
     sql += "\n" + from_clause
     if where:
         sql += "\nWHERE " + " AND ".join(where)
-    if dim_exprs:
+    if dim_exprs and not is_projection:
         sql += "\nGROUP BY " + ", ".join(dim_exprs)
+
+    if dsl.having and not is_projection:
+        # HAVING 聚合后过滤（十九期 M2）：字段经契约层校验必为本 DSL 指标
+        # 别名，直接引用输出别名（DuckDB 支持）；值按数值字面量渲染
+        having_parts: list[str] = []
+        for h in dsl.having:
+            if h.field not in metric_aliases:
+                raise CompileError(f"HAVING 字段 {h.field!r} 不是指标别名")
+            op_map = {
+                FilterOperator.EQ: "=",
+                FilterOperator.NE: "<>",
+                FilterOperator.GT: ">",
+                FilterOperator.GTE: ">=",
+                FilterOperator.LT: "<",
+                FilterOperator.LTE: "<=",
+            }
+            if h.operator == FilterOperator.IN:
+                vals = ", ".join(_literal(v, "float") for v in h.value)
+                having_parts.append(f"{_quote_ident(h.field)} IN ({vals})")
+            elif h.operator == FilterOperator.BETWEEN:
+                lo, hi = h.value
+                having_parts.append(
+                    f"{_quote_ident(h.field)} BETWEEN {_literal(lo, 'float')} "
+                    f"AND {_literal(hi, 'float')}"
+                )
+            else:
+                having_parts.append(
+                    f"{_quote_ident(h.field)} {op_map[h.operator]} {_literal(h.value, 'float')}"
+                )
+        sql += "\nHAVING " + " AND ".join(having_parts)
 
     if dsl.order_by and dim_exprs:
         parts: list[str] = []

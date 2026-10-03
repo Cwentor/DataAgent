@@ -5,6 +5,7 @@ from core.orchestrator.intent import (
     capability_catalog_lines,
     classify_intent,
     count_dimension_dsl,
+    enumeration_dsl,
 )
 
 
@@ -103,3 +104,55 @@ def test_terms_built_from_catalog_aliases():
     # 长词优先仍成立
     profile = classify_intent("5月退款金额是多少")
     assert profile.anchor_fields == ("refund_amount",)
+
+
+def test_enumeration_intent_classification():
+    """十九期 M1：枚举意图判定（问法词表 + 单维度锚 + 无指标锚）。"""
+    profile = classify_intent("把全部品牌名列举给我")
+    assert profile.intent == IntentType.ENUMERATION
+    assert profile.anchor_fields == ("brand",)
+    assert profile.confidence == "hard"
+
+    assert classify_intent("有哪些品类").intent == IntentType.ENUMERATION
+
+
+def test_enumeration_priority_rules():
+    """十九期 M1 Review Focus #1/#2：指标锚排除、基数优先。"""
+    # 含指标锚 + 维度限定："全部"不构成枚举——复合问句判 UNKNOWN（留 LLM 规划）
+    assert classify_intent("全部品牌的GMV是多少").intent == IntentType.UNKNOWN
+    # "全部" + 纯指标锚：走指标直答
+    assert classify_intent("全部退款金额是多少").intent == IntentType.METRIC_SCALAR
+    # 基数量词优先于枚举词：问计数不问清单
+    assert classify_intent("有多少个品牌").intent == IntentType.CARDINALITY
+
+
+def test_enumeration_dsl_shape_and_filter_clue():
+    """枚举 DSL 构造：单维投影无指标；过滤线索拒绝构造（宁拒答不冒充）。"""
+    dsl = enumeration_dsl("把全部品牌名列举给我")
+    assert dsl is not None
+    assert dsl["metrics"] == []
+    assert dsl["dimensions"] == [{"field": "brand"}]
+    assert dsl["filters"] == []
+    assert dsl["order_by"] == [{"field": "brand", "direction": "asc"}]
+
+    # Review Focus #3：过滤线索（"退款"）=> 兜底拒绝构造，留 LLM 规划
+    assert enumeration_dsl("列出有退款的品牌") is None
+
+
+def test_capability_catalog_mentions_enumeration():
+    """能力清单如实告知枚举能力（拒答报告与工作台同源）。"""
+    text = "\n".join(capability_catalog_lines())
+    assert "列出全部品牌" in text
+
+
+def test_enumeration_multi_dim_opens_in_m2():
+    """十九期 M2：多维枚举放开——两维锚点投影，字段序 = 提取序。"""
+    profile = classify_intent("列出所有省份和品牌")
+    assert profile.intent == IntentType.ENUMERATION
+    assert set(profile.anchor_fields) == {"province", "brand"}
+
+    dsl = enumeration_dsl("列出所有省份和品牌")
+    assert dsl is not None
+    assert dsl["metrics"] == []
+    assert [d["field"] for d in dsl["dimensions"]] == list(profile.anchor_fields)
+    assert dsl["order_by"][0]["field"] == profile.anchor_fields[0]

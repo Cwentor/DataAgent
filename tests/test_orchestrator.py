@@ -133,6 +133,76 @@ def test_run_agent_hitl_flow(tmp_path, monkeypatch):
     assert any(s["ok"] for s in final.steps)
 
 
+def test_clarify_pending_then_new_question_routes_fresh(tmp_path, monkeypatch):
+    """澄清挂起后新问题按新查询路由（docs/reviews/20261002-audit-clarify-pending-hijack.md 回归锚点）。
+
+    同会话内上一轮以 phase=clarify 挂起后，用户忽略澄清直接提出的新问题
+    必须独立成轮作答，严禁被合并进旧查询（答非所问禁区）；同时旧澄清卡
+    在新问题 intervening 后仍须可在本轮线程上恢复（线程按轮隔离）。
+    """
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
+
+    paused = run_agent("海南省的GMV是多少", session_id="hijack-seq", autonomy_level="L4")
+    assert paused.phase == "clarify"
+
+    trace = run_agent("有多少个省份", session_id="hijack-seq", autonomy_level="L4")
+    assert trace.phase == "done"
+    assert "查询答案：8" in trace.report
+    assert "用户补充" not in trace.report
+
+    final = run_agent(
+        "海南省的GMV是多少",
+        session_id="hijack-seq",
+        autonomy_level="L4",
+        resume_state=paused.apply(human_reply="广东省"),
+    )
+    assert final.phase == "done"
+    assert "广东省" in final.report
+
+
+def test_sequential_pending_clarifies_resume_independently(tmp_path, monkeypatch):
+    """同会话两轮澄清挂起互不串扰（20261002 审计：checkpointer 线程按轮隔离）。
+
+    回归锚点：thread_id 仅到会话粒度时，同线程叠加的两个 clarify interrupt
+    会让先挂起卡片的答复被合并进后挂起轮的查询（答非所问）。按轮隔离后，
+    各轮恢复必须在各自线程上完成，报告口径归属各自问题。
+    """
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
+
+    paused_first = run_agent("海南省的GMV是多少", session_id="dual-clarify", autonomy_level="L4")
+    assert paused_first.phase == "clarify"
+    paused_second = run_agent("河北省的GMV是多少", session_id="dual-clarify", autonomy_level="L4")
+    assert paused_second.phase == "clarify"
+
+    final_first = run_agent(
+        "海南省的GMV是多少",
+        session_id="dual-clarify",
+        autonomy_level="L4",
+        resume_state=paused_first.apply(human_reply="广东"),
+    )
+    assert final_first.phase == "done"
+    assert "广东" in final_first.report
+    assert "河北" not in final_first.report
+
+    final_second = run_agent(
+        "河北省的GMV是多少",
+        session_id="dual-clarify",
+        autonomy_level="L4",
+        resume_state=paused_second.apply(human_reply="四川"),
+    )
+    assert final_second.phase == "done"
+    assert "四川省" in final_second.report or "四川" in final_second.report
+    assert "海南" not in final_second.report
+
+
 def test_run_agent_factoid_bypasses_clarify_gate(tmp_path, monkeypatch):
     """LLM 在场时事实型短问句直达完成，不再被澄清门打断。
 
@@ -918,6 +988,35 @@ def test_run_agent_blocked_report_skips_llm_synthesis(tmp_path, monkeypatch):
     assert llm_report_calls == []  # 短路实锤：综合层未被触碰
 
 
+def test_blocked_report_llm_configured_wording(tmp_path, monkeypatch):
+    """拒答建议按配置状态区分：LLM 已配置时不得再误导用户去"配置模型"。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("帮我看看最近情况", session_id="blockedcfg")
+    assert trace.phase == "done"
+    assert "LLM 已配置" in trace.report
+    assert "未配置 LLM" not in trace.report
+    assert "或配置 LLM 模型后重试" not in trace.report  # 旧的无条件文案必须消失
+
+
+def test_blocked_report_llm_absent_wording(tmp_path, monkeypatch):
+    """LLM 未配置时：如实告知确定性兜底模式与配置引导。"""
+    import core.orchestrator.nodes as nodes
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
+    trace = run_agent("帮我看看最近情况", session_id="blockednone")
+    assert trace.phase == "done"
+    assert "未配置 LLM" in trace.report
+    assert "LLM 已配置" not in trace.report
+
+
 def test_intent_dsl_guard_unit():
     """L3 守卫：基数+金额聚合拦截；合法 WHERE 不受限（Review Focus 2）。"""
     from core.orchestrator.nodes import _intent_dsl_mismatch
@@ -1446,3 +1545,377 @@ def test_clarification_rounds_field_defaults_zero():
     assert state.clarification_rounds == 0
     bumped = state.apply(clarification_rounds=state.clarification_rounds + 1)
     assert bumped.clarification_rounds == 1
+
+
+def test_heuristic_plan_enumeration():
+    """十九期 M1：枚举问法的确定性两步计划（投影 DSL + 综合）。"""
+    import core.orchestrator.nodes as _orch_nodes
+
+    steps = _orch_nodes._heuristic_plan("把全部品牌名列举给我")
+    assert steps is not None and len(steps) == 2
+    s1 = steps[0]
+    assert s1.kind == "query" and s1.dsl is not None
+    assert s1.dsl["metrics"] == []
+    assert s1.dsl["dimensions"] == [{"field": "brand"}]
+    assert steps[1].kind == "synthesize"
+
+
+def test_planner_pre_routes_enumeration_without_llm(monkeypatch):
+    """枚举预路由：LLM 在场也不发起调用（现行规划契约表达不了投影）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    def _forbidden_llm(*args, **kwargs):
+        raise AssertionError("枚举预路由不得调用 LLM")
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", _forbidden_llm)
+    state = planner_node(AgentState(user_query="把全部品牌名列举给我"))
+    assert state.phase == "query"
+    assert state.answered_by == "heuristic"
+    assert state.plan_steps[0].dsl is not None
+    assert state.plan_steps[0].dsl["metrics"] == []
+
+
+def test_intent_dsl_mismatch_rejects_metrics_on_enumeration():
+    """L3 守卫：枚举意图的查询必须是纯维度投影（Review Focus #1 兜底）。"""
+    import core.orchestrator.nodes as _orch_nodes
+
+    query = "把全部品牌名列举给我"
+    ok_payload = {"metrics": [], "dimensions": [{"field": "brand"}], "filters": []}
+    assert _orch_nodes._intent_dsl_mismatch(query, ok_payload) is None
+    bad_payload = {
+        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "dimensions": [{"field": "brand"}],
+        "filters": [],
+    }
+    mismatch = _orch_nodes._intent_dsl_mismatch(query, bad_payload)
+    assert mismatch is not None and "投影" in mismatch
+
+
+def test_agent_state_assumptions_field():
+    """M3-T1：AgentState 契约新增口径假设字段（默认空，宽容消费）。"""
+    state = AgentState(user_query="x")
+    assert state.assumptions == []
+
+
+def test_planner_prompt_injects_clarify_context():
+    """M3-T1：二轮澄清上下文注入——提示词含"严禁再次澄清"硬性指令。"""
+    from core.orchestrator.prompts import planner_prompt
+
+    single = planner_prompt("q", "schema")
+    double = planner_prompt("q", "schema", clarify_context="用户已答复过一轮澄清")
+    assert "澄清" not in single or "仍不唯一" not in single
+    assert "严禁再次澄清" in double and "口径假设" in double
+
+
+def test_planner_node_consumes_assumptions(monkeypatch):
+    """M3-T1：Planner 产出口径假设 → 状态透传（宽容消费）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取数",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                },
+            },
+        ],
+        "assumptions": ["仅统计成功支付订单", "时间窗口取数仓最近完整期"],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.assumptions == ["仅统计成功支付订单", "时间窗口取数仓最近完整期"]
+
+
+def test_planner_node_tolerates_invalid_assumptions(monkeypatch):
+    """M3-T1 Review Focus #2：非法 assumptions 宽容忽略，不阻塞规划。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取数",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                },
+            },
+        ],
+        "assumptions": "不是数组的假设",
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.assumptions == []
+    assert state.plan_steps  # 规划不受阻
+
+
+def test_degraded_second_round_ambiguity_answers_with_assumptions(monkeypatch):
+    """M3-T2：二轮歧义不再拒答——多候选筛选维度转分组 + 口径假设。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: None)
+    # "海南省的GMV" 式问法一轮已澄清（rounds=1）仍多候选/未命中 => 带假设作答
+    state = planner_node(
+        AgentState(
+            user_query="海南省的GMV是多少",
+            clarification_rounds=1,
+            autonomy_level="L4",
+        )
+    )
+    assert state.phase == "query"
+    assert state.plan_steps, "二轮歧义必须产计划而非拒答"
+    assert state.assumptions, "口径假设必须非空"
+    assert any("分组" in a or "不筛选" in a for a in state.assumptions)
+
+
+def test_llm_second_round_clarification_hard_blocked(monkeypatch):
+    """M3-T2 Review Focus #3：LLM 二轮仍返回 clarification 必须被消费层拦截。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": {"question": "请再补充一下？", "options": []},
+        "steps": None,
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(
+        AgentState(user_query="海南省的GMV是多少", clarification_rounds=1, autonomy_level="L4")
+    )
+    assert state.phase != "clarify", "二轮澄清严禁再次挂起"
+    assert state.plan_steps, "拦截后必须转入带假设作答计划"
+
+
+def test_synthesize_report_prepends_assumptions(monkeypatch):
+    """M3-T2：口径假设在报告头部确定性呈现（LLM 成功路径同样前置）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.agent import run_agent
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取5月GMV",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                    "time_filter": {
+                        "range_type": "absolute",
+                        "absolute": {"start": "2024-05-01", "end": "2024-06-01"},
+                    },
+                },
+            },
+            {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"]},
+        ],
+        "assumptions": ["时间窗口按 2024-05 全月假设"],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    trace = run_agent("5月GMV是多少", session_id="m3-assume", autonomy_level="L4")
+    assert trace.phase == "done"
+    assert "口径假设" in (trace.report or "")
+    assert "2024-05 全月" in (trace.report or "")
+
+
+def test_ambiguity_routing_state_machine(monkeypatch):
+    """M3-T4 验收锚点：澄清-标注路由状态机（口径模糊三级行为）。
+
+    spec §7 题库第 3 层验收判据：要么选项式澄清、要么 assumptions 非空且
+    报告可见——两种都算通过，静默猜口径直答算失败。
+    """
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    # 一轮歧义（LLM 判定无法选口径）=> 选项式澄清挂起
+    payload_clarify = {
+        "clarification": {"question": "要按省份还是品类看？", "options": ["按省份", "按品类"]},
+        "steps": None,
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload_clarify)
+    first = planner_node(AgentState(user_query="华南的表现怎么样"))
+    assert first.phase == "clarify" and first.clarification_options
+
+    # 二轮（用户答复后仍歧义）=> LLM 再反问被硬拦截，转带假设作答
+    # （"海南省的GMV"：维度锚在但取值多候选/未命中，走 assume 分支；
+    #   "华南的表现"无任何锚点属 not_exist 诚实拒答，不经此路径）
+    second = planner_node(
+        AgentState(user_query="海南省的GMV是多少", clarification_rounds=1, autonomy_level="L4")
+    )
+    assert second.phase != "clarify"
+    assert second.plan_steps and second.assumptions, "二轮必须带假设作答"
+
+    # 中置信（LLM 直接管假设作答）=> assumptions 非空 + 正常计划
+    payload_assume = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取数",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [{"field": "province"}],
+                    "filters": [],
+                },
+            },
+        ],
+        "assumptions": ["华南展开为广东/广西/海南等省份 IN 列表"],
+    }
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload_assume)
+    third = planner_node(AgentState(user_query="华南的表现怎么样"))
+    assert third.phase == "query" and third.assumptions
+
+
+def test_planner_sql_step_lifted_to_dsl(monkeypatch):
+    """M4-T3：LLM 步骤带可升 SQL → 提升为 DSL（sql 置空，scratchpad 记录）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "sql": "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
+                "WHERE f.pay_status = 'SUCCESS'",
+            },
+        ],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.phase == "query"
+    assert state.plan_steps[0].dsl is not None
+    assert state.plan_steps[0].dsl["metrics"][0]["field"] == "order_amount"
+    assert state.plan_steps[0].sql is None, "提升后 sql 必须置空（永不持久化）"
+    assert any("sql-lifted" in s for s in state.scratchpad)
+
+
+def test_planner_sql_lift_retry_with_rejection_list(monkeypatch):
+    """M4-T3：拒升清单注入重规划提示词，第二次喂修正 SQL 后成功。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    bad = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "sql": "SELECT CASE WHEN f.pay_status = 'SUCCESS' THEN f.order_amount ELSE 0 END AS gmv "
+                "FROM fact_orders f",
+            },
+        ],
+    }
+    good = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "sql": "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
+                "WHERE f.pay_status = 'SUCCESS'",
+            },
+        ],
+    }
+    calls: list[str] = []
+
+    def fake_llm(system, user):
+        calls.append(user)
+        return bad if len(calls) == 1 else good
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda _llm, _sys, user: fake_llm(_sys, user))
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert len(calls) == 2
+    assert "拒升清单" in calls[1] and "CASE" in calls[1], "拒升清单必须喂回自愈提示词"
+    assert state.plan_steps[0].dsl is not None
+
+
+def test_planner_sql_lift_exhausted_falls_back_to_heuristic(monkeypatch):
+    """M4-T3 Review Focus #6：两次自愈仍拒升 → 回落确定性兜底（不无限循环）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    bad = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "sql": "SELECT CASE WHEN f.pay_status = 'SUCCESS' THEN f.order_amount ELSE 0 END AS gmv "
+                "FROM fact_orders f",
+            },
+        ],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda _llm, _sys, user: bad)
+    state = planner_node(AgentState(user_query="2024年5月GMV是多少", autonomy_level="L4"))
+    assert state.phase == "query"
+    assert state.answered_by == "heuristic", "自愈耗尽必须回落确定性兜底"
+    assert all(s.dsl is not None for s in state.plan_steps if s.kind == "query")
+    assert all(s.sql is None for s in state.plan_steps), "未转译的 sql 严禁带出 planner"
+
+
+def test_planner_dsl_takes_precedence_over_sql(monkeypatch):
+    """M4-T3：dsl 与 sql 同给时 dsl 优先（sql 字段被忽略并置空）。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.nodes import planner_node
+
+    payload = {
+        "clarification": None,
+        "steps": [
+            {
+                "id": "s1",
+                "goal": "取GMV",
+                "kind": "query",
+                "dsl": {
+                    "metrics": [
+                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                },
+                "sql": "SELECT COUNT(*) AS x FROM fact_orders f",
+            },
+        ],
+    }
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
+    state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.plan_steps[0].dsl is not None
+    assert state.plan_steps[0].sql is None
+    assert not any("sql-lifted" in s for s in state.scratchpad), "dsl 优先时不走提升闸门"

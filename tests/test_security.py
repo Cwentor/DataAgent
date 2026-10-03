@@ -171,3 +171,57 @@ def test_run_pipeline_accepts_principal():
     """run_pipeline(query, principal=...) 端到端：受限主体查询退款 -> 拒绝。"""
     with pytest.raises(SecurityError):
         run_pipeline("各品类成功订单的退款金额是多少？", principal="restricted")
+
+
+def test_expression_metric_guard_collects_underlying_fields():
+    """十九期 M2：表达式指标的权限检查回溯到被引用聚合指标的字段——
+
+    restricted 主体（禁 discount_amount/refund_amount）通过表达式引用
+    discount_amount 聚合时必须被拒（Review Focus：禁列不得借表达式绕过）。
+    """
+    with pytest.raises(SecurityError):
+        apply_policy(
+            QueryDSL.model_validate(
+                {
+                    "metrics": [
+                        {
+                            "kind": "aggregate",
+                            "field": "discount_amount",
+                            "agg": "sum",
+                            "alias": "discount",
+                        },
+                        {
+                            "kind": "expression",
+                            "alias": "discount_k",
+                            "expr": {
+                                "op": "round",
+                                "args": [
+                                    {"op": "div", "args": [{"ref": "discount"}, {"lit": 1000}]},
+                                    {"lit": 2},
+                                ],
+                            },
+                        },
+                    ]
+                }
+            ),
+            "restricted",
+        )
+
+
+def test_expression_metric_guard_allows_authorized_fields():
+    """有权限字段的表达式指标正常通过守卫。"""
+    apply_policy(
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "expression",
+                        "alias": "aov",
+                        "expr": {"op": "div", "args": [{"ref": "gmv"}, {"lit": 100}]},
+                    },
+                ]
+            }
+        ),
+        "analyst",
+    )
