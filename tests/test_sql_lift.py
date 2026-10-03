@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from compiler.sql_compiler import compile_sql
 from core.retrieval.sql_lift import lift_sql
 from semantic.dsl_schema import QueryDSL
