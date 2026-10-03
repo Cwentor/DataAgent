@@ -347,7 +347,6 @@ def _inline_pure_ctes(tree: exp.Expression, rejections: list[LiftRejection]) -> 
                 LiftRejection("with", f"CTE {name!r} 基表 {base_table!r}", "未登记的表")
             )
             continue
-        replacement = exp.to_table(base_table)
         for column in tree.find_all(exp.Column):
             if column.table == name:
                 column.set("table", exp.to_identifier(base_table))
