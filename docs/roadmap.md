@@ -22,3 +22,4 @@
 | 十六期 | 多模型供应商网关（`providers/`）：OpenAI Chat / Responses、Anthropic、Gemini 四协议适配，API Key 落盘加密，连通性探测与请求级模型切换 | ✅ |
 | 十七期 | Agent 架构演进（`core/orchestrator/`）：LangGraph 单引擎收敛、interrupt 泛化与 L1-L4 自主性分级（Plan Mode）、Subagent fan-out 预算硬顶 | ✅ |
 | 十八期 | 意图路由收敛与诚实兜底：澄清判定权上收 Planner、兜底准入制（诊断/基数/锚定指标三类直答，其余诚实拒答）、L3 意图-DSL 错位守卫、别名收编语义目录（`FieldMeta.aliases` 单一事实源）、Grounding 定向重试闭环、选项式澄清、答非所问率评测入 CI | ✅ |
+| 十九期 | 能力边界扩展：治理即边界、三层同心圆取数架构（确定性核 / SQL 提升闸门 / 探索层审批门）、DSL 扩容（纯维度投影 / HAVING / 表达式指标）、多维枚举、分级透明作答（assumptions 假设标注）、安全视图层（禁列物理投影 + RLS 固化 + 连接加固）、沙箱 connect 旁路封堵、红线矩阵入 CI | ✅ |

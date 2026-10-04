@@ -31,6 +31,10 @@ flowchart LR
 
 **意图路由收敛与诚实兜底（十八期）**：澄清判定权上收 Planner（clarification 契约，支持选项式反问）；兜底执行准入制——仅诊断、基数（如「有多少个省份」）与硬锚定指标三类意图可确定性直答（附缺省口径说明），其余意图置 `blocked_reason` 走诚实拒答报告（原因 + 已识别锚点 + 能力清单，全程零 LLM 调用）；L3 意图-DSL 错位守卫在执行前拦截「基数意图 + 金额聚合」式错位查询；意图词表以 `FieldMeta.aliases` 为单一事实源。
 
+## 三层同心圆取数架构（十九期）
+
+能力边界 = 治理管道边界（只读 + RLS + 敏感数据保护 + 资源上限），不是 DSL 契约表达力。LLM 产出的 SQL 永不直接执行：L1 确定性核（Planner 直产 DSL）覆盖常规问数；L2 提升闸门（`core/retrieval/sql_lift.py`，sqlglot）把超契约 SQL 转译回 DSL 契约由确定性编译器重编译——拒升 ≠ 拒答，精确清单喂回自愈 ≤2 次；L3 探索层（`core/retrieval/exploration.py`）把不可提升 SQL 经第四类审批门（allow_once / allow_session / deny）后在按 principal 生成的安全视图（`security/views.py`，禁列物理投影 + RLS 固化 + 连接加固）上受治理执行，报告醒目标注"探索查询产出"。分级透明作答：诚实 = 不虚构 + 假设透明（`assumptions` 契约字段，报告头部呈现），二轮歧义转带假设作答，拒答降为最后手段。沙箱 `connect/database` 调用永久封死——取数权只在执行层。
+
 ## 多角色架构对齐（pi-agent-harness）
 
 对标 pi-agent-harness 的多角色团队架构（5 核心角色 + Chain/Evaluator-Optimizer 编排），DataAgent 的角色落位如下。与 Harness 的差异点：**安全裁决与结果质检由确定性代码承担而非 LLM**——符合"LLM 仅产 DSL"铁律，结论可复现、可单测、零幻觉。
