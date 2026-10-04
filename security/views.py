@@ -35,6 +35,11 @@ from semantic import catalog
 # 视图名前缀：探索层 SQL 只授权该命名空间（M6 连接管理强制）
 VIEW_PREFIX = "sec_"
 
+# 视图 DDL 前缀（评审 LOW #7）：build_secure_views 产出的定义与 install 的
+# TEMP 改写共用同一常量源，改一处不致另一处静默失效
+_VIEW_DDL_PREFIX = "CREATE OR REPLACE VIEW"
+_VIEW_TEMP_DDL_PREFIX = "CREATE OR REPLACE TEMP VIEW"
+
 
 def _policy_for(principal: str | None):
     """解析主体策略（None 等价 admin，与 guard.apply_policy 口径一致）。"""
@@ -181,7 +186,7 @@ def build_secure_views(principal: str | None) -> dict[str, str]:
         where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
         view_name = f"{VIEW_PREFIX}{table}"
         views[view_name] = (
-            f"CREATE OR REPLACE VIEW {view_name} AS "
+            f"{_VIEW_DDL_PREFIX} {view_name} AS "
             f"SELECT {', '.join(projections)} FROM {table} "
             f"{catalog.ALIASES[table]}{''.join(joins)}{where_sql}"
         )
@@ -195,8 +200,10 @@ def install_secure_views(conn: DuckDBPyConnection, principal: str | None) -> dic
     （生产连接池口径）上可创建——探索层在池化只读连接上直接安装。
     """
     views = build_secure_views(principal)
-    for name, ddl in views.items():
-        conn.execute(ddl.replace("CREATE OR REPLACE VIEW", "CREATE OR REPLACE TEMP VIEW", 1))
+    for _name, ddl in views.items():
+        # DDL 前缀常量化（评审 LOW #7）：严禁依赖散落的字面量 replace 耦合，
+        # build_secure_views 改前缀时此处随常量同步失效
+        conn.execute(ddl.replace(_VIEW_DDL_PREFIX, _VIEW_TEMP_DDL_PREFIX, 1))
     return views
 
 
