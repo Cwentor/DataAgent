@@ -18,7 +18,7 @@ from security.policy import POLICIES, PRINCIPAL_ATTRS, Policy
 from semantic import catalog
 from semantic.dsl_schema import Filter, QueryDSL
 
-__all__ = ["SecurityError", "apply_policy"]
+__all__ = ["SecurityError", "apply_policy", "referenced_fields"]
 
 
 def _resolve_row_filter(rf: dict, principal: str) -> dict:
@@ -43,11 +43,13 @@ def _resolve_row_filter(rf: dict, principal: str) -> dict:
     return resolved
 
 
-def _referenced_fields(dsl: QueryDSL) -> set[str]:
+def referenced_fields(dsl: QueryDSL) -> set[str]:
     """收集 DSL 引用的全部逻辑字段（指标 + 维度 + 过滤）。
 
     十九期 M2：表达式指标的字段经 ref 回溯到被引用的聚合指标——禁列不得
     借表达式绕过列级权限（ref 已由契约层限定为同 DSL 聚合指标别名）。
+    十九期评审收口：提取为共享函数——guard 与 agent.heuristic 的生成前
+    作用域收窄共用同一实现，权限回溯规则严禁双实现漂移。
     """
     fields: set[str] = set()
     agg_by_alias: dict[str, Any] = {}
@@ -103,7 +105,7 @@ def apply_policy(dsl: QueryDSL, principal: str | None) -> QueryDSL:
     if policy is None:
         raise SecurityError(f"未登记的主体: {principal!r}")
 
-    fields = _referenced_fields(dsl)
+    fields = referenced_fields(dsl)
     tables = _referenced_tables(fields)
 
     # 表级校验

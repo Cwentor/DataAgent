@@ -97,6 +97,12 @@ FORBIDDEN_CALLS: frozenset[str] = frozenset(
     }
 )
 
+# duckdb 取数旁路的调用名（与 FORBIDDEN_CALLS 中沙箱新增项同源）：
+# ``from duckdb import connect as c`` 的别名绑定在 visit_Call 按调用名匹配
+# 不到原始名，必须在导入处按被导入名拦下（导入即违规，无论别名）
+_TUNNEL_MODULE = "duckdb"
+_TUNNEL_CALL_NAMES: frozenset[str] = frozenset({"connect", "database"})
+
 # 属性/名称访问黑名单（逃逸向量）
 FORBIDDEN_ATTRS: frozenset[str] = frozenset(
     {
@@ -176,6 +182,15 @@ class _GuardVisitor(ast.NodeVisitor):
         elif node.level > 0:
             # 相对导入在无包上下文沙箱内无意义且是路径逃逸向量
             self._flag(node, "forbidden_import", "相对导入被禁止")
+        elif module == _TUNNEL_MODULE and any(
+            alias.name in _TUNNEL_CALL_NAMES for alias in node.names
+        ):
+            tunnelled = ", ".join(a.name for a in node.names if a.name in _TUNNEL_CALL_NAMES)
+            self._flag(
+                node,
+                "forbidden_call",
+                f"from {module} import {tunnelled}（取数旁路封堵，别名导入同样拦截）",
+            )
         else:
             self.generic_visit(node)
 

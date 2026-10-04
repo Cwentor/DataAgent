@@ -603,3 +603,15 @@ def test_refusal_advice_distinguishes_cause(monkeypatch):
     )
     report_llm = _cannot_answer_report(state_llm)
     assert "网关连通性" in report_llm
+
+    # 十九期评审收口（spec §3.8）：能力边界类拒答按词表命中附最近似可答
+    # 问法建议——维度词命中给枚举/分组建议（确定性直答已支持）
+    state_dim = AgentState(
+        user_query="品牌的情况怎么样", blocked_reason="无法从语义目录识别问题意图"
+    )
+    report_dim = _cannot_answer_report(state_dim)
+    assert "最近似可答" in report_dim
+    assert "列出品牌的全部取值" in report_dim
+
+    # 无词表命中的问句不虚构建议（仅保留能力清单引导）
+    assert "最近似可答" not in report_cap

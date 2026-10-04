@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -265,6 +266,10 @@ class ExprArg(BaseModel):
         forms = sum(1 for v in (self.op, self.ref, self.lit) if v is not None)
         if forms != 1:
             raise ValueError("表达式节点必须恰好为 op / ref / lit 三种形态之一")
+        if isinstance(self.lit, float) and not math.isfinite(self.lit):
+            # json.loads 默认接受 Infinity/NaN——裸渲染会成为非法 SQL 标识符，
+            # 契约层直接拒绝（评审收口：堵住 render_literal NaN/Inf 防线的绕行）
+            raise ValueError("lit 字面量不允许 NaN/Inf")
         if self.op is None:
             if self.args:
                 raise ValueError("ref/lit 形态不接受 args")

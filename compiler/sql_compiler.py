@@ -213,8 +213,12 @@ def _check_scalar_type(value, dtype: str) -> None:
         raise CompileError(f"字段要求日期/时间，收到 {value!r}")
 
 
-def _literal(value, dtype: str) -> str:
-    """将 Python 值安全转义为 SQL 字面量。"""
+def render_literal(value, dtype: str) -> str:
+    """将 Python 值安全转义为 SQL 字面量。
+
+    公开原语：安全视图层（security/views.py）与编译器共用同一转义实现，
+    严禁消费方私有实现漂移出第二套转义路径。
+    """
     _check_scalar_type(value, dtype)
     if dtype == "str":
         return "'" + str(value).replace("'", "''") + "'"
@@ -242,11 +246,11 @@ def _filter_sql(f: Filter) -> str:
     dtype = meta.dtype
 
     if f.operator == FilterOperator.IN:
-        vals = ", ".join(_literal(v, dtype) for v in f.value)
+        vals = ", ".join(render_literal(v, dtype) for v in f.value)
         return f"{col} IN ({vals})"
     if f.operator == FilterOperator.BETWEEN:
         lo, hi = f.value
-        return f"{col} BETWEEN {_literal(lo, dtype)} AND {_literal(hi, dtype)}"
+        return f"{col} BETWEEN {render_literal(lo, dtype)} AND {render_literal(hi, dtype)}"
 
     op_map = {
         FilterOperator.EQ: "=",
@@ -256,7 +260,7 @@ def _filter_sql(f: Filter) -> str:
         FilterOperator.LT: "<",
         FilterOperator.LTE: "<=",
     }
-    return f"{col} {op_map[f.operator]} {_literal(f.value, dtype)}"
+    return f"{col} {op_map[f.operator]} {render_literal(f.value, dtype)}"
 
 
 def _time_window_sql(tf: TimeFilter) -> str:
@@ -867,17 +871,17 @@ def compile_sql(dsl: QueryDSL) -> str:
                 FilterOperator.LTE: "<=",
             }
             if h.operator == FilterOperator.IN:
-                vals = ", ".join(_literal(v, "float") for v in h.value)
+                vals = ", ".join(render_literal(v, "float") for v in h.value)
                 having_parts.append(f"{_quote_ident(h.field)} IN ({vals})")
             elif h.operator == FilterOperator.BETWEEN:
                 lo, hi = h.value
                 having_parts.append(
-                    f"{_quote_ident(h.field)} BETWEEN {_literal(lo, 'float')} "
-                    f"AND {_literal(hi, 'float')}"
+                    f"{_quote_ident(h.field)} BETWEEN {render_literal(lo, 'float')} "
+                    f"AND {render_literal(hi, 'float')}"
                 )
             else:
                 having_parts.append(
-                    f"{_quote_ident(h.field)} {op_map[h.operator]} {_literal(h.value, 'float')}"
+                    f"{_quote_ident(h.field)} {op_map[h.operator]} {render_literal(h.value, 'float')}"
                 )
         sql += "\nHAVING " + " AND ".join(having_parts)
 

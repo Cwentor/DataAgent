@@ -57,6 +57,7 @@ from core.sandbox.api import run_code
 from core.sandbox.ast_guard import static_check
 from core.skills.decomposition import multiplicative_decomposition
 from core.skills.drilldown import drilldown_by_information_gain
+from semantic import catalog
 from semantic.catalog import DRILLDOWN_DIM_FIELDS as DRILLDOWN_DIM_FIELDS
 from semantic.catalog import REGION_PROVINCE_MAPPING as REGION_PROVINCE_MAPPING
 
@@ -497,6 +498,12 @@ def _lift_plan_sql(
         for step in steps:
             if not step.sql:
                 lifted.append(step)
+                continue
+            if step.dsl is not None:
+                # dsl 与 sql 同给时 dsl 优先（契约约定）：sql 仅为参考产线，
+                # 置空保留合法 dsl——严禁让拒升 sql 连坐丢弃整个计划落兜底
+                lifted.append(step.model_copy(update={"sql": None}))
+                notes.append(f"[planner] sql-dropped-dsl-precedence: {step.id}")
                 continue
             result = lift_sql(step.sql)
             if result.ok:
@@ -2720,6 +2727,27 @@ def _no_data_report(state: AgentState) -> str:
     return "\n".join(lines)
 
 
+def _nearest_answerable_hint(query: str) -> str:
+    """按用户问句命中的词表锚点推导最近似可答问法（十九期评审收口，spec §3.8）。
+
+    意图 UNKNOWN 时 classify_intent 不回传锚点（复合问句宁可拒答的既有
+    契约），故此处直接对问句做词表命中：维度词 -> 枚举/分组问法（确定性
+    直答已支持）；指标词 -> 标量问法。无命中返回空串（仅能力清单引导）。
+    """
+    from core.orchestrator.intent import dimension_terms
+
+    lowered = query.lower()
+    for term, field in sorted(dimension_terms().items(), key=lambda kv: -len(kv[0])):
+        if term in lowered:
+            label = _dimension_label(field)
+            return f"「列出{label}的全部取值」或「按{label}统计某项指标」"
+    for name, meta in catalog.COLUMNS.items():
+        if meta.dtype in ("int", "float") and any(a.lower() in lowered for a in meta.aliases):
+            label = meta.label or name
+            return f"「查询{label}的总量」或「按月查看{label}趋势」"
+    return ""
+
+
 def _cannot_answer_report(state: AgentState) -> str:
     """意图不可确定的诚实拒答报告（十八期）。
 
@@ -2766,6 +2794,11 @@ def _cannot_answer_report(state: AgentState) -> str:
             "建议：请调整问法（明确指标或维度）。本次拒答源于问法超出当前可确定的"
             "查询口径范围（能力边界），与 LLM 服务状态无关。"
         )
+        # spec §3.8：能力边界类拒答须附最近似可答问法建议（按词表命中推导）
+        hint = _nearest_answerable_hint(state.user_query)
+        if hint:
+            lines.append("")
+            lines.append(f"最近似可答的问法参考：{hint}")
     return "\n".join(lines)
 
 

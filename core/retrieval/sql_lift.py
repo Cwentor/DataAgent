@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 
 import sqlglot
@@ -33,6 +34,8 @@ from semantic.dsl_schema import IDENTIFIER_PATTERN, TIME_FIELDS
 _MAIN_TABLE = catalog.FACT_TABLE
 
 _MAX_LIMIT = 10000  # DSL 契约 limit 上限
+_MAX_SQL_LENGTH = 10_000  # 输入表面语法长度上限（先于解析挡住资源炸弹）
+_PARSE_TIMEOUT_S = 5.0  # 解析超时（spec §3.3：解析失败/超时/歧义一律拒升）
 
 
 @dataclass(frozen=True)
@@ -363,6 +366,35 @@ def _inline_pure_ctes(tree: exp.Expression, rejections: list[LiftRejection]) -> 
 _AGG_CLASSES = {exp.Sum: "sum", exp.Count: "count", exp.Avg: "avg", exp.Min: "min", exp.Max: "max"}
 
 
+class _ParseTimeout(Exception):
+    """sqlglot 解析超时（内部信号；spec §3.3：超时一律拒升）。"""
+
+
+def _parse_with_timeout(sql: str) -> exp.Expression:
+    """带超时上限的解析，防恶意构造的解析资源炸弹。
+
+    sqlglot 解析是纯 CPU 循环，线程无法强杀——超时后放弃等待（守护线程随
+    进程回收），调用方按拒升处理；输入长度上限先行挡住大部分资源炸弹。
+    """
+    outcome: list[object] = []
+
+    def _run() -> None:
+        try:
+            outcome.append(sqlglot.parse_one(sql, dialect="duckdb"))
+        except Exception as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=_run, daemon=True, name="sqlglot-parse-guarded")
+    worker.start()
+    worker.join(_PARSE_TIMEOUT_S)
+    if worker.is_alive() or not outcome:
+        raise _ParseTimeout()
+    item = outcome[0]
+    if isinstance(item, Exception):
+        raise item
+    return item  # type: ignore[no-any-return]
+
+
 def lift_sql(sql: str) -> LiftResult:
     """把 LLM 产出的 SQL 提升为 DSL 契约 dict（拒升返回结构化清单）。
 
@@ -370,8 +402,25 @@ def lift_sql(sql: str) -> LiftResult:
     """
     rejections: list[LiftRejection] = []
     notes: list[str] = []
+    sql = (sql or "").strip()
+    if not sql:
+        return _one(LiftRejection("parse", "empty", "空 SQL 无法提升"))
+    if len(sql) > _MAX_SQL_LENGTH:
+        return _one(
+            LiftRejection(
+                "parse",
+                f"oversized({len(sql)} chars)",
+                f"SQL 长度超出提升闸门上限（{_MAX_SQL_LENGTH} 字符），拒升",
+            )
+        )
     try:
-        tree = sqlglot.parse_one(sql, dialect="duckdb")
+        tree = _parse_with_timeout(sql)
+    except _ParseTimeout:
+        return _one(
+            LiftRejection(
+                "parse", "timeout", f"SQL 解析超时（>{_PARSE_TIMEOUT_S:.0f}s），按保守性原则拒升"
+            )
+        )
     except Exception as exc:  # 解析失败：语法非法（保守拒升，不猜意图）
         return _one(LiftRejection("parse", "unparseable", f"SQL 解析失败: {exc}"))
 
@@ -434,8 +483,26 @@ def lift_sql(sql: str) -> LiftResult:
         on = join.args.get("on")
         if on is None:
             return _one(LiftRejection("join", f"表 {table!r} 无 ON", "无条件连接即笛卡尔积，拒升"))
+        conjuncts = _flatten_and(on)
+        if conjuncts is None:
+            return _one(
+                LiftRejection(
+                    "join", f"表 {table!r} ON 含 OR/NOT", "连接条件必须为等值条件的 AND 组合"
+                )
+            )
+        non_eq = next((c for c in conjuncts if not isinstance(c, exp.EQ)), None)
+        if non_eq is not None:
+            # 非 EQ 谓词（如 ON ... AND f.dt > '...'）在受控连接中无处安放，
+            # 静默丢弃会扩大结果集——宁拒升不错译
+            return _one(
+                LiftRejection(
+                    "join",
+                    f"表 {table!r} ON 含 {type(non_eq).__name__}",
+                    "受控连接仅支持等值条件（非等值谓词无法提升）",
+                )
+            )
         actual_cols: set[tuple[str, str]] = set()
-        for eq in on.find_all(exp.EQ):
+        for eq in conjuncts:
             for column in eq.find_all(exp.Column):
                 physical = _physical_table(column.table or "")
                 actual_cols.add((physical, column.name))
@@ -532,6 +599,25 @@ def lift_sql(sql: str) -> LiftResult:
     time_filter: dict | None = None
     starts: dict[str, object] = {}
     ends: dict[str, object] = {}
+    # 多字段/重复窗口显式拒升：DSL time_filter 为单时间字段契约，dict 覆盖
+    # 会静默丢窗口扩大结果集（宁拒升不错译）
+    pair_fields = [f for f, _op, _v in time_pairs]
+    if len(set(pair_fields)) > 1:
+        rejections.append(
+            LiftRejection(
+                "where",
+                "多时间字段窗口",
+                "DSL time_filter 仅支持单时间字段，多字段窗口无法表达，拒升",
+            )
+        )
+    elif len(time_pairs) > 2 or len({(f, op) for f, op, _v in time_pairs}) != len(time_pairs):
+        rejections.append(
+            LiftRejection(
+                "where",
+                "重复时间窗口",
+                "同字段重复/多余的区间条件无法取交集语义，拒升",
+            )
+        )
     for field_name, op, value in time_pairs:
         if op == "gte":
             starts[field_name] = value

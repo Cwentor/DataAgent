@@ -26,7 +26,7 @@ from typing import Any
 
 from duckdb import DuckDBPyConnection
 
-from compiler.sql_compiler import _literal
+from compiler.sql_compiler import render_literal
 from security.errors import SecurityError
 from security.guard import _resolve_row_filter
 from security.policy import POLICIES
@@ -56,8 +56,8 @@ def _render_predicate(field: str, operator: str, value: Any, alias: str) -> str:
         raise SecurityError(f"不支持的 RLS 谓词形态: field={field!r}, operator={operator!r}")
     quoted = f'{alias}."{meta.column}"'
     if operator == "eq":
-        return f"{quoted} = {_literal(value, meta.dtype)}"
-    rendered = ", ".join(_literal(v, meta.dtype) for v in value)
+        return f"{quoted} = {render_literal(value, meta.dtype)}"
+    rendered = ", ".join(render_literal(v, meta.dtype) for v in value)
     return f"{quoted} IN ({rendered})"
 
 
@@ -94,40 +94,6 @@ def _join_path(table: str, target: str) -> list[str] | None:
             visited.add(neighbor)
             queue.append((neighbor, [*path, neighbor]))
     return None
-
-
-def _render_view_body(table: str, predicates: list[dict[str, Any]]) -> str:
-    """渲染视图主体：FROM table + 跨表过滤 join 链 + WHERE。
-
-    过滤字段的物理列不在本表时，经受控连接路径（BFS）join 到字段所属表。
-    """
-    from_sql = f"{table} {catalog.ALIASES[table]}"
-    where_parts: list[str] = []
-    joined: set[str] = set()
-    for pred in predicates:
-        field = pred["field"]
-        meta = catalog.COLUMNS[field]
-        if meta.table != table:
-            path = _join_path(table, meta.table)
-            if path is None:
-                raise SecurityError(
-                    f"表 {table!r} 的行过滤字段 {field!r} 无受控连接路径（策略配置错误）"
-                )
-            for a, b in pairwise(path):
-                if b in joined:
-                    continue
-                local_col, remote_col = _JOIN_EDGES[a][b]
-                from_sql += (
-                    f" JOIN {b} {catalog.ALIASES[b]}"
-                    f' ON {catalog.ALIASES[b]}."{remote_col}" = {catalog.ALIASES[a]}."{local_col}"'
-                )
-                joined.add(b)
-            target_alias = catalog.ALIASES[meta.table]
-        else:
-            target_alias = catalog.ALIASES[table]
-        where_parts.append(_render_predicate(field, pred["operator"], pred["value"], target_alias))
-    where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
-    return from_sql + where_sql
 
 
 def build_secure_views(principal: str | None) -> dict[str, str]:
@@ -223,11 +189,14 @@ def build_secure_views(principal: str | None) -> dict[str, str]:
 
 
 def install_secure_views(conn: DuckDBPyConnection, principal: str | None) -> dict[str, str]:
-    """在连接上安装该 principal 的安全视图（返回安装的视图定义）。"""
+    """在连接上安装该 principal 的安全视图（返回安装的视图定义）。
+
+    使用 **TEMP 视图**：生命周期随连接、不污染库文件，且 read_only 连接
+    （生产连接池口径）上可创建——探索层在池化只读连接上直接安装。
+    """
     views = build_secure_views(principal)
     for name, ddl in views.items():
-        conn.execute(f'DROP VIEW IF EXISTS "{name}"')
-        conn.execute(ddl)
+        conn.execute(ddl.replace("CREATE OR REPLACE VIEW", "CREATE OR REPLACE TEMP VIEW", 1))
     return views
 
 
