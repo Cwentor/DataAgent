@@ -234,11 +234,12 @@ def _heuristic_plan(query: str) -> list[PlanStep] | None:
         dsl = enumeration_dsl(query)
         if dsl is None:
             return None
-        field = dsl["dimensions"][0]["field"]
+        fields = [d["field"] for d in dsl["dimensions"]]
+        labels = "、".join(_dimension_label(f) for f in fields)
         return [
             PlanStep(
                 id="s1",
-                goal=f"列出{_dimension_label(field)}的全部取值",
+                goal=f"列出{labels}的全部取值",
                 kind="query",
                 dsl=dsl,
             ),
