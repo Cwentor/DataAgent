@@ -12,7 +12,11 @@
   - 核心名词首提建议双语：如“行级安全控制 (RLS)”、“语义目录 (Semantic Catalog)”。
   - 代码、测试函数名、英文注释与提交信息：严格使用英文。
 - **严禁私自越权**：
-  - 严禁绕过 DSL 试图直接拼接生成裸 SQL。
+  - **LLM 产出的 SQL 永不直接执行**（十九期修订）：必须经提升闸门
+    （`core/retrieval/sql_lift.py`）转译为 DSL 契约后由确定性编译器重新生成，
+    或经探索层审批门（第四类 interrupt）后在按 principal 生成的安全视图上受
+    治理执行（`core/retrieval/exploration.py`——表名重写 + 三护栏 + PII 脱敏）；
+    一切执行只发生在治理管道内。
   - 严禁在未更新 `semantic/catalog.py` 的前提下引入未声明字段。
 
 ---
@@ -84,10 +88,15 @@ compiler/   DSL -> SQL 确定性编译器
 agent/      NL -> DSL Agent（LLM + 启发式兜底 + 意图路由 + 多轮记忆 + 多工具调度）
 exec/       SQL 执行层（P0/P1 资源治理：执行前审计门 / 超时取消 / 扫描行数熔断 / LIMIT 硬上限 /
             只读连接池 / 查询结果缓存）
+core/retrieval/ 追加（十九期）：sql_lift.py 提升闸门（LLM SQL -> DSL 转译，
+            拒升精确清单喂回自愈）；exploration.py 探索执行器（审批门 + 安全
+            视图受治理执行）；二者构成三层同心圆取数架构的 L2/L3 层
+
 eval/       Golden 评测骨架与用例（oracle / agent 双模式）+ 意图路由评测（intent_eval）
 mock/       确定性 mock 数仓（DuckDB）
 present/    展示层（解释 + 可视化推荐）
-security/   权限控制（表级/列级/行级 RLS + 生成前作用域收窄）
+security/   权限控制（表级/列级/行级 RLS + 生成前作用域收窄 + views.py 会话级
+            安全视图：禁列物理投影 / RLS 固化 / 连接加固）
 auth/       统一身份认证（JWT + Session + 登录限流）
 audit/      审计快照 + 结构化日志 + 可观测性指标（/api/metrics）
 persistence/ 可选 SQLite KV 状态外置（Session / 澄清槽位 / 限流共享）
@@ -147,6 +156,7 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas +
 - 重规划自愈上下文：编排链路失败回 plan 时，`planner_prompt` 必须注入 `error_context`（最近失败摘要）——严禁让 LLM 盲重试；`error_context=None` 时提示词与旧契约逐字一致；
 - 提交前确保 `black --check .`、`ruff check .`、`python -m pytest -q` 全绿。
 
+- 能力边界与三层取数架构（十九期，2026-10）：能力边界 = 治理管道边界（只读 + RLS + 敏感数据保护 + 资源上限），不是 DSL 契约表达力；诚实 = 不虚构 + 假设透明（assumptions 契约字段，报告头部呈现），拒答降为最后手段——二轮歧义转"带假设作答"，严禁静默猜口径；三层同心圆：L1 确定性核（Planner 直产 DSL）/ L2 提升闸门（拒升精确清单喂回自愈 ≤2 次，拒升 ≠ 拒答）/ L3 探索层（第四类 interrupt 审批门 allow_once/allow_session/deny；L4 自动放行硬边界 = SQL 无主体禁列；deny = 诚实告知）；探索 SQL 永不原文执行（表名重写到 sec_* 安全视图 + 三护栏 + PII 脱敏）；沙箱 `connect/database` 调用永久封死（取数权只在执行层）；意图词表新增枚举/基数触发词时须同步 `intent_golden.json` 锚点；
 - 意图路由与诚实兜底（`core/orchestrator/intent.py` + `nodes.py`，十八期）：兜底准入制——仅诊断/基数/硬锚定指标三类意图可确定性直答（附缺省口径说明），其余意图置 `blocked_reason` 诚实拒答（critic/synthesize 短路，零 LLM 调用）；L3 意图-DSL 错位守卫依据确定性 L1 硬匹配（不信任 LLM 回传意图），CARDINALITY 守卫只限制聚合与投影目标、不限制过滤条件；Grounding 数值溯源重试上限 1 次、仍超阈值必须降级确定性渲染；意图词表以 `semantic/catalog` 的 `FieldMeta.aliases` 为单一事实源——新增字段时别名随登记自动生效，严禁在 intent.py 维护字面词表；选项式澄清经 `clarification_options` 状态字段透传（前端已消费）；指标词表的新增/修改必须同步登记 `semantic.json` 或内置 `COLUMNS` 并补意图评测用例；
 
 ## 评审落盘规范（Review Archive）
