@@ -476,3 +476,21 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .manifest-card { border: 1px dashed var(--border, #ccc); border-radius: 8px; padding: 8px 12px; margin: 6px 0; }
 .manifest-head { font-size: 12px; opacity: 0.75; }
 .manifest-list { margin: 4px 0 0 16px; padding: 0; font-size: 12px; }
+
+/* M6 探索查询审批卡 */
+.exploration-card .exploration-sql {
+  margin: 8px 0;
+  padding: 8px 10px;
+  max-height: 140px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.exploration-card .exploration-tables {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: #8a6d3b;
+}

@@ -1944,7 +1944,6 @@ def _make_sql_step_payload(sql: str) -> dict:
 def test_exploration_step_executes_on_l4_auto(monkeypatch, tmp_path):
     """L4 + 无敏感列 → 自动放行执行（maybe_interrupt 直通），数据集带探索标记。"""
     import core.orchestrator.nodes as _orch_nodes
-    from core.orchestrator.state import PlanStep
 
     executed: list[str] = []
 
@@ -1976,6 +1975,7 @@ def test_exploration_step_executes_on_l4_auto(monkeypatch, tmp_path):
 def test_exploration_l4_with_sensitive_column_interrupts(monkeypatch, tmp_path):
     """Review Focus #3：L4 但 SQL 含主体禁列 → 必须挂起人工审批（不自动放行）。"""
     import langgraph.types as lg_types
+
     import core.orchestrator.nodes as _orch_nodes
 
     captured: list[dict] = []

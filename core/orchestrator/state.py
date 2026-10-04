@@ -188,6 +188,10 @@ class AgentState(BaseModel):
     principal: str | None = Field(
         default=None, description="数据权限主体（RLS/探索层敏感判定）；None 等价 admin"
     )
+    exploration_pending: dict | None = Field(
+        default=None,
+        description="待审批探索查询（M6）：{sql, tables, sensitive}——挂起态快照供审批卡渲染",
+    )
     exploration_allowed: bool = Field(
         default=False,
         description="探索层本会话允许标记（M6）：用户选'本会话允许'后本轮不再重复询问",
