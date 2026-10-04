@@ -471,6 +471,17 @@ def lift_sql(sql: str) -> LiftResult:
             )
         join_type, expected_cols = expected
         side = (join.side or "").upper()
+        # 仅 INNER（side 空）与 LEFT 可提升；RIGHT/FULL 的孤儿行保留语义在
+        # DSL 受控连接（语义目录 join_type）中无法表达，重编译后行集不等价
+        # ——宁拒升不错译（评审 HIGH #3）
+        if side not in ("", "LEFT"):
+            return _one(
+                LiftRejection(
+                    "join",
+                    f"{side} JOIN {table!r}",
+                    "受控连接仅支持 INNER/LEFT（RIGHT/FULL JOIN 无法提升，请改写或走探索层）",
+                )
+            )
         actual_type = "left" if side == "LEFT" else "inner"
         if actual_type != join_type:
             return _one(
@@ -631,12 +642,18 @@ def lift_sql(sql: str) -> LiftResult:
                     "时间过滤仅支持 >= 起点与 < 终点的半开区间对（提升为 time_filter）",
                 )
             )
-    for field_name, start in starts.items():
+    # 单边时间条件显式拒升（评审 HIGH #2）：只有 < 终点（或只有 >= 起点）时
+    # time_filter 无法构造，静默丢弃会扩大结果集——按 starts ∪ ends 字段并集
+    # 配对，任一字段缺边即拒升（宁拒升不错译）
+    for field_name in sorted(starts.keys() | ends.keys()):
+        start = starts.get(field_name)
         end = ends.get(field_name)
-        if end is None:
+        if start is None or end is None:
             rejections.append(
                 LiftRejection(
-                    "where", f"时间列 {field_name}", "时间窗口必须同时给出 >= 起点与 < 终点"
+                    "where",
+                    f"时间列 {field_name}",
+                    "时间窗口必须同时给出 >= 起点与 < 终点（单边条件提升后无法表达，拒升）",
                 )
             )
             continue
