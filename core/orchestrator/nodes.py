@@ -27,6 +27,8 @@ import time
 from datetime import date
 from typing import Any
 
+from langgraph.errors import GraphInterrupt
+
 from agent.heuristic import region_provinces
 from agent.time_utils import parse_explicit_time_window
 from audit.logging import get_logger
@@ -1418,6 +1420,12 @@ def dsl_query_node(state: AgentState) -> AgentState:
                 s.model_copy(update={"status": "done"}) if s.id == step.id else s
                 for s in updated.plan_steps
             ]
+        except GraphInterrupt:
+            # 控制流异常（LangGraph 挂起机制，MRO: GraphInterrupt → GraphBubbleUp
+            # → Exception）：必须原样放行交图引擎挂起，严禁落入下方业务异常兜底
+            # 被当作步骤失败吞掉（评审 CRITICAL #1：吞掉后探索审批卡永远到不了
+            # 用户，deny 硬边界整体失效）。新增控制流异常路径时同样须在此放行。
+            raise
         except Exception as exc:
             keep = updated.error_context.record(f"{type(exc).__name__}: {exc}")
             logger.exception(
