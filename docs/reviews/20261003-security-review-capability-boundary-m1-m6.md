@@ -9,7 +9,7 @@
 
 | 边界 | 实现 | 防线形态 |
 | --- | --- | --- |
-| SQL 提升闸门 | `core/retrieval/sql_lift.py` | 白名单提升，拒升精确清单；解析超时 3s + 长度上限 20K |
+| SQL 提升闸门 | `core/retrieval/sql_lift.py` | 白名单提升，拒升精确清单；解析超时 5s + 长度上限 10K（2026-10-04 勘误：原文 3s/20K 与代码不符，实为 _PARSE_TIMEOUT_S=5.0 / _MAX_SQL_LENGTH=10_000） |
 | 探索层执行 | `core/retrieval/exploration.py` | 表名全量重写到 sec_* 视图 + 三护栏 + PII 脱敏 |
 | 安全视图层 | `security/views.py` | 禁列物理投影、RLS 固化、TEMP 视图、连接加固 |
 | 沙箱取数旁路 | `core/sandbox/ast_guard.py` | `connect`/`database` 调用封死（含别名导入形态） |
@@ -18,7 +18,7 @@
 
 ### 2.1 提升闸门（L2）
 
-- **注入面**：LLM 产出的 SQL 直入 `sqlglot.parse_one`——已有 3s 线程看门狗 + 20K 长度上限（PR 评审 HIGH-S1 修复）；解析失败/超时一律拒升（保守性优先）。
+- **注入面**：LLM 产出的 SQL 直入 `sqlglot.parse_one`——已有 5s 线程看门狗 + 10K 长度上限（2026-10-04 勘误：原文 3s/20K 与代码不符）（PR 评审 HIGH-S1 修复）；解析失败/超时一律拒升（保守性优先）。
 - **错译面**：字面量经 `compiler._literal` 按 dtype 强转义；多时间字段窗口、JOIN ON 非 EQ 谓词两处"静默错译"已按 PR 评审 HIGH 修复为显式拒升（`git log` 3950475 前的评审修复批次）；执行等价真值断言（`tests/test_sql_lift.py`）锁定提升语义。
 - **资源面**：提升产物由 `compile_sql` 确定性重编译，走 `execute_sql` 三护栏（超时/扫描熔断/行数硬上限）。
 - **残留**：sqlglot 解析器自身漏洞为供应链风险（版本锁定 30.18，随依赖审计走）。
