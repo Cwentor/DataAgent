@@ -202,6 +202,37 @@ def test_lift_rejects_half_open_time_window_only_start():
     assert "时间窗口" in result.rejections[0].reason
 
 
+def test_lift_rejects_half_open_time_window_only_end():
+    """评审 HIGH #2：只有 < 终点的时间条件严禁静默丢弃（丢弃即全域聚合）。"""
+    result = lift_sql(
+        "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
+        "WHERE f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
+    )
+    assert not result.ok
+    assert "时间窗口" in result.rejections[0].reason
+    assert "单边条件" in result.rejections[0].reason
+
+
+def test_lift_rejects_right_join():
+    """评审 HIGH #3：RIGHT JOIN 的孤儿行保留语义无法提升，严禁误判为 inner。"""
+    result = lift_sql(
+        "SELECT p.category AS c, SUM(f.order_amount) AS gmv FROM fact_orders f "
+        "RIGHT JOIN dim_product p ON p.product_id = f.product_id GROUP BY p.category"
+    )
+    assert not result.ok
+    assert any(r.clause == "join" and "RIGHT" in r.construct for r in result.rejections)
+
+
+def test_lift_rejects_full_join():
+    """评审 HIGH #3：FULL OUTER JOIN 同理拒升（重编译为 INNER 行集不等价）。"""
+    result = lift_sql(
+        "SELECT p.category AS c, SUM(f.order_amount) AS gmv FROM fact_orders f "
+        "FULL OUTER JOIN dim_product p ON p.product_id = f.product_id GROUP BY p.category"
+    )
+    assert not result.ok
+    assert any(r.clause == "join" and "FULL" in r.construct for r in result.rejections)
+
+
 def test_lift_rejects_detail_rows_without_distinct():
     result = lift_sql("SELECT f.order_id AS oid FROM fact_orders f")
     assert not result.ok
