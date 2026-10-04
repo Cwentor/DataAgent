@@ -116,3 +116,19 @@ def test_rewrite_computed_cte_allowed_and_tables_rewritten(ro_conn, tmp_path):
     rows = ro_conn.execute(rewritten).fetchall()
     direct = ro_conn.execute(sql).fetchall()
     assert sorted(map(repr, rows)) == sorted(map(repr, direct))
+
+
+def test_execute_exploration_rejects_write_statement(ro_conn, tmp_path):
+    """红线锚点（M7）：写语句经探索执行器必须被只读白名单硬拦截。"""
+    from exec.guards import UnsafeSqlError
+    from security.errors import SecurityError
+
+    with pytest.raises((UnsafeSqlError, SecurityError, duckdb.Error)):
+        execute_exploration_query(
+            "DELETE FROM fact_orders WHERE order_id = 1",
+            principal="admin",
+            workspace=tmp_path,
+            name="exploration_write",
+            query="写操作红线",
+            conn=ro_conn,
+        )
