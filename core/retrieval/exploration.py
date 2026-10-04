@@ -23,7 +23,12 @@ from sqlglot import exp
 
 from security.errors import SecurityError
 from security.policy import POLICIES
-from security.views import VIEW_PREFIX, harden_connection, install_secure_views
+from security.views import (
+    VIEW_PREFIX,
+    build_secure_views,
+    harden_connection,
+    install_secure_views,
+)
 from semantic import catalog
 
 
@@ -46,9 +51,7 @@ def rewrite_sql_to_views(sql: str, principal: str | None) -> tuple[str | None, l
     该表视图（越权）或表未登记，精确拒绝并指名，严禁静默放行。
     """
     policy = _principal_for(principal)
-    views = __import__("security.views", fromlist=["build_secure_views"]).build_secure_views(
-        principal
-    )
+    views = build_secure_views(principal)
     try:
         tree = sqlglot.parse_one(sql, dialect="duckdb")
     except Exception as exc:
@@ -82,6 +85,10 @@ def exploration_risk(sql: str, principal: str | None) -> tuple[bool, list[str]]:
     L4 自动放行的硬边界（Review Focus #3：含敏感列必须挂起人工审批）。
     """
     policy = _principal_for(principal)
+    # 大小写规范化（评审 HIGH #4）：DuckDB 标识符大小写不敏感，敏感判定若按
+    # 原文名精确匹配，SELECT DISCOUNT_AMOUNT 可绕过"含敏感列必须挂人工审批"
+    # 的 L4 硬边界——两侧统一 lower 后比对
+    forbidden = {c.lower() for c in policy.forbidden_columns}
     tables: set[str] = set()
     sensitive = False
     try:
@@ -89,13 +96,13 @@ def exploration_risk(sql: str, principal: str | None) -> tuple[bool, list[str]]:
     except Exception:
         return True, []  # 解析失败按敏感处理（保守，交人工审批）
     for column in tree.find_all(exp.Column):
-        col_name = column.name
-        if col_name in policy.forbidden_columns:
+        col_name = column.name.lower()
+        if col_name in forbidden:
             sensitive = True
-        for table in catalog.ALIASES:
-            meta_col = catalog.COLUMNS.get(col_name)
-            if meta_col is not None and meta_col.table == table:
-                tables.add(table)
+        # 触达表按列归属归集（目录键统一小写）；表级引用单独收集
+        meta_col = catalog.COLUMNS.get(col_name)
+        if meta_col is not None and meta_col.table in catalog.ALIASES:
+            tables.add(meta_col.table)
     for table in tree.find_all(exp.Table):
         name = table.name
         if name in catalog.ALIASES:

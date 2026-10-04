@@ -101,6 +101,19 @@ def test_exploration_risk_detects_forbidden_columns():
     assert has_sensitive is False
 
 
+def test_exploration_risk_case_insensitive_variants():
+    """评审 HIGH #4：DuckDB 标识符大小写不敏感，敏感判定必须大小写规范化——
+    大写/混写/带引号变体严禁绕过 L4 自动放行硬边界。"""
+    for variant in (
+        "SELECT DISCOUNT_AMOUNT FROM fact_orders",
+        "SELECT Discount_Amount FROM fact_orders",
+        'SELECT "DISCOUNT_AMOUNT" FROM fact_orders',
+        "SELECT f.DISCOUNT_AMOUNT FROM fact_orders f",
+    ):
+        has_sensitive, _tables = exploration_risk(variant, "restricted")
+        assert has_sensitive is True, variant
+
+
 def test_rewrite_computed_cte_allowed_and_tables_rewritten(ro_conn, tmp_path):
     """计算型 CTE 在探索层合法（提升闸门的保守内联不适用此处）；CTE 体表引用照常重写。"""
     from security.views import install_secure_views
@@ -119,11 +132,11 @@ def test_rewrite_computed_cte_allowed_and_tables_rewritten(ro_conn, tmp_path):
 
 
 def test_execute_exploration_rejects_write_statement(ro_conn, tmp_path):
-    """红线锚点（M7）：写语句经探索执行器必须被只读白名单硬拦截。"""
+    """红线锚点（M7）：写语句经探索执行器必须被只读白名单硬拦截
+    （评审收口：异常类型由三选一收窄为 UnsafeSqlError）。"""
     from exec.guards import UnsafeSqlError
-    from security.errors import SecurityError
 
-    with pytest.raises((UnsafeSqlError, SecurityError, duckdb.Error)):
+    with pytest.raises(UnsafeSqlError):
         execute_exploration_query(
             "DELETE FROM fact_orders WHERE order_id = 1",
             principal="admin",
