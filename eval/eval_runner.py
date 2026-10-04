@@ -238,6 +238,7 @@ def _default_session_runner(
     conn: duckdb.DuckDBPyConnection, case_id: str
 ) -> Callable[[str, str], dict[str, Any]]:
     """默认多轮执行器：经真实 run_query 链路（含路由 / 继承 / 状态写回）。"""
+    _force_offline_routing()
 
     def run_one(query: str, session_id: str) -> dict[str, Any]:
         from web.service import run_query
@@ -245,6 +246,28 @@ def _default_session_runner(
         return run_query(query, conn=conn, session_id=session_id, user="eval")
 
     return run_one
+
+
+_OFFLINE_PATCHED = False
+
+
+def _force_offline_routing() -> None:
+    """多轮评测钉死离线确定性（与 intent_eval 同源）。
+
+    屏蔽环境 LLM 配置（含失效 Key / 环境漂移）：golden 多轮断言要求逐轮
+    DSL 精确一致，路由必须走确定性规则而非模型；三处导入点分别打桩
+    （各模块 ``from agent.llm import resolve_default_client`` 为名字绑定）。
+    """
+    global _OFFLINE_PATCHED
+    if _OFFLINE_PATCHED:
+        return
+    import agent.pipeline as _pipeline
+    import agent.router.intent_router as _intent_router
+    import agent.tool_agent as _tool_agent
+
+    for mod in (_pipeline, _tool_agent, _intent_router):
+        mod.resolve_default_client = lambda: None
+    _OFFLINE_PATCHED = True
 
 
 def evaluate_all(
