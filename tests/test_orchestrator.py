@@ -2036,3 +2036,217 @@ def test_exploration_dataset_annotated_in_report(monkeypatch, tmp_path):
     }
     section, _artifact = _dataset_analyst_markdown("s1", ref, tmp_path, scope_note="")
     assert "探索查询产出" in section
+
+
+# --------------------------------------------------------------------------- #
+# 审批状态机真中断恢复分支 + 审计事件（评审 [S-3]）+ 图级端到端（CRITICAL #1）
+# --------------------------------------------------------------------------- #
+def _fake_exploration_execute(executed: list[str], tmp_path):
+    """构造受监督的 execute_exploration_query 替身（记录执行、返回合法 ParquetRef）。"""
+
+    def fake_execute(sql, **kwargs):
+        executed.append(sql)
+        from core.retrieval.export import export_to_parquet
+
+        return export_to_parquet(
+            ["gmv"], [[1.0]], tmp_path / "inputs", "s1", audit={"exploration": True}
+        )
+
+    return fake_execute
+
+
+def test_exploration_allow_once_resume_executes(monkeypatch, tmp_path):
+    """真中断恢复分支：resume 值 allow_once → 执行且不置轮级标记（下次仍询问）。"""
+    import langgraph.types as lg_types
+
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.state import AgentState, PlanStep
+
+    captured: list[dict] = []
+
+    def fake_interrupt(payload):
+        captured.append(payload)
+        return {"action": "allow_once"}
+
+    monkeypatch.setattr(lg_types, "interrupt", fake_interrupt)
+    executed: list[str] = []
+    monkeypatch.setattr(
+        "core.retrieval.exploration.execute_exploration_query",
+        _fake_exploration_execute(executed, tmp_path),
+    )
+    state = AgentState(user_query="复杂分析", autonomy_level="L2")
+    step = PlanStep(
+        id="s1",
+        goal="复杂分析",
+        kind="query",
+        sql="SELECT SUM(order_amount) AS gmv FROM fact_orders",
+    )
+    state, record = _orch_nodes._execute_exploration_step(state, step, tmp_path)
+    assert captured and captured[0]["kind"] == "exploration", "L2 默认档必须真中断挂起"
+    assert record.ok and executed, "allow_once 恢复后必须执行"
+    assert not state.exploration_allowed, "allow_once 严禁置轮级允许标记"
+
+
+def test_exploration_allow_session_resume_sets_round_flag(monkeypatch, tmp_path):
+    """真中断恢复分支：resume 值 allow_session → 置轮级标记，同轮后续不再询问。"""
+    import langgraph.types as lg_types
+
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.state import AgentState, PlanStep
+
+    captured: list[dict] = []
+
+    def fake_interrupt(payload):
+        captured.append(payload)
+        return {"action": "allow_session"}
+
+    monkeypatch.setattr(lg_types, "interrupt", fake_interrupt)
+    executed: list[str] = []
+    monkeypatch.setattr(
+        "core.retrieval.exploration.execute_exploration_query",
+        _fake_exploration_execute(executed, tmp_path),
+    )
+    state = AgentState(user_query="复杂分析", autonomy_level="L2")
+    step1 = PlanStep(
+        id="s1",
+        goal="复杂分析",
+        kind="query",
+        sql="SELECT SUM(order_amount) AS gmv FROM fact_orders",
+    )
+    state, record1 = _orch_nodes._execute_exploration_step(state, step1, tmp_path)
+    assert record1.ok
+    assert state.exploration_allowed is True, "allow_session 必须置轮级允许标记"
+    step2 = PlanStep(
+        id="s2", goal="再取一次", kind="query", sql="SELECT COUNT(order_id) AS cnt FROM fact_orders"
+    )
+    state, record2 = _orch_nodes._execute_exploration_step(state, step2, tmp_path)
+    assert len(captured) == 1, "同轮后续 sql 步骤不得再次挂起询问"
+    assert record2.ok and len(executed) == 2
+
+
+def test_exploration_audit_event_trio_emitted(monkeypatch, tmp_path):
+    """三枚审计事件留痕（M6 计划 / 设计 §6 第 5 条）：lift_reject、
+    exploration_approval、exploration_execute 全链路可捕获。"""
+    import langgraph.types as lg_types
+
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator import events as orch_events
+    from core.orchestrator.prompts import PLANNER_SYSTEM
+    from core.orchestrator.state import AgentState
+
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        orch_events, "emit_event", lambda name, payload: emitted.append((name, payload))
+    )
+
+    def fake_llm_json(llm, system, user):
+        # 仅 Planner 系统提示词返回 SQL 计划；reflector 等返回 None 走确定性判定
+        return (
+            _make_sql_step_payload(
+                "WITH t AS (SELECT product_id, SUM(1) AS c FROM fact_orders GROUP BY product_id) "
+                "SELECT SUM(t.product_id) AS x FROM t"
+            )
+            if system == PLANNER_SYSTEM
+            else None
+        )
+
+    def _no_interrupt(payload):
+        raise AssertionError("本用例 planner 阶段不应触发挂起")
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", fake_llm_json)
+    monkeypatch.setattr(lg_types, "interrupt", _no_interrupt)
+
+    state = _orch_nodes.planner_node(AgentState(user_query="复杂分析", autonomy_level="L2"))
+    names = [n for n, _ in emitted]
+    assert "lift_reject" in names, "拒升清单必须留痕"
+    # 拒升自愈耗尽后 SQL 计划保留交探索层（拒升 ≠ 拒答）
+    assert state.plan_steps[0].sql and state.plan_steps[0].dsl is None
+
+    executed: list[str] = []
+    monkeypatch.setattr(
+        "core.retrieval.exploration.execute_exploration_query",
+        _fake_exploration_execute(executed, tmp_path),
+    )
+    monkeypatch.setattr(lg_types, "interrupt", lambda payload: {"action": "allow_once"})
+    state, record = _orch_nodes._execute_exploration_step(state, state.plan_steps[0], tmp_path)
+    assert record.ok
+    names = [n for n, _ in emitted]
+    assert "exploration_approval" in names, "审批动作必须留痕"
+    assert "exploration_execute" in names, "探索执行必须留痕"
+    approval = next(p for n, p in emitted if n == "exploration_approval")
+    assert approval["action"] == "allow_once"
+    execute_evt = next(p for n, p in emitted if n == "exploration_execute")
+    assert execute_evt["approval"] == "allow_once"
+
+
+def test_exploration_approval_graph_e2e_pause_and_resume(monkeypatch, tmp_path):
+    """图级端到端（CRITICAL #1 回归锚点）：L2 + SQL 步骤经真实 LangGraph 图执行，
+    plan_review approve 后探索审批门必须真挂起（__interrupt__ kind=exploration），
+    deny/allow 两向恢复收敛终态。此前 GraphInterrupt 被 dsl_query_node 通用
+    异常兜底吞掉，审批卡永远到不了用户——本测试防其回归。"""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.langgraph_engine import (
+        build_langgraph_app,
+        invoke_langgraph,
+        resume_langgraph,
+    )
+    from core.orchestrator.prompts import PLANNER_SYSTEM
+    from core.orchestrator.state import AgentState
+
+    sql_payload = _make_sql_step_payload(
+        "WITH t AS (SELECT product_id, SUM(1) AS c FROM fact_orders GROUP BY product_id) "
+        "SELECT SUM(t.product_id) AS x FROM t"
+    )
+
+    def fake_llm_json(llm, system, user):
+        return sql_payload if system == PLANNER_SYSTEM else None
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(_orch_nodes, "_llm_json", fake_llm_json)
+    executed: list[str] = []
+    monkeypatch.setattr(
+        "core.retrieval.exploration.execute_exploration_query",
+        _fake_exploration_execute(executed, tmp_path),
+    )
+
+    # ---- 两向共享前半程：invoke → plan_review 挂起 → approve → 探索门挂起 ---- #
+    def _reach_exploration_gate(thread_id: str):
+        app = build_langgraph_app(checkpointer=MemorySaver())
+        state = AgentState(
+            user_query="复杂分析", autonomy_level="L2", session_id=thread_id, turn_id="t1"
+        )
+        final, pending = invoke_langgraph(state, thread_id=thread_id, app=app)
+        assert pending and pending.get("kind") == "plan_review", "L2 多步计划先挂计划审批"
+        final, pending = resume_langgraph(
+            final, {"resume_value": {"action": "approve"}}, thread_id=thread_id, app=app
+        )
+        assert (
+            pending and pending.get("kind") == "exploration"
+        ), "探索审批门必须真挂起（GraphInterrupt 被吞即在此失败）"
+        assert pending.get("sensitive") is False
+        assert "fact_orders" in (pending.get("tables") or [])
+        assert not executed, "审批前 SQL 严禁执行（不泄露）"
+        return final, pending, app
+
+    # ---- deny 向：诚实拒答收敛，SQL 零执行 ---- #
+    final, _pending, app = _reach_exploration_gate("e2e-exp-deny")
+    final, _pending2 = resume_langgraph(
+        final, {"resume_value": {"action": "deny"}}, thread_id="e2e-exp-deny", app=app
+    )
+    assert final.phase == "done"
+    assert final.blocked_reason and "拒绝" in final.blocked_reason
+    assert not executed, "deny 后 SQL 严禁执行"
+
+    # ---- allow 向：allow_once 恢复执行，数据集带探索标记 ---- #
+    final, _pending, app = _reach_exploration_gate("e2e-exp-allow")
+    final, _pending2 = resume_langgraph(
+        final, {"resume_value": {"action": "allow_once"}}, thread_id="e2e-exp-allow", app=app
+    )
+    assert final.phase == "done"
+    assert executed, "allow_once 恢复后必须执行探索查询"
+    dataset = final.datasets.get("s1")
+    assert dataset is not None
+    assert (dataset.get("audit") or {}).get("exploration") is True

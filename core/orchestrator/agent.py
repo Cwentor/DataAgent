@@ -290,6 +290,8 @@ def _run_agent_langgraph_path(
             )
         if pending and pending.get("kind") in {"plan_review", "high_risk"}:
             return final.apply(phase=str(pending.get("kind")))
+        if pending and pending.get("kind") == "exploration":
+            return _apply_exploration_pending(final, pending)
         return final
 
     state = AgentState(
@@ -316,7 +318,27 @@ def _run_agent_langgraph_path(
     if pending and pending.get("kind") in {"plan_review", "high_risk"}:
         # HITL 挂起：与 clarify 共用 AgentState pause 契约（相位按挂起门类型区分）
         return final.apply(phase=str(pending.get("kind")))
+    if pending and pending.get("kind") == "exploration":
+        return _apply_exploration_pending(final, pending)
     return final
+
+
+def _apply_exploration_pending(final: AgentState, pending: dict) -> AgentState:
+    """探索审批门挂起态回填（M6 第四类 interrupt）。
+
+    节点内 ``state.apply(phase="exploration", exploration_pending=...)`` 发生在
+    interrupt 抛出之前，不落入图快照（LangGraph 挂起快照 = 最近完成节点的输出），
+    因此挂起契约必须从 interrupt payload 回填——与 plan_review/high_risk 的
+    phase 回填同源。载荷裁剪为 {sql, tables, sensitive}（前端审批卡契约）。
+    """
+    return final.apply(
+        phase="exploration",
+        exploration_pending={
+            "sql": pending.get("sql", ""),
+            "tables": pending.get("tables", []),
+            "sensitive": pending.get("sensitive", False),
+        },
+    )
 
 
 __all__ = ["AgentTrace", "run_agent"]
