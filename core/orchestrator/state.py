@@ -185,6 +185,13 @@ class AgentState(BaseModel):
     clarification_rounds: int = Field(
         default=0, description="澄清已发生轮次（二轮仍歧义转带假设作答，防循环）"
     )
+    principal: str | None = Field(
+        default=None, description="数据权限主体（RLS/探索层敏感判定）；None 等价 admin"
+    )
+    exploration_allowed: bool = Field(
+        default=False,
+        description="探索层本会话允许标记（M6）：用户选'本会话允许'后本轮不再重复询问",
+    )
     assumptions: list[str] = Field(
         default_factory=list,
         description="口径假设（分级透明作答，十九期 M3）：选定合理口径的理由说明，报告头部呈现",

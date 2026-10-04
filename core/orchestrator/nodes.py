@@ -32,6 +32,7 @@ from agent.time_utils import parse_explicit_time_window
 from audit.logging import get_logger
 from audit.metrics import default_registry
 from core.orchestrator import events
+from core.orchestrator.autonomy import maybe_interrupt
 from core.orchestrator.intent import (
     IntentProfile,
     IntentType,
@@ -477,6 +478,145 @@ def _degraded_parse(
 _LIFT_MAX_RETRIES = 2  # SQL 提升闸门内联自愈上限（拒升清单喂回重规划）
 
 
+def _execute_exploration_step(
+    state: AgentState, step: PlanStep, workspace: Any
+) -> tuple[AgentState, ToolRecord]:
+    """探索层执行（十九期 M6，spec §3.5）：审批门 + 安全视图受治理执行。
+
+    触发：计划中保留的未提升 SQL 步骤（拒升自愈耗尽）。第四类审批门
+    exploration（allow_once / allow_session / deny）——L4 无敏感列自动放行
+    （maybe_interrupt 直通 + hitl 通知事件），L4 含敏感列强制真中断
+    （Review Focus #3：敏感判定是自动放行的硬边界）。deny => 诚实拒答
+    （含替代问法建议，不算错误）。审批与执行全量审计事件留痕。
+    """
+    import time
+
+    from core.retrieval.exploration import execute_exploration_query, exploration_risk
+
+    started = time.perf_counter()
+    # 主体取 state.principal（web 链路服务端身份绑定；None 等价 admin）——
+    # 敏感判定必须相对真实主体，硬编码 admin 会使 L4 边界失效
+    principal = state.principal or "admin"
+    sensitive, tables = exploration_risk(step.sql, principal)
+    events.emit_tool_start(
+        "futurebi_exploration_query",
+        step.id,
+        {"sql": step.sql[:800], "tables": tables, "sensitive": sensitive},
+    )
+
+    approved: str | None = None
+    if state.exploration_allowed:
+        approved = "allow_session"
+    else:
+        payload = {
+            "kind": "exploration",
+            "sql": step.sql[:800],
+            "tables": tables,
+            "sensitive": sensitive,
+        }
+        if state.autonomy_level == "L4" and not sensitive:
+            resume = maybe_interrupt(state, payload, trigger="exploration")
+        else:
+            from langgraph.types import interrupt
+
+            resume = interrupt(payload)  # type: ignore[assignment]
+        action = str((resume or {}).get("action") or "deny")
+        if action not in ("allow_once", "allow_session", "deny"):
+            action = "deny"
+        events.emit_event(
+            "exploration_approval",
+            {"step": step.id, "action": action, "sensitive": sensitive, "tables": tables},
+        )
+        if action == "deny":
+            events.emit_tool_end(
+                "futurebi_exploration_query",
+                step.id,
+                ok=False,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                output={"denied": True},
+            )
+            updated = state.apply(
+                blocked_reason=(
+                    "你拒绝执行探索查询。本次分析所需的查询形态超出语义契约的表达能力，"
+                    "系统不会在未经确认的情况下执行。可尝试：改写为常规聚合/枚举问法"
+                    "（如「各品类的GMV」「列出全部品牌」），或把复杂分析拆分为多步提问。"
+                ),
+                answered_by="blocked",
+                plan_steps=[],
+            )
+            return (
+                updated,
+                ToolRecord(
+                    step_id=step.id,
+                    tool="execute_exploration_query",
+                    ok=False,
+                    summary=f"[{step.id}] 探索查询被用户拒绝（deny）",
+                ),
+            )
+        approved = action
+        if action == "allow_session":
+            state = state.apply(exploration_allowed=True)
+
+    try:
+        ref = execute_exploration_query(
+            step.sql,
+            principal=principal,
+            workspace=workspace,
+            name=step.id,
+            query=state.user_query,
+        )
+    except Exception as exc:  # 重写拒绝/护栏熔断/超时：拒因如实喂回，不静默
+        detail = f"{type(exc).__name__}: {exc}"[:300]
+        events.emit_tool_end(
+            "futurebi_exploration_query",
+            step.id,
+            ok=False,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            output={"error": detail},
+        )
+        updated = state.apply(
+            error_context=state.error_context.record(f"探索执行失败: {detail}"),
+            no_data_reason=f"探索查询执行失败：{detail}",
+        )
+        return (
+            updated,
+            ToolRecord(
+                step_id=step.id,
+                tool="execute_exploration_query",
+                ok=False,
+                error=detail,
+                summary=f"[{step.id}] 探索执行失败：{detail}",
+            ),
+        )
+    events.emit_event(
+        "exploration_execute",
+        {
+            "step": step.id,
+            "approval": approved,
+            "rows": ref.rows,
+            "sensitive": sensitive,
+        },
+    )
+    state.datasets[step.id] = ref.model_dump(by_alias=True)
+    events.emit_tool_end(
+        "futurebi_exploration_query",
+        step.id,
+        ok=True,
+        duration_ms=(time.perf_counter() - started) * 1000,
+        output={"dataset": step.id, "rows": ref.rows},
+    )
+    return (
+        state,
+        ToolRecord(
+            step_id=step.id,
+            tool="execute_exploration_query",
+            ok=True,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            summary=f"[{step.id}] 探索查询执行完成（{approved}）：{ref.rows} 行",
+        ),
+    )
+
+
 def _lift_plan_sql(
     steps: list[PlanStep],
     llm: Any | None,
@@ -517,8 +657,14 @@ def _lift_plan_sql(
             return lifted, notes
         attempts += 1
         if llm is None or attempts > _LIFT_MAX_RETRIES:
-            notes.append(f"[planner] sql-lift-failed: {'；'.join(rejections[:6])}")
-            return None, notes
+            # M6 修订（spec §3.5/§4 案例 B）：自愈耗尽不再回落兜底——保留
+            # SQL 计划交探索层审批门裁决（严禁静默丢 SQL 换口径作答）
+            events.emit_event(
+                "lift_reject",
+                {"rejections": rejections[:6], "steps": [s.id for s in steps]},
+            )
+            notes.append(f"[planner] sql-pending-exploration: {'；'.join(rejections[:6])}")
+            return steps, notes
         retry_payload = _llm_json(
             llm,
             PLANNER_SYSTEM,
@@ -533,12 +679,19 @@ def _lift_plan_sql(
             ),
         )
         if not retry_payload:
-            notes.append("[planner] sql-lift-failed: 自愈重规划调用失败")
-            return None, notes
-        steps = _plan_from_llm(retry_payload)
-        if steps is None:
-            notes.append("[planner] sql-lift-failed: 重规划计划非法")
-            return None, notes
+            events.emit_event(
+                "lift_reject", {"rejections": rejections[:6], "reason": "retry_call_failed"}
+            )
+            notes.append("[planner] sql-pending-exploration: 自愈重规划调用失败")
+            return steps, notes
+        retry_steps = _plan_from_llm(retry_payload)
+        if retry_steps is None:
+            events.emit_event(
+                "lift_reject", {"rejections": rejections[:6], "reason": "retry_plan_invalid"}
+            )
+            notes.append("[planner] sql-pending-exploration: 重规划计划非法")
+            return steps, notes
+        steps = retry_steps
 
 
 def _plan_from_llm(payload: dict[str, Any]) -> list[PlanStep] | None:
@@ -1068,6 +1221,11 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
 
     workspace = settings.WORKSPACE_ROOT / f"{state.session_id}" / state.turn_id
     prepare_workspace(workspace)
+
+    # 探索层执行（M6）：未提升的 SQL 步骤严禁流入 DSL 网关——走审批门 +
+    # 安全视图受治理执行
+    if step.kind == "query" and step.sql and step.dsl is None:
+        return _execute_exploration_step(state, step, workspace)
 
     # 总览口径 = 本计划内无维度拆分的 query 步骤 DSL（LLM 计划）；确定性
     # 兜底两期对本身即总览口径。拆分步骤继承之，缺失时按 DSL 契约原样校验。
@@ -2124,6 +2282,12 @@ def _dataset_analyst_markdown(
         f"### 查询结果：{name}",
         f"- 共 {total} 条记录（{len(cols)} 个分析视角）",
     ]
+    if (ref.get("audit") or {}).get("exploration"):
+        # M6：带假设作答 ≠ 静默降级——探索产出必须醒目标注
+        lines.insert(
+            1,
+            "- ⚠️ **本结果由探索查询产出**：未经语义契约解释，口径见执行轨迹中的 SQL 摘要",
+        )
     preview = _preview_rows(str(workspace / "inputs" / ref.get("path", "")), limit=30)
     if total == 1 and len(cols) == 1 and preview:
         lines.append(f"- **查询答案：{_fmt_scalar_answer(cols[0], preview[0][0])}**")

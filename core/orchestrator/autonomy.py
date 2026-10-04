@@ -31,6 +31,9 @@ _DEFAULT_ACTIONS: dict[str, dict] = {
     "plan_review": {"action": "approve", "instruction": None},
     "high_risk": {"action": "approve", "instruction": None},
     "step_confirm": {"action": "approve", "instruction": None},
+    # 探索层审批门（M6）：L4 直通语义 = 单次允许（含敏感列时 gate 侧强制
+    # 真中断，不经此默认动作——见 nodes._execute_exploration_step）
+    "exploration": {"action": "allow_once"},
 }
 
 
