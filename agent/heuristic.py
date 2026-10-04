@@ -27,9 +27,10 @@ from agent.errors import PipelineError
 from agent.time_utils import parse_explicit_time_window
 from config import settings
 from security.errors import SecurityError
+from security.guard import referenced_fields
 from security.scope import scoped_fields
 from semantic import catalog
-from semantic.dsl_schema import Comparison, Granularity, QueryDSL, RatioMetric, WindowMetric
+from semantic.dsl_schema import Comparison, Granularity, QueryDSL
 
 # 大区 -> 省份映射单一事实来源已迁至 semantic.catalog.REGION_PROVINCE_MAPPING
 # （审计修复 M1：区域词展开的口径归口语义目录）。此别名保持既有导入路径兼容。
@@ -187,35 +188,10 @@ class DeterministicNL2DSL:
         而不是生成后靠守卫兜底（apply_policy 仍作为第二道纵深防御）。
         """
         allowed = scoped_fields(principal)
-        referenced: set[str] = set()
-        # 表达式指标（十九期 M3）：ref 回溯到被引用聚合指标的字段（与
-        # security.guard._referenced_fields 同口径，禁列不得借表达式绕过）
-        agg_by_alias = {}
-        for m in dsl.metrics:
-            if getattr(m, "kind", "") == "expression":
-                continue
-            if isinstance(m, RatioMetric):
-                referenced.add(m.numerator.field)
-                referenced.add(m.denominator.field)
-            elif isinstance(m, WindowMetric):
-                referenced.add(m.base.field)
-            else:
-                referenced.add(m.field)
-            agg_by_alias[m.alias] = m
-        for m in dsl.metrics:
-            if getattr(m, "kind", "") != "expression":
-                continue
-            stack = [m.expr]
-            while stack:
-                node = stack.pop()
-                ref_metric = agg_by_alias.get(getattr(node, "ref", None))
-                if ref_metric is not None:
-                    referenced.add(ref_metric.field)
-                stack.extend(getattr(node, "args", []))
-        for d in dsl.dimensions:
-            referenced.add(d.field)
-        for f in dsl.filters:
-            referenced.add(f.field)
+        # 表达式指标（十九期 M3）：ref 回溯到被引用聚合指标的字段——与
+        # security.guard.apply_policy 共用 referenced_fields 单一实现，
+        # 禁列回溯规则严禁双实现漂移（十九期评审收口）
+        referenced = referenced_fields(dsl)
         forbidden = referenced - allowed
         if forbidden:
             raise SecurityError(f"主体 {principal!r} 无权访问字段: {sorted(forbidden)}")

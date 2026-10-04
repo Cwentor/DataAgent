@@ -318,19 +318,28 @@ def test_run_code_str_title_still_ok(tmp_path):
         "import duckdb\nduckdb.connect('analytics_sandbox.duckdb')",
         "import duckdb as d\nd.connect('x.duckdb')",
         "from duckdb import connect\nconnect('x.duckdb')",
+        "from duckdb import connect as c\nc('x.duckdb')",
         "import duckdb\nduckdb.database('x.duckdb')",
     ],
 )
 def test_static_check_blocks_duckdb_connect_bypass(code):
     """duckdb 直连数仓的旁路必须被静态校验拒绝（AST 守卫拦不住 C 扩展的
-    connect 调用，必须在代码层封死）。"""
+    connect 调用，必须在代码层封死；别名绑定形态在导入处按被导入名拦截）。"""
     report = static_check(code)
     assert not report.ok, report.summary()
     assert any("connect" in v["detail"] or "database" in v["detail"] for v in report.violations)
 
 
 def test_static_check_allows_duckdb_read_parquet():
-    """合法用途不受影响：read_parquet 只读消费 ParquetRef 导出。"""
+    """合法用途不受影响：duckdb.read_parquet 模块级调用只读消费 ParquetRef
+    导出，不触及 connect/database 旁路调用名（评审收口：正面放行形态锚定）。"""
+    code = "import duckdb\ncon = duckdb.read_parquet('inputs/s1.parquet')\n"
+    report = static_check(code)
+    assert report.ok, report.summary()
+
+
+def test_static_check_blocks_even_in_memory_connect():
+    """connect 调用（含内存库）一律封死，防止以内存连接为跳板。"""
     code = "import duckdb\n" "con = duckdb.connect()  # 内存连接仅用于 read_parquet 消费导出\n"
     report = static_check(code)
     assert not report.ok, "connect 调用（含内存库）一律封死，防止以内存连接为跳板"

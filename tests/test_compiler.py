@@ -693,6 +693,21 @@ def test_expression_metric_contract_rejections():
                 ]
             }
         )
+    # lit 字面量 NaN/Inf（json.loads 默认接受非标浮点，契约层直接拒绝——
+    # 评审收口：堵住 render_literal NaN/Inf 防线的绕行）
+    with pytest.raises(ValidationError):
+        QueryDSL.model_validate(
+            {
+                "metrics": [
+                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "expression",
+                        "alias": "x",
+                        "expr": {"op": "div", "args": [{"ref": "gmv"}, {"lit": float("inf")}]},
+                    },
+                ]
+            }
+        )
 
 
 @pytest.mark.parametrize(

@@ -101,7 +101,6 @@ class CaseReport:
     error: str | None = None
     compiled_sql: str = ""
     golden_sql: str = ""
-    skipped: bool = False
 
 
 @dataclass
@@ -111,7 +110,6 @@ class EvalSummary:
     total: int = 0
     passed: int = 0
     failed: int = 0
-    skipped: int = 0
     reports: list[CaseReport] = field(default_factory=list)
 
 
@@ -269,8 +267,6 @@ def evaluate_all(
         ok = report.dsl_ok and report.result_ok and report.sql_ok
         if ok and report.error is None:
             summary.passed += 1
-        elif report.skipped:
-            summary.skipped += 1
         else:
             summary.failed += 1
     return summary
@@ -278,22 +274,17 @@ def evaluate_all(
 
 def _print_summary(summary: EvalSummary, print_sql: bool = False) -> None:
     print("=" * 90)
-    skip_note = (
-        f"（另有 {summary.skipped} 条 SKIP：M2 新契约形态待 M3 接入）" if summary.skipped else ""
-    )
-    print(f"评测结果: {summary.passed}/{summary.total} 通过{skip_note}")
+    print(f"评测结果: {summary.passed}/{summary.total} 通过")
     print("=" * 90)
     for r in summary.reports:
         ok = r.dsl_ok and r.result_ok and r.sql_ok and r.error is None
-        flag = "SKIP" if r.skipped else ("PASS" if ok else "FAIL")
+        flag = "PASS" if ok else "FAIL"
         print(f"[{flag}] {r.id}  {r.question}")
-        if not ok and not r.skipped:
+        if not ok:
             if r.error:
                 print(f"       错误: {r.error}")
             else:
                 print(f"        dsl_ok={r.dsl_ok}  sql_ok={r.sql_ok}  result_ok={r.result_ok}")
-        if r.skipped:
-            print(f"       原因: {r.error}")
         print(f"       结果哈希: {r.hash}")
         if print_sql:
             print(f"       编译SQL:\n{r.compiled_sql}")

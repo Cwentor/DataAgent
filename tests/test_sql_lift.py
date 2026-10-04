@@ -206,3 +206,71 @@ def test_lift_rejects_detail_rows_without_distinct():
     result = lift_sql("SELECT f.order_id AS oid FROM fact_orders f")
     assert not result.ok
     assert "明细行" in result.rejections[0].reason
+
+
+def test_lift_rejects_multi_time_field_windows():
+    """评审收口：多时间字段窗口对无法用单 time_filter 契约表达，严禁静默覆盖。"""
+    result = lift_sql(
+        "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
+        "JOIN dim_user u ON u.user_id = f.user_id "
+        "WHERE f.order_time >= TIMESTAMP '2024-06-01 00:00:00' "
+        "AND f.order_time < TIMESTAMP '2024-07-01 00:00:00' "
+        "AND u.register_time >= TIMESTAMP '2024-06-01 00:00:00' "
+        "AND u.register_time < TIMESTAMP '2024-07-01 00:00:00'"
+    )
+    assert not result.ok
+    assert "多时间字段" in result.rejections[0].construct
+
+
+def test_lift_rejects_duplicate_time_window():
+    """评审收口：同字段重复区间条件无法取交集语义，严禁 dict 覆盖错译。"""
+    result = lift_sql(
+        "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
+        "WHERE f.order_time >= TIMESTAMP '2024-06-01 00:00:00' "
+        "AND f.order_time >= TIMESTAMP '2024-06-15 00:00:00' "
+        "AND f.order_time < TIMESTAMP '2024-07-01 00:00:00'"
+    )
+    assert not result.ok
+    assert "重复时间窗口" in result.rejections[0].construct
+
+
+def test_lift_rejects_non_equi_join_predicate():
+    """评审收口：ON 含非等值谓词（无处安放）必须拒升，严禁静默丢弃扩大结果集。"""
+    result = lift_sql(
+        "SELECT p.category AS c, SUM(f.order_amount) AS gmv FROM fact_orders f "
+        "JOIN dim_product p ON p.product_id = f.product_id AND f.order_amount > 100 "
+        "GROUP BY p.category"
+    )
+    assert not result.ok
+    assert result.rejections[0].clause == "join"
+    assert "GT" in result.rejections[0].construct
+
+
+def test_lift_rejects_oversized_sql():
+    """评审收口：输入长度上限先于解析生效（spec §3.3 保守性优先）。"""
+    sql = "SELECT f.order_id AS oid FROM fact_orders f WHERE " + " OR ".join(
+        ["f.order_id = 1"] * 3000
+    )
+    assert len(sql) > 10_000
+    result = lift_sql(sql)
+    assert not result.ok
+    assert result.rejections[0].clause == "parse"
+    assert "oversized" in result.rejections[0].construct
+
+
+def test_lift_rejects_parse_timeout(monkeypatch):
+    """评审收口（spec §3.3）：解析超时一律拒升，严禁无限等待。"""
+    import time as _time
+
+    import core.retrieval.sql_lift as sql_lift_mod
+
+    def _slow_parse(*args, **kwargs):
+        _time.sleep(1.0)
+        raise AssertionError("超时后不应继续等待解析结果")
+
+    monkeypatch.setattr(sql_lift_mod.sqlglot, "parse_one", _slow_parse)
+    monkeypatch.setattr(sql_lift_mod, "_PARSE_TIMEOUT_S", 0.2)
+    result = lift_sql("SELECT SUM(f.order_amount) AS gmv FROM fact_orders f")
+    assert not result.ok
+    assert result.rejections[0].clause == "parse"
+    assert result.rejections[0].construct == "timeout"

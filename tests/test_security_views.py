@@ -14,6 +14,7 @@ from compiler.sql_compiler import compile_sql
 from security.guard import apply_policy
 from security.views import install_secure_views
 from semantic.catalog import COLUMNS
+from semantic.dsl_schema import QueryDSL
 
 
 def _make_conn():
@@ -68,7 +69,7 @@ def test_view_semantics_match_guard_rls(conn):
     ).fetchall()
 
     dsl = apply_policy(
-        __import__("semantic.dsl_schema", fromlist=["QueryDSL"]).QueryDSL.model_validate(
+        QueryDSL.model_validate(
             {
                 "metrics": [
                     {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}

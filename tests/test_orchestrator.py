@@ -1916,6 +1916,8 @@ def test_planner_dsl_takes_precedence_over_sql(monkeypatch):
     monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
     monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
     state = planner_node(AgentState(user_query="5月GMV是多少"))
+    assert state.answered_by == "llm", "dsl 优先时合法 dsl 步骤不应被连坐丢弃落兜底"
     assert state.plan_steps[0].dsl is not None
+    assert state.plan_steps[0].dsl["metrics"][0]["alias"] == "gmv", "dsl 原样保留"
     assert state.plan_steps[0].sql is None
     assert not any("sql-lifted" in s for s in state.scratchpad), "dsl 优先时不走提升闸门"
