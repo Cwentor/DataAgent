@@ -99,3 +99,20 @@ def test_exploration_risk_detects_forbidden_columns():
     safe_sql = "SELECT order_amount FROM fact_orders"
     has_sensitive, tables = exploration_risk(safe_sql, "restricted")
     assert has_sensitive is False
+
+
+def test_rewrite_computed_cte_allowed_and_tables_rewritten(ro_conn, tmp_path):
+    """计算型 CTE 在探索层合法（提升闸门的保守内联不适用此处）；CTE 体表引用照常重写。"""
+    from security.views import install_secure_views
+
+    sql = (
+        "WITH t AS (SELECT product_id, SUM(1) AS c FROM fact_orders GROUP BY product_id) "
+        "SELECT SUM(t.product_id) AS x FROM t"
+    )
+    rewritten, rejects = rewrite_sql_to_views(sql, "admin")
+    assert rejects == []
+    assert "sec_fact_orders" in rewritten
+    install_secure_views(ro_conn, "admin")
+    rows = ro_conn.execute(rewritten).fetchall()
+    direct = ro_conn.execute(sql).fetchall()
+    assert sorted(map(repr, rows)) == sorted(map(repr, direct))

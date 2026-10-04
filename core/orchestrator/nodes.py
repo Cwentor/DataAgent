@@ -581,8 +581,9 @@ def _execute_exploration_step(
             duration_ms=(time.perf_counter() - started) * 1000,
             output={"error": detail},
         )
+        state.error_context.record(f"探索执行失败: {detail}")  # 原地记录（返回重试允许位）
         updated = state.apply(
-            error_context=state.error_context.record(f"探索执行失败: {detail}"),
+            error_context=state.error_context,
             no_data_reason=f"探索查询执行失败：{detail}",
         )
         return (

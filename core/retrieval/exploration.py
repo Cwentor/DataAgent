@@ -54,10 +54,14 @@ def rewrite_sql_to_views(sql: str, principal: str | None) -> tuple[str | None, l
     except Exception as exc:
         return None, [f"SQL 解析失败: {exc}"]
     rejects: list[str] = []
+    # CTE 别名（含嵌套）：CTE 体内部的表引用照常重写，别名引用本身跳过——
+    # 计算型 CTE 在探索层是合法形态（这正是探索层存在的意义），与提升闸门
+    # 的保守内联不同
+    cte_names = {cte.alias_or_name for cte in tree.find_all(exp.CTE)}
     for table in tree.find_all(exp.Table):
         name = table.name
-        if name.startswith(VIEW_PREFIX):
-            continue  # 已是视图名（幂等重写）
+        if name.startswith(VIEW_PREFIX) or name in cte_names:
+            continue  # 已是视图名（幂等）/ CTE 内部引用（其体单独重写）
         if name not in catalog.ALIASES:
             rejects.append(f"未登记的表 {name!r}（不在语义目录，拒绝执行）")
             continue
