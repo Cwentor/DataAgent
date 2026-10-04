@@ -652,7 +652,7 @@
       var done = document.createElement("div");
       done.className = "hitl-answered";
       var label = { approve: "已批准", reject: "已拒绝", edit: "已提交修改",
-        allow_once: "已允许本次执行", allow_session: "已允许本会话执行", deny: "已拒绝" }[action] || action;
+        allow_once: "已允许本次执行", allow_session: "已允许本轮执行", deny: "已拒绝" }[action] || action;
       done.textContent = instruction ? label + "：" + instruction : label;
       cardEl.appendChild(done);
     }
