@@ -65,3 +65,5 @@ yyyymmdd-<类型>-<主题关键词>.md
 | [20260910-benchmark-judge-data-agent-e2e.md](20260910-benchmark-judge-data-agent-e2e.md) | 质量验收：Data Agent 全链路基准裁决（六维度 69 分 FAIL） | 2026-09 |
 | [20261002-audit-clarify-pending-hijack.md](20261002-audit-clarify-pending-hijack.md) | 深度审计：clarify 挂起对新问题的误路由隐患（待审核） | 2026-10 |
 | [20261003-pr-review-capability-boundary-m1-m5.md](20261003-pr-review-capability-boundary-m1-m5.md) | PR 评审：十九期能力边界扩展 M1-M5 | 2026-10 |
+| [20261003-security-review-capability-boundary-m1-m6.md](20261003-security-review-capability-boundary-m1-m6.md) | 安全评审：十九期能力边界扩展 M1-M6 | 2026-10 |
+| [20261003-pr-review-capability-boundary-m1-m5.md](20261003-pr-review-capability-boundary-m1-m5.md) | PR 评审：十九期能力边界扩展 M1-M5 | 2026-10 |
