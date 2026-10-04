@@ -194,7 +194,8 @@ class AgentState(BaseModel):
     )
     exploration_allowed: bool = Field(
         default=False,
-        description="探索层本会话允许标记（M6）：用户选'本会话允许'后本轮不再重复询问",
+        description="探索层本轮允许标记（M6）：用户选'本轮允许'后本轮后续 sql 步骤不再重复"
+        "询问；跨轮会话级持久化经评审批准延后（语义与文案已对齐为'本轮允许'）",
     )
     assumptions: list[str] = Field(
         default_factory=list,

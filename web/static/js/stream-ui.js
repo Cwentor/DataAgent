@@ -175,7 +175,7 @@
     actions.className = "hitl-options";
     [
       { action: "allow_once", text: "允许一次" },
-      { action: "allow_session", text: "本会话允许" },
+      { action: "allow_session", text: "本轮允许" },
       { action: "deny", text: "拒绝" }
     ].forEach(function (a) {
       var btn = document.createElement("button");
