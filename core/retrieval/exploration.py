@@ -21,10 +21,10 @@ from pathlib import Path
 import sqlglot
 from sqlglot import exp
 
-from semantic import catalog
 from security.errors import SecurityError
 from security.policy import POLICIES
 from security.views import VIEW_PREFIX, harden_connection, install_secure_views
+from semantic import catalog
 
 
 def _principal_for(principal: str | None):
@@ -106,16 +106,16 @@ def execute_exploration_query(
     workspace: Path | str,
     name: str,
     query: str = "",
-    conn: "object | None" = None,
+    conn: object | None = None,
     max_rows: int = 1000,
-) -> "object":
+) -> object:
     """审批通过后的探索执行：重写 → TEMP 视图安装 → 三护栏执行 → PII 导出。
 
     返回 ParquetRef（audit 带 exploration=True）。SQL 永不原文执行。
     """
     from config import settings
-    from exec.guards import execute_sql
     from core.retrieval.export import export_to_parquet
+    from exec.guards import execute_sql
 
     rewritten, rejects = rewrite_sql_to_views(sql, principal)
     if rejects:

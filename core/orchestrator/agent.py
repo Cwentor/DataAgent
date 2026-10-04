@@ -141,6 +141,19 @@ def run_agent(
                         },
                     },
                 )
+            elif final.phase == "exploration":
+                # M6 第四类审批门：探索查询挂起（SQL 摘要 + 触达表 + 敏感提示）
+                events.emit_event(
+                    events.EVENT_HITL_REQUEST,
+                    {
+                        "kind": "exploration",
+                        "hitl": {
+                            "sql": (final.exploration_pending or {}).get("sql", ""),
+                            "tables": (final.exploration_pending or {}).get("tables", []),
+                            "sensitive": (final.exploration_pending or {}).get("sensitive", False),
+                        },
+                    },
+                )
             else:
                 manifest = [
                     {
@@ -171,7 +184,7 @@ def run_agent(
         if token is not None:
             events.reset_observer(token)
 
-    if final.phase in {"clarify", "plan_review", "high_risk"}:
+    if final.phase in {"clarify", "plan_review", "high_risk", "exploration"}:
         # HITL：返回挂起中间态（调用方展示卡片 -> 收集答复/动作 -> 再次调用）
         return final
 

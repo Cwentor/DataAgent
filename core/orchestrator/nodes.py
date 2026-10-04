@@ -514,12 +514,19 @@ def _execute_exploration_step(
             "tables": tables,
             "sensitive": sensitive,
         }
+        # 挂起前置相位标记（interrupt 后节点不返回，暂停快照即当前 state）：
+        # agent.py / web 层按 phase="exploration" 识别第四类暂停并发审批卡
+        state = state.apply(
+            phase="exploration",
+            exploration_pending={"sql": step.sql[:800], "tables": tables, "sensitive": sensitive},
+        )
         if state.autonomy_level == "L4" and not sensitive:
             resume = maybe_interrupt(state, payload, trigger="exploration")
         else:
             from langgraph.types import interrupt
 
             resume = interrupt(payload)  # type: ignore[assignment]
+        state = state.apply(exploration_pending=None)
         action = str((resume or {}).get("action") or "deny")
         if action not in ("allow_once", "allow_session", "deny"):
             action = "deny"

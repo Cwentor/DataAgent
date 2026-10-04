@@ -114,9 +114,9 @@ def build_secure_views(principal: str | None) -> dict[str, str]:
     views: dict[str, str] = {}
     for table in sorted(policy.allowed_tables):
         own_fields = [
-            name
-            for name, meta in sorted(catalog.COLUMNS.items())
-            if meta.table == table and name not in policy.forbidden_columns
+            fname
+            for fname, meta in sorted(catalog.COLUMNS.items())
+            if meta.table == table and fname not in policy.forbidden_columns
         ]
         if not own_fields:
             continue  # 全列被禁的表不生成视图（引用即不存在，等价拒绝）
@@ -129,10 +129,10 @@ def build_secure_views(principal: str | None) -> dict[str, str]:
         seen: set[str] = set()
         joins: list[str] = []
         joined: set[str] = set()
-        for name in own_fields:
-            meta = catalog.COLUMNS[name]
-            projections.append(f'{catalog.ALIASES[table]}."{meta.column}" AS "{name}"')
-            seen.add(name)
+        for fname in own_fields:
+            meta = catalog.COLUMNS[fname]
+            projections.append(f'{catalog.ALIASES[table]}."{meta.column}" AS "{fname}"')
+            seen.add(fname)
         if expand_dims:
             for dim in sorted(catalog.JOIN_RULES):
                 if dim not in policy.allowed_tables:
@@ -144,14 +144,14 @@ def build_secure_views(principal: str | None) -> dict[str, str]:
                     f' ON {catalog.ALIASES[dim]}."{dim_col}" = {catalog.ALIASES[table]}."{fact_col}"'
                 )
                 joined.add(dim)
-                for name, meta in sorted(catalog.COLUMNS.items()):
+                for fname, meta in sorted(catalog.COLUMNS.items()):
                     if (
                         meta.table == dim
-                        and name not in policy.forbidden_columns
-                        and name not in seen
+                        and fname not in policy.forbidden_columns
+                        and fname not in seen
                     ):
-                        projections.append(f'{catalog.ALIASES[dim]}."{meta.column}" AS "{name}"')
-                        seen.add(name)
+                        projections.append(f'{catalog.ALIASES[dim]}."{meta.column}" AS "{fname}"')
+                        seen.add(fname)
         where_parts: list[str] = []
         if is_fact or table in catalog.FACT_JOIN_RULES:
             for rf in resolved_filters:

@@ -651,7 +651,8 @@
       cardEl.dataset.answered = "1";
       var done = document.createElement("div");
       done.className = "hitl-answered";
-      var label = { approve: "已批准", reject: "已拒绝", edit: "已提交修改" }[action] || action;
+      var label = { approve: "已批准", reject: "已拒绝", edit: "已提交修改",
+        allow_once: "已允许本次执行", allow_session: "已允许本会话执行", deny: "已拒绝" }[action] || action;
       done.textContent = instruction ? label + "：" + instruction : label;
       cardEl.appendChild(done);
     }
@@ -854,6 +855,11 @@
             planSteps: (p.hitl && p.hitl.plan_steps) || [],
             summary: (p.hitl && p.hitl.summary) || ""
           });
+        } else if (p.kind === "exploration") {
+          // M6 探索查询审批卡（allow_once/allow_session/deny，复用 data-plan-action 契约）
+          var h = p.hitl || {};
+          AgentStore.setHitl({ exploration: true, sql: h.sql || "", tables: h.tables || [], sensitive: !!h.sensitive });
+          AgentStore.pushTimeline({ kind: "exploration", sql: h.sql || "", tables: h.tables || [], sensitive: !!h.sensitive });
         } else if (p.kind === "high_risk") {
           // L3 高危确认卡（approve/reject，复用审批卡 data-plan-action 契约）
           AgentStore.setHitl({ highRisk: true, question: (p.hitl && p.hitl.question) || "", steps: (p.hitl && p.hitl.steps) || [] });

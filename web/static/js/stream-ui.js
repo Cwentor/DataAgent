@@ -17,7 +17,7 @@
   var TOOL_LABELS = AgentProtocol.TOOL_LABELS;
   var VIRTUALIZE_THRESHOLD = 50; // 超过该条数后启用窗口化（规格：>50 步虚拟化）
   var BUFFER = 6;                // 视口上下各多渲染的条目数
-  var EST_H = { user: 44, plan: 150, tool: 46, reflection: 36, hitl: 150, plan_review: 190, high_risk: 170, manifest: 90, done: 52, error: 44, interrupt: 48 };
+  var EST_H = { user: 44, plan: 150, tool: 46, reflection: 36, hitl: 150, plan_review: 190, high_risk: 170, exploration: 190, manifest: 90, done: 52, error: 44, interrupt: 48 };
 
   var TOOL_BADGES = {
     futurebi_dsl_query: { cls: "dsl", text: "DSL" },
@@ -149,6 +149,44 @@
     span.className = "step-kind-badge kind-" + (kind || "query");
     span.textContent = kind || "query";
     return span;
+  }
+
+
+    /** M6 探索查询审批卡：SQL 摘要 + 触达表 + 敏感提示 + 三按钮
+     *  卡片由 app.js 的 bindHitlCard 绑定动作按钮（data-plan-action 契约）。 */
+    function elExploration(item) {
+    var card = document.createElement("div");
+    card.className = "hitl-card plan-review-card exploration-card";
+    var head = document.createElement("div");
+    head.className = "hitl-q";
+    head.textContent = "🔬 探索查询审批：" + (item.sensitive ? "该查询触达敏感数据" : "该查询超出语义契约表达能力，将在安全视图上受治理执行");
+    card.appendChild(head);
+    var pre = document.createElement("pre");
+    pre.className = "exploration-sql";
+    pre.textContent = item.sql || "";
+    card.appendChild(pre);
+    if ((item.tables || []).length) {
+      var tables = document.createElement("div");
+      tables.className = "exploration-tables";
+      tables.textContent = "触达数据：" + item.tables.join("、");
+      card.appendChild(tables);
+    }
+    var actions = document.createElement("div");
+    actions.className = "hitl-options";
+    [
+      { action: "allow_once", text: "允许一次" },
+      { action: "allow_session", text: "本会话允许" },
+      { action: "deny", text: "拒绝" }
+    ].forEach(function (a) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "hitl-pill";
+      btn.setAttribute("data-plan-action", a.action);
+      btn.textContent = a.text;
+      actions.appendChild(btn);
+    });
+    card.appendChild(actions);
+    return card;
   }
 
     function elHighRisk(item) {
@@ -448,6 +486,7 @@
     if (item.kind === "hitl") { return elHitl(item); }
     if (item.kind === "plan_review") { return elPlanReview(item); }
     if (item.kind === "high_risk") { return elHighRisk(item); }
+    if (item.kind === "exploration") { return elExploration(item); }
     if (item.kind === "manifest") { return elManifest(item); }
     if (item.kind === "done") { return elDone(item); }
     if (item.kind === "error") { return elError(item); }

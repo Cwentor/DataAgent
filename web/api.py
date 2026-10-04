@@ -570,6 +570,14 @@ async def post_agent_run(request: Request) -> Response:
                 for s in result.plan_steps
                 if s.kind == "analyze" and s.status == "pending" and s.code
             ]
+        elif result.phase == "exploration":
+            # M6：探索查询审批卡载荷（SQL 摘要 + 触达表 + 敏感提示）
+            pending = result.exploration_pending or {}
+            payload["exploration"] = {
+                "sql": pending.get("sql", ""),
+                "tables": pending.get("tables", []),
+                "sensitive": pending.get("sensitive", False),
+            }
         else:
             payload["clarification"] = result.clarification
         return Response(
