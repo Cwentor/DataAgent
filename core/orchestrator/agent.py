@@ -288,6 +288,7 @@ def _run_agent_langgraph_path(
         human_reply=human_reply,
         phase="clarify" if human_reply is None else "plan",
         **({"autonomy_level": autonomy_level} if autonomy_level else {}),
+        **({"principal": principal} if principal else {}),
     )
     try:
         final, pending = invoke_langgraph(

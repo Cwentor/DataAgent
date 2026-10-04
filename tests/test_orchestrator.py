@@ -1865,7 +1865,11 @@ def test_planner_sql_lift_retry_with_rejection_list(monkeypatch):
 
 
 def test_planner_sql_lift_exhausted_falls_back_to_heuristic(monkeypatch):
-    """M4-T3 Review Focus #6：两次自愈仍拒升 → 回落确定性兜底（不无限循环）。"""
+    """M6-T2 修订：拒升自愈耗尽 → 保留 SQL 计划交探索层审批（不再回落兜底）。
+
+    原 M4 行为（回落启发式）已按 spec §3.5/§4 案例 B 修订：SQL 步骤保留在
+    计划中，由执行层探索审批门裁决——严禁静默丢 SQL 换一个口径作答。
+    """
     import core.orchestrator.nodes as _orch_nodes
     from core.orchestrator.nodes import planner_node
 
@@ -1885,9 +1889,10 @@ def test_planner_sql_lift_exhausted_falls_back_to_heuristic(monkeypatch):
     monkeypatch.setattr(_orch_nodes, "_llm_json", lambda _llm, _sys, user: bad)
     state = planner_node(AgentState(user_query="2024年5月GMV是多少", autonomy_level="L4"))
     assert state.phase == "query"
-    assert state.answered_by == "heuristic", "自愈耗尽必须回落确定性兜底"
-    assert all(s.dsl is not None for s in state.plan_steps if s.kind == "query")
-    assert all(s.sql is None for s in state.plan_steps), "未转译的 sql 严禁带出 planner"
+    assert state.answered_by == "llm", "M6：保留 LLM 计划交探索审批，不静默换口径"
+    sql_steps = [s for s in state.plan_steps if s.kind == "query"]
+    assert sql_steps and all(s.sql for s in sql_steps), "待审批 SQL 必须保留在计划中"
+    assert any("sql-pending-exploration" in x for x in state.scratchpad)
 
 
 def test_planner_dsl_takes_precedence_over_sql(monkeypatch):
@@ -1921,3 +1926,113 @@ def test_planner_dsl_takes_precedence_over_sql(monkeypatch):
     assert state.plan_steps[0].dsl["metrics"][0]["alias"] == "gmv", "dsl 原样保留"
     assert state.plan_steps[0].sql is None
     assert not any("sql-lifted" in s for s in state.scratchpad), "dsl 优先时不走提升闸门"
+
+
+# --------------------------------------------------------------------------- #
+# 探索层审批门（M6-T2，spec §3.5/§6.5）：第四类 interrupt + L4 边界
+# --------------------------------------------------------------------------- #
+def _make_sql_step_payload(sql: str) -> dict:
+    return {
+        "clarification": None,
+        "steps": [
+            {"id": "s1", "goal": "复杂分析", "kind": "query", "sql": sql},
+            {"id": "s2", "goal": "综合作答", "kind": "synthesize", "depends_on": ["s1"]},
+        ],
+    }
+
+
+def test_exploration_step_executes_on_l4_auto(monkeypatch, tmp_path):
+    """L4 + 无敏感列 → 自动放行执行（maybe_interrupt 直通），数据集带探索标记。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.state import PlanStep
+
+    executed: list[str] = []
+
+    def fake_execute(sql, **kwargs):
+        executed.append(sql)
+        from core.retrieval.export import export_to_parquet
+
+        return export_to_parquet(
+            ["gmv"], [[123.0]], tmp_path / "inputs", "s1", audit={"exploration": True}
+        )
+
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        _orch_nodes,
+        "_llm_json",
+        lambda *a, **k: _make_sql_step_payload(
+            "WITH t AS (SELECT product_id, SUM(1) AS c FROM fact_orders GROUP BY product_id) "
+            "SELECT SUM(t.product_id) AS x FROM t"
+        ),
+    )
+    monkeypatch.setattr("core.retrieval.exploration.execute_exploration_query", fake_execute)
+    state = _orch_nodes.planner_node(AgentState(user_query="复杂分析", autonomy_level="L4"))
+    state, record = _orch_nodes._execute_exploration_step(state, state.plan_steps[0], tmp_path)
+    assert executed, "L4 无敏感列必须自动放行执行"
+    assert record.ok
+    assert state.datasets["s1"]["audit"]["exploration"] is True
+
+
+def test_exploration_l4_with_sensitive_column_interrupts(monkeypatch, tmp_path):
+    """Review Focus #3：L4 但 SQL 含主体禁列 → 必须挂起人工审批（不自动放行）。"""
+    import langgraph.types as lg_types
+    import core.orchestrator.nodes as _orch_nodes
+
+    captured: list[dict] = []
+
+    def fake_interrupt(payload):
+        captured.append(payload)
+        return {"action": "deny"}
+
+    monkeypatch.setattr(lg_types, "interrupt", fake_interrupt)
+    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(
+        _orch_nodes,
+        "_llm_json",
+        lambda *a, **k: _make_sql_step_payload(
+            "WITH t AS (SELECT * FROM fact_orders) SELECT discount_amount FROM t"
+        ),
+    )
+    state = _orch_nodes.planner_node(
+        AgentState(user_query="复杂分析", autonomy_level="L4", principal="restricted")
+    )
+    state, record = _orch_nodes._execute_exploration_step(state, state.plan_steps[0], tmp_path)
+    assert captured and captured[0]["kind"] == "exploration"
+    assert captured[0]["sensitive"] is True
+    assert record.ok is False
+    assert state.answered_by == "blocked"
+    assert "拒绝" in state.blocked_reason
+
+
+def test_exploration_allow_session_skips_repeated_gate(monkeypatch, tmp_path):
+    """Review Focus #5：allow_session 后同轮后续 sql 步骤不再询问。"""
+    import core.orchestrator.nodes as _orch_nodes
+    from core.orchestrator.state import AgentState, PlanStep
+
+    state = AgentState(
+        user_query="复杂分析",
+        autonomy_level="L4",
+        exploration_allowed=True,  # 本轮已允许
+    )
+    step = PlanStep(
+        id="s2",
+        goal="再取一次",
+        kind="query",
+        sql="SELECT SUM(order_amount) AS gmv FROM fact_orders",
+    )
+    state, record = _orch_nodes._execute_exploration_step(state, step, tmp_path)
+    assert record.ok, "已 allow_session 的轮次直接执行"
+
+
+def test_exploration_dataset_annotated_in_report(monkeypatch, tmp_path):
+    """报告必须醒目标注"探索查询产出"（带假设作答 ≠ 静默降级）。"""
+    from core.orchestrator.nodes import _dataset_analyst_markdown
+
+    ref = {
+        "columns": ["gmv"],
+        "rows": 1,
+        "path": "s1.parquet",
+        "audit": {"exploration": True},
+    }
+    section, _artifact = _dataset_analyst_markdown("s1", ref, tmp_path, scope_note="")
+    assert "探索查询产出" in section
