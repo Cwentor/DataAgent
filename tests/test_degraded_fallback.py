@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from core.orchestrator.intent import classify_intent
 from core.orchestrator.nodes import _degraded_parse
 
@@ -186,34 +188,6 @@ def test_planner_unknown_without_anchor_blocks(monkeypatch, tmp_path):
     assert out.blocked_reason
 
 
-def test_planner_clarify_round_limit_blocks_second_round(monkeypatch, tmp_path):
-    """二轮澄清仍歧义 => 带假设作答（十九期 M3 分级透明修订，原为拒答）。
-
-    措辞同 Task 3："西藏的GMV"会被判 METRIC_SCALAR（无维度锚），澄清用例
-    改用"西藏省的GMV"（"省"命中 province 锚、"西藏"未命中枚举）。
-    修订依据：spec §3.6——澄清后仍不确定转"选定合理口径 + assumptions
-    标注作答"，拒答降为最后手段（用户 2026-10 拍板）。
-    """
-    from config import settings
-    from core.orchestrator import nodes as orch
-    from core.orchestrator.state import AgentState
-
-    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
-    state = AgentState(
-        session_id="dg3",
-        turn_id="t1",
-        trace_id="tr1",
-        user_query="西藏省的GMV",
-        clarification_rounds=1,  # 已澄清过一轮
-    )
-    out = orch.planner_node(state)
-    assert out.answered_by in ("degraded_confirmed", "degraded_auto")
-    assert out.plan_steps, "二轮歧义必须产计划而非拒答"
-    assert out.assumptions, "口径假设必须非空（严禁静默猜口径）"
-    assert any("不筛选" in a or "分组" in a for a in out.assumptions)
-
-
 def test_planner_clarify_first_round_emits_options(monkeypatch, tmp_path):
     """首轮多候选 => clarification + options（交 _plan_gate 挂起）。
 
@@ -236,8 +210,16 @@ def test_planner_clarify_first_round_emits_options(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 # 降级水印：degraded_confirmed 与 heuristic 文案区分
 # --------------------------------------------------------------------------- #
-def test_degradation_banner_distinguishes_confirmed():
-    """degraded_confirmed 水印明示"条件经人工确认"；heuristic 保持原文案。"""
+@pytest.mark.parametrize(
+    ("answered_by", "expected_fragments"),
+    [
+        ("degraded_confirmed", ["降级模式", "人工确认"]),  # 明示"条件经人工确认"
+        ("degraded_auto", ["降级模式", "未经人工确认"]),  # 明示"全自动审批、未经人工确认"
+        ("heuristic", ["离线兜底引擎"]),  # 原文案保留
+    ],
+)
+def test_degradation_banner_distinguishes_answered_by(answered_by, expected_fragments):
+    """降级水印按 answered_by 三分支区分措辞（降级不可静默）。"""
     from core.orchestrator.nodes import _degradation_banner
     from core.orchestrator.state import AgentState
 
@@ -246,22 +228,18 @@ def test_degradation_banner_distinguishes_confirmed():
         turn_id="t1",
         trace_id="tr1",
         user_query="x",
-        answered_by="degraded_confirmed",
+        answered_by=answered_by,
     )
     banner = _degradation_banner(state)
-    assert "降级模式" in banner and "人工确认" in banner
-    heuristic_state = AgentState(
-        session_id="wm2",
-        turn_id="t1",
-        trace_id="tr2",
-        user_query="x",
-        answered_by="heuristic",
-    )
-    assert "离线兜底引擎" in _degradation_banner(heuristic_state)
+    assert all(frag in banner for frag in expected_fragments)
 
 
-def test_degraded_plan_reject_emits_event(monkeypatch):
+@pytest.mark.parametrize("answered_by", ["degraded_confirmed", "degraded_auto"])
+def test_degraded_plan_reject_emits_event(monkeypatch, answered_by):
     """降级计划被用户拒绝 => 发射 degrade/rejected 事件（可观测埋点）。
+
+    埋点条件是 answered_by 枚举并集（degraded_confirmed / degraded_auto），
+    参数化锁死两个枚举值——源码若遗漏任一值，本测试即失败。
 
     实际签名 ``_plan_gate(state)`` 单参数（中断经 maybe_interrupt/interrupt
     完成），以桩替身模拟用户在 plan_review 审批卡上选择"拒绝"。
@@ -291,7 +269,7 @@ def test_degraded_plan_reject_emits_event(monkeypatch):
         turn_id="t1",
         trace_id="tr1",
         user_query="海南省的GMV",
-        answered_by="degraded_confirmed",
+        answered_by=answered_by,
         plan_steps=[
             PlanStep(id="s1", goal="按确认条件查询GMV", kind="query"),
             PlanStep(id="s2", goal="汇总作答", kind="synthesize", depends_on=["s1"]),
@@ -491,67 +469,6 @@ def test_planner_l4_degraded_plan_marks_auto(monkeypatch, tmp_path):
     out = orch.planner_node(state)
     assert out.answered_by == "degraded_auto"
     assert [s.kind for s in out.plan_steps] == ["query", "synthesize"]
-
-
-def test_degradation_banner_distinguishes_auto():
-    """degraded_auto 水印明示"全自动审批、未经人工确认"；heuristic 原文案保留。"""
-    from core.orchestrator.nodes import _degradation_banner
-    from core.orchestrator.state import AgentState
-
-    auto = AgentState(
-        session_id="wm3",
-        turn_id="t1",
-        trace_id="tr1",
-        user_query="x",
-        answered_by="degraded_auto",
-    )
-    banner = _degradation_banner(auto)
-    assert "降级模式" in banner and "未经人工确认" in banner
-    heuristic = AgentState(
-        session_id="wm4",
-        turn_id="t1",
-        trace_id="tr1",
-        user_query="x",
-        answered_by="heuristic",
-    )
-    assert "离线兜底引擎" in _degradation_banner(heuristic)
-
-
-def test_degraded_auto_plan_reject_emits_event(monkeypatch):
-    """L4 降级计划被用户拒绝 => degrade/rejected 事件同样发射（埋点条件扩展）。"""
-    from core.orchestrator import events as orch_events
-    from core.orchestrator import langgraph_engine
-    from core.orchestrator.langgraph_engine import _plan_gate
-    from core.orchestrator.state import AgentState, PlanStep
-
-    seen: list[tuple[str, dict]] = []
-    orig = orch_events.emit_event
-
-    def spy(event: str, payload: dict) -> None:
-        seen.append((event, payload))
-        orig(event, payload)
-
-    monkeypatch.setattr(orch_events, "emit_event", spy)
-    monkeypatch.setattr(
-        langgraph_engine,
-        "maybe_interrupt",
-        lambda state, payload, *, trigger: {"action": "reject", "instruction": None},
-    )
-    state = AgentState(
-        session_id="rj2",
-        turn_id="t1",
-        trace_id="tr1",
-        user_query="北京的GMV",
-        answered_by="degraded_auto",
-        plan_steps=[
-            PlanStep(id="s1", goal="按确认条件查询GMV", kind="query"),
-            PlanStep(id="s2", goal="汇总作答", kind="synthesize", depends_on=["s1"]),
-        ],
-        phase="query",
-    )
-    out = _plan_gate(state)
-    assert out.phase == "done"
-    assert any(e == "degrade" and p.get("outcome") == "rejected" for e, p in seen)
 
 
 # --------------------------------------------------------------------------- #

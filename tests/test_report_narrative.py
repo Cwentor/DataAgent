@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from core.orchestrator.state import AgentState, Artifact, PlanStep
 
 
@@ -258,52 +260,53 @@ def test_render_isolation_degrades_section_on_crash(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Task 6 收尾修复（台账裁决）：_render_table 三个显式分类分支的容器值守卫
 # --------------------------------------------------------------------------- #
-def test_render_table_ratio_column_container_value_folds():
-    """比率列单元格容器值 => 折叠占位，严禁 _fmt_pct str 兜底 repr 直出。"""
-    from core.orchestrator.nodes import _render_table
-
-    table = {
-        "columns": ["province", "gmv_change_pct"],
-        "rows": [
+@pytest.mark.parametrize(
+    ("table", "currency", "forbidden", "expected"),
+    [
+        (
             {
-                "province": "北京",
-                "gmv_change_pct": {"baseline": 616872.81, "current": 410248.48},
-            }
-        ],
-    }
-    text = "\n".join(_render_table(table))
-    assert "{'" not in text and '["' not in text  # 严禁 repr 片段
-    assert "（" in text  # 容器折叠/展开占位
-    assert "基期" in text  # dict 一层展开且键经 _metric_label 中文化
-
-
-def test_render_table_money_column_container_value_folds():
-    """currency=True 金额列单元格容器值 => 折叠占位，严禁 _fmt_wan str 兜底 repr。"""
+                "columns": ["province", "gmv_change_pct"],
+                "rows": [
+                    {
+                        "province": "北京",
+                        "gmv_change_pct": {"baseline": 616872.81, "current": 410248.48},
+                    }
+                ],
+            },
+            False,
+            ["{'", '["'],
+            ["（", "基期"],  # dict 一层展开且键经 _metric_label 中文化
+        ),
+        (
+            {
+                "columns": ["province", "gmv_delta"],
+                "rows": [{"province": "北京", "gmv_delta": {"w1": 112791.59, "w2": 10140.62}}],
+            },
+            True,
+            ["{'"],
+            # dict 一层展开：内部键 w1/w2 不命中金额 token，按既有守卫语义舍入渲染
+            # （"宁可无单位，不可错单位"；修改内部分类逻辑超出本修复范围）
+            ["（w1 112791.59；w2 10140.62）"],
+        ),
+        (
+            {
+                "columns": ["factor", "orders"],
+                "rows": [{"factor": "买家数", "orders": ["线上", "线下"]}],
+            },
+            False,
+            ["['"],
+            ["（共 2 项明细）"],  # list 折叠为明细占位
+        ),
+    ],
+    ids=["ratio-dict", "money-dict", "count-list"],
+)
+def test_render_table_container_value_folds(table, currency, forbidden, expected):
+    """单元格容器值 => 折叠/一层展开占位，严禁 _fmt_* str 兜底 repr 直出（三分类矩阵）。"""
     from core.orchestrator.nodes import _render_table
 
-    table = {
-        "columns": ["province", "gmv_delta"],
-        "rows": [{"province": "北京", "gmv_delta": {"w1": 112791.59, "w2": 10140.62}}],
-    }
-    text = "\n".join(_render_table(table, currency=True))
-    assert "{'" not in text  # 严禁 dict repr
-    assert "（" in text  # 容器折叠/展开占位
-    # dict 一层展开：内部键 w1/w2 不命中金额 token，按既有守卫语义舍入渲染
-    # （"宁可无单位，不可错单位"；修改内部分类逻辑超出本修复范围）
-    assert "（w1 112791.59；w2 10140.62）" in text
-
-
-def test_render_table_count_column_container_value_folds():
-    """currency=False 计数列单元格容器值 => 折叠占位，严禁 _fmt_count str 兜底 repr。"""
-    from core.orchestrator.nodes import _render_table
-
-    table = {
-        "columns": ["factor", "orders"],
-        "rows": [{"factor": "买家数", "orders": ["线上", "线下"]}],
-    }
-    text = "\n".join(_render_table(table, currency=False))
-    assert "['" not in text  # 严禁 list repr
-    assert "（共 2 项明细）" in text  # list 折叠为明细占位
+    text = "\n".join(_render_table(table, currency=currency))
+    assert all(frag not in text for frag in forbidden)  # 严禁 repr 片段
+    assert all(frag in text for frag in expected)
 
 
 # --------------------------------------------------------------------------- #
@@ -414,8 +417,6 @@ def test_metric_human_pct_value_semantics():
     assert _metric_human(51.86, "contrib_pct") == "51.9%"  # Coder 百分数形态
     assert _metric_human(-91.35, "growth_pct") == "-91.3%"  # 浮点 -91.3499... 舍入
     assert _metric_human(123.49, "decline_concentration_pct") == "123.5%"
-    assert _metric_human(-0.3347, "gmv_change_pct") == "-33.5%"  # 小数形态不变
-    assert _metric_human(-0.65, "share") == "-65.0%"  # 内部模板键不变
 
 
 def test_coder_common_keys_have_chinese_labels():

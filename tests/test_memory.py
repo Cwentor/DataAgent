@@ -229,12 +229,14 @@ def test_resolve_inherit_region():
 
 
 def test_resolve_inherit_single_province():
+    """维度替换追问保持 inherit：仅省份筛选替换，指标不变（reset 规则上线后回归锚）。"""
     res = resolve_context("那广东省呢？", _last_dsl(), None)
     assert res.mode == "inherit"
     province_filters = [f for f in res.dsl.filters if f.field == "province"]
     assert len(province_filters) == 1
     assert province_filters[0].operator.value == "eq"
     assert province_filters[0].value == "广东"
+    assert [m.alias for m in res.dsl.metrics] == ["gmv"]
 
 
 def test_resolve_inherit_time_delta():
@@ -337,15 +339,6 @@ def test_resolve_enum_dimension_resets():
     res = resolve_context("有哪些品类？", _gmv_category_dsl(), None)
     assert res.mode == "fresh" and res.reason == "reset_intent"
     assert res.dsl is None
-
-
-def test_resolve_inherit_still_works_after_reset_rule():
-    """回归：纯粹的维度替换追问仍未受影响，保持 inherit（指标不变，仅省筛选替换）。"""
-    res = resolve_context("那广东省呢？", _last_dsl(), None)
-    assert res.mode == "inherit"
-    prov = [f for f in res.dsl.filters if f.field == "province"]
-    assert prov[0].value == "广东"
-    assert [m.alias for m in res.dsl.metrics] == ["gmv"]
 
 
 # --------------------------------------------------------------------------- #

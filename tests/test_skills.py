@@ -91,7 +91,10 @@ def test_additive_decomposition_sums():
     )
     result = additive_decomposition(df)
     assert result["total_delta"] == pytest.approx(-20.0)
-    assert result["items"][0]["dimension"] == "华东"
+    top = result["items"][0]
+    assert top["dimension"] == "华东"
+    # share 按 |Δ| 归一且符号随 Δ（唯一非零贡献者拿满 -1.0，负份额语义）
+    assert top["share"] == pytest.approx(-1.0)
 
 
 # --------------------------------------------------------------------------- #

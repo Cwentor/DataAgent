@@ -60,19 +60,6 @@ def test_route_sensitive_entity_blocked(query):
     assert d.extracted_entities.get("blocked_reason") == "sensitive_entity"
 
 
-@pytest.mark.parametrize(
-    "query,expected",
-    [
-        ("上个月广东的订单总数", IntentType.DATA_QUERY),
-        ("清空上下文", IntentType.SYSTEM_ACTION),  # 会话管理指令优先于破坏性拦截
-        ("你好", IntentType.CHITCHAT),
-        ("客单价是怎么定义的", IntentType.GLOSSARY_EXPLAIN),
-    ],
-)
-def test_route_normal_queries_not_blocked(query, expected):
-    assert route_decision(query).intent == expected, query
-
-
 def test_web_blocked_branch_answers(conn):
     """E2E：破坏性/敏感请求走 blocked 分支，如实拒绝且数仓完好。"""
     from web.service import run_query

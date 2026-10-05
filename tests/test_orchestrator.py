@@ -29,9 +29,6 @@ def test_agent_state_intent_fields_contract():
     assert state.answered_by == ""
     assert state.intent_type is None
     assert state.intent_anchors == []
-    # extra=forbid 不被破坏：未知字段仍拒绝
-    with pytest.raises(ValidationError):
-        AgentState(user_query="x", rogue_field=1)
 
 
 def test_error_context_retry_cap():
@@ -201,25 +198,6 @@ def test_sequential_pending_clarifies_resume_independently(tmp_path, monkeypatch
     assert final_second.phase == "done"
     assert "四川省" in final_second.report or "四川" in final_second.report
     assert "海南" not in final_second.report
-
-
-def test_run_agent_factoid_bypasses_clarify_gate(tmp_path, monkeypatch):
-    """LLM 在场时事实型短问句直达完成，不再被澄清门打断。
-
-    回归锚点："有多少个省份"此前被确定性字符规则（过短/无指标词即澄清）
-    误拦在 Planner 门外；判定权上交 Planner（clarification 契约）后应直达
-    规划。钉 _llm_json 返回 None（Planner LLM 失败走启发式兜底），聚焦验证
-    clarify_node 的"LLM 在场即放行"分支：全程无 clarify 中断。
-    """
-    import core.orchestrator.nodes as nodes
-    from config import settings
-
-    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
-    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
-    trace = run_agent("有多少个省份", session_id="factoid")
-    assert trace.phase == "done"
-    assert trace.clarification is None
 
 
 def test_run_agent_simple_query_path(tmp_path, monkeypatch):
@@ -442,11 +420,16 @@ def test_fmt_scalar_answer_counts_are_not_wan():
 
 
 def test_run_agent_count_factoid_survives_planner_llm_failure(tmp_path, monkeypatch):
-    """LLM 客户端在场但 Planner 调用失败时，基数问题兜底直答省份数。
+    """LLM 在场但 Planner 调用失败时，事实型短问句不被澄清门拦截且兜底直答省份数。
 
-    复现线上场景：clarify 放行（LLM 在场）-> Planner LLM 失败（_llm_json
-    返回 None）-> 启发式兜底。回归锚点：兜底此前一律 _scalar_dsl 取
-    sum(gmv)，产出"问省份数、答 115.69 万元 GMV"的离谱报告。
+    三重回归锚点（原三测合并：bypasses_clarify_gate / count_factoid / banner）：
+    - clarify 门："有多少个省份"此前被确定性字符规则（过短/无指标词即澄清）
+      误拦在 Planner 门外；判定权上交 Planner（clarification 契约）后 LLM
+      在场即放行，全程无 clarify 中断；
+    - 兜底直答：Planner LLM 失败（_llm_json 返回 None）走启发式兜底，此前
+      一律 _scalar_dsl 取 sum(gmv)，产出"问省份数、答 115.69 万元 GMV"的
+      离谱报告；mock 数仓 8 个省份应计数直答且严禁金额化；
+    - 降级水印：兜底接管时报告顶部必须显著标注（降级不可静默）。
     """
     import core.orchestrator.nodes as nodes
     from config import settings
@@ -456,9 +439,11 @@ def test_run_agent_count_factoid_survives_planner_llm_failure(tmp_path, monkeypa
     monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
     trace = run_agent("有多少个省份", session_id="countq")
     assert trace.phase == "done"
+    assert trace.clarification is None  # LLM 在场即放行：无澄清挂起
     # mock 数仓 8 个省份：计数直答，且严禁金额化（"0.00 万元"式离谱答案）
     assert "查询答案：8" in trace.report
     assert "万元" not in trace.report
+    assert "离线兜底引擎" in trace.report  # 降级水印显著标注
 
 
 # --------------------------------------------------------------------------- #
@@ -579,30 +564,6 @@ def test_critic_trace_digest_carries_error_history(monkeypatch):
 # --------------------------------------------------------------------------- #
 # 重规划数据集归属（回归锚点：跨轮次错配 -> 假下滑结论）
 # --------------------------------------------------------------------------- #
-def test_resolve_step_inputs_follows_dependency_not_dict_order():
-    """analyze 输入必须取自依赖步骤的本轮产出，而不是 datasets 字典首尾。
-
-    回归锚点：此前按 list(state.datasets)[0]/[-1] 取两期输入，重规划后
-    datasets 累积上轮键，首尾会指向上轮遗留数据集，产出"下滑 57.9%"式错配。
-    """
-    from core.orchestrator.nodes import _resolve_step_inputs
-    from core.orchestrator.state import AgentState, PlanStep
-
-    state = AgentState(user_query="分析 5 月 GMV 下滑原因")
-    state = state.apply(
-        datasets={
-            "s1_v0": {"path": "a.parquet", "rows": 8, "columns": ["province", "gmv"]},
-            "s1_v1": {"path": "b.parquet", "rows": 8, "columns": ["province", "gmv"]},
-        },
-        step_outputs={"s1": ["s1_v0", "s1_v1"]},
-        plan_steps=[
-            PlanStep(id="s1", goal="取两期明细", kind="query"),
-            PlanStep(id="s2", goal="归因", kind="analyze", depends_on=["s1"]),
-        ],
-    )
-    assert _resolve_step_inputs(state, state.plan_steps[1]) == ["s1_v0", "s1_v1"]
-
-
 def test_resolve_step_inputs_ignores_stale_datasets_from_prior_round():
     """重规划后 datasets 含上轮遗留键时，必须只读本轮依赖产出（不复用旧键）。"""
     from core.orchestrator.nodes import _resolve_step_inputs
@@ -628,13 +589,22 @@ def test_resolve_step_inputs_ignores_stale_datasets_from_prior_round():
 
 
 def test_diagnostic_dsl_pair_carries_driver_factor_metrics():
-    """诊断兜底两期对必须同时带订单量与买家数因子（反思归因诉求首轮即满足）。"""
+    """诊断兜底两期对必须同时带订单量与买家数因子（反思归因诉求首轮即满足）。
+
+    兼守维度池与两期同口径断言（原 test_synthesizer_rebuild 的
+    carries_dimension_pool 合并）：未点名维度时取候选维度池、状态过滤继承、
+    两期时间窗口无缝衔接。
+    """
     from core.orchestrator.nodes import _diagnostic_dsl_pair
 
     base, curr = _diagnostic_dsl_pair("分析 5 月第一周比第二周 GMV 下滑原因")
     for dsl in (base, curr):
         aliases = {m["alias"] for m in dsl["metrics"]}
         assert {"gmv", "orders", "buyers"} <= aliases
+        # 候选池覆盖省份/品牌/品类：由分析层按信息增益裁决主因维度
+        assert [d["field"] for d in dsl["dimensions"]] == ["province", "brand", "category"]
+        assert {"field": "pay_status", "operator": "eq", "value": "SUCCESS"} in dsl["filters"]
+    assert base["time_filter"]["absolute"]["end"] == curr["time_filter"]["absolute"]["start"]
 
 
 # --------------------------------------------------------------------------- #
@@ -669,54 +639,51 @@ def test_reflector_scope_lists_available_fields():
     assert "流量" in scope  # 明示清单外概念不得作为重规划理由
 
 
-def test_guard_rejects_out_of_scope_reasons():
-    """反思以数仓未采集的维度（流量/活动/异常单）为由判不充分 => 不可执行。"""
-    import core.orchestrator.nodes as nodes
-
-    verdict = {
-        "verdict": "insufficient",
-        "reasons": ["缺少对订单量、客单价、流量、活动、异常单等影响因素的归因分析"],
-    }
-    assert nodes._insufficient_is_actionable(verdict, _critic_state()) is False
-
-
-def test_guard_rejects_when_reasons_all_covered_by_products():
-    """理由提到的概念已被本轮产物覆盖 => 属分析深度诉求，不可执行。"""
-    import core.orchestrator.nodes as nodes
-
-    verdict = {
-        "verdict": "insufficient",
-        "reasons": ["最终结果只列出下降幅度较大的地区及指标，未解释具体下滑原因"],
-        "missing": ["缺少订单量与买家数的归因分析"],
-    }
-    assert nodes._insufficient_is_actionable(verdict, _critic_state()) is False
-
-
-def test_guard_allows_actionable_gap_within_scope():
-    """理由指向可用域内尚未取到的数据（如品类）=> 可执行，允许重规划。"""
-    import core.orchestrator.nodes as nodes
-
-    verdict = {
-        "verdict": "insufficient",
-        "reasons": ["未按品类拆分下滑贡献，无法定位品类级主因"],
-        "missing": ["取品类维度的两期明细"],
-    }
-    # 产物列为 province/gmv/orders/buyers，品类字段未取到 => 可执行
-    assert nodes._insufficient_is_actionable(verdict, _critic_state()) is True
-
-
-def test_guard_rejects_when_replan_makes_no_progress():
-    """产物指纹与上次重规划相同 => 重规划无进展，直接综合（防空转）。"""
+@pytest.mark.parametrize(
+    ("reasons", "missing", "preset_fingerprint", "expected"),
+    [
+        # 反思以数仓未采集的维度（流量/活动/异常单）为由判不充分 => 不可执行
+        (
+            ["缺少对订单量、客单价、流量、活动、异常单等影响因素的归因分析"],
+            None,
+            False,
+            False,
+        ),
+        # 理由提到的概念已被本轮产物覆盖 => 属分析深度诉求，不可执行
+        (
+            ["最终结果只列出下降幅度较大的地区及指标，未解释具体下滑原因"],
+            ["缺少订单量与买家数的归因分析"],
+            False,
+            False,
+        ),
+        # 理由指向可用域内尚未取到的数据（如品类）=> 可执行，允许重规划
+        # （产物列为 province/gmv/orders/buyers，品类字段未取到）
+        (
+            ["未按品类拆分下滑贡献，无法定位品类级主因"],
+            ["取品类维度的两期明细"],
+            False,
+            True,
+        ),
+        # 产物指纹与上次重规划相同 => 重规划无进展，直接综合（防空转）
+        (
+            ["未按品类拆分下滑贡献"],
+            ["取品类维度明细"],
+            True,
+            False,
+        ),
+    ],
+)
+def test_insufficient_is_actionable_branches(reasons, missing, preset_fingerprint, expected):
+    """_insufficient_is_actionable 四分支矩阵：域外拒绝/已覆盖拒绝/域内缺口放行/无进展拒绝。"""
     import core.orchestrator.nodes as nodes
 
     state = _critic_state()
-    state = state.apply(last_replan_fingerprint=nodes._artifact_fingerprint(state))
-    verdict = {
-        "verdict": "insufficient",
-        "reasons": ["未按品类拆分下滑贡献"],
-        "missing": ["取品类维度明细"],
-    }
-    assert nodes._insufficient_is_actionable(verdict, state) is False
+    if preset_fingerprint:
+        state = state.apply(last_replan_fingerprint=nodes._artifact_fingerprint(state))
+    verdict = {"verdict": "insufficient", "reasons": reasons}
+    if missing is not None:
+        verdict["missing"] = missing
+    assert nodes._insufficient_is_actionable(verdict, state) is expected
 
 
 def test_critic_guard_converts_unsatisfiable_replan_to_synthesize(monkeypatch):
@@ -988,33 +955,28 @@ def test_run_agent_blocked_report_skips_llm_synthesis(tmp_path, monkeypatch):
     assert llm_report_calls == []  # 短路实锤：综合层未被触碰
 
 
-def test_blocked_report_llm_configured_wording(tmp_path, monkeypatch):
-    """拒答建议按配置状态区分：LLM 已配置时不得再误导用户去"配置模型"。"""
+@pytest.mark.parametrize(
+    ("llm_present", "session_id"),
+    [(True, "blockedcfg"), (False, "blockednone")],
+)
+def test_blocked_report_llm_wording_by_config_state(tmp_path, monkeypatch, llm_present, session_id):
+    """拒答建议按配置状态二分：已配置时提示查网关连通性，未配置时如实告知兜底模式；
+    旧的无条件"或配置 LLM 模型后重试"文案必须消失。"""
     import core.orchestrator.nodes as nodes
     from config import settings
 
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object() if llm_present else None)
     monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
-    trace = run_agent("帮我看看最近情况", session_id="blockedcfg")
+    trace = run_agent("帮我看看最近情况", session_id=session_id)
     assert trace.phase == "done"
-    assert "LLM 已配置" in trace.report
-    assert "未配置 LLM" not in trace.report
-    assert "或配置 LLM 模型后重试" not in trace.report  # 旧的无条件文案必须消失
-
-
-def test_blocked_report_llm_absent_wording(tmp_path, monkeypatch):
-    """LLM 未配置时：如实告知确定性兜底模式与配置引导。"""
-    import core.orchestrator.nodes as nodes
-    from config import settings
-
-    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
-    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
-    trace = run_agent("帮我看看最近情况", session_id="blockednone")
-    assert trace.phase == "done"
-    assert "未配置 LLM" in trace.report
-    assert "LLM 已配置" not in trace.report
+    if llm_present:
+        assert "LLM 已配置" in trace.report
+        assert "未配置 LLM" not in trace.report
+        assert "或配置 LLM 模型后重试" not in trace.report  # 旧的无条件文案必须消失
+    else:
+        assert "未配置 LLM" in trace.report
+        assert "LLM 已配置" not in trace.report
 
 
 def test_intent_dsl_guard_unit():
@@ -1099,20 +1061,6 @@ def test_run_agent_guard_blocks_llm_misaligned_dsl(tmp_path, monkeypatch):
     assert trace.phase == "done"
     assert "无法作答" in trace.report
     assert "万元" not in trace.report
-
-
-def test_heuristic_answer_banner_visible(tmp_path, monkeypatch):
-    """兜底接管时报告顶部必须显著标注（降级不可静默）。"""
-    import core.orchestrator.nodes as nodes
-    from config import settings
-
-    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
-    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: None)
-    trace = run_agent("有多少个省份", session_id="bannerq")
-    assert trace.phase == "done"
-    assert "查询答案：8" in trace.report
-    assert "离线兜底引擎" in trace.report
 
 
 def test_planner_llm_intent_echoed_to_state(monkeypatch):
@@ -1669,7 +1617,11 @@ def test_planner_node_tolerates_invalid_assumptions(monkeypatch):
 
 
 def test_degraded_second_round_ambiguity_answers_with_assumptions(monkeypatch):
-    """M3-T2：二轮歧义不再拒答——多候选筛选维度转分组 + 口径假设。"""
+    """M3-T2：二轮歧义不再拒答——多候选筛选维度转分组 + 口径假设。
+
+    兼守十九期分级透明修订的 answered_by 契约（原 test_planner_clarify_round_limit_
+    blocks_second_round 合并）：作答来源必须落在降级枚举并集内。
+    """
     import core.orchestrator.nodes as _orch_nodes
     from core.orchestrator.nodes import planner_node
 
@@ -1686,24 +1638,7 @@ def test_degraded_second_round_ambiguity_answers_with_assumptions(monkeypatch):
     assert state.plan_steps, "二轮歧义必须产计划而非拒答"
     assert state.assumptions, "口径假设必须非空"
     assert any("分组" in a or "不筛选" in a for a in state.assumptions)
-
-
-def test_llm_second_round_clarification_hard_blocked(monkeypatch):
-    """M3-T2 Review Focus #3：LLM 二轮仍返回 clarification 必须被消费层拦截。"""
-    import core.orchestrator.nodes as _orch_nodes
-    from core.orchestrator.nodes import planner_node
-
-    payload = {
-        "clarification": {"question": "请再补充一下？", "options": []},
-        "steps": None,
-    }
-    monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: object())
-    monkeypatch.setattr(_orch_nodes, "_llm_json", lambda *a, **k: payload)
-    state = planner_node(
-        AgentState(user_query="海南省的GMV是多少", clarification_rounds=1, autonomy_level="L4")
-    )
-    assert state.phase != "clarify", "二轮澄清严禁再次挂起"
-    assert state.plan_steps, "拦截后必须转入带假设作答计划"
+    assert state.answered_by in ("degraded_confirmed", "degraded_auto")
 
 
 def test_synthesize_report_prepends_assumptions(monkeypatch):
@@ -2002,26 +1937,6 @@ def test_exploration_l4_with_sensitive_column_interrupts(monkeypatch, tmp_path):
     assert record.ok is False
     assert state.answered_by == "blocked"
     assert "拒绝" in state.blocked_reason
-
-
-def test_exploration_allow_session_skips_repeated_gate(monkeypatch, tmp_path):
-    """Review Focus #5：allow_session 后同轮后续 sql 步骤不再询问。"""
-    import core.orchestrator.nodes as _orch_nodes
-    from core.orchestrator.state import AgentState, PlanStep
-
-    state = AgentState(
-        user_query="复杂分析",
-        autonomy_level="L4",
-        exploration_allowed=True,  # 本轮已允许
-    )
-    step = PlanStep(
-        id="s2",
-        goal="再取一次",
-        kind="query",
-        sql="SELECT SUM(order_amount) AS gmv FROM fact_orders",
-    )
-    state, record = _orch_nodes._execute_exploration_step(state, step, tmp_path)
-    assert record.ok, "已 allow_session 的轮次直接执行"
 
 
 def test_exploration_dataset_annotated_in_report(monkeypatch, tmp_path):

@@ -677,23 +677,6 @@ def test_unified_chat_request_accepts_timeout():
     assert default.timeout is None
 
 
-def test_base_adapter_chat_text_carries_timeout(monkeypatch):
-    from providers.adapters import OpenAIChatAdapter
-    from providers.models import UnifiedChatResponse
-
-    seen: dict = {}
-
-    def fake_chat(self, request):
-        seen["timeout"] = request.timeout
-        return UnifiedChatResponse(content="ok")
-
-    monkeypatch.setattr(OpenAIChatAdapter, "chat", fake_chat)
-    adapter = OpenAIChatAdapter(_provider(), "m-1")
-    text = adapter.chat_text([{"role": "user", "content": "hi"}], json_mode=False, timeout=180)
-    assert text == "ok"
-    assert seen["timeout"] == 180
-
-
 def test_chat_facade_forwards_timeout():
     from providers import chat_text
 

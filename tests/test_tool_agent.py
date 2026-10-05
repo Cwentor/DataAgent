@@ -150,24 +150,6 @@ class FakeLLM:
         return self.responses.pop(0)
 
 
-def test_llm_planner_picks_tool_and_executes(conn):
-    """规划 -> 执行 -> 重规划判定 done 终止（R1：LLMPlanner 参与重规划循环）。"""
-    llm = FakeLLM(
-        [
-            json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
-            json.dumps({"done": "信息已充分"}),
-        ]
-    )
-    agent = ToolAgent(
-        planner=LLMPlanner(llm, max_retries=1),
-        max_steps=5,
-    )
-    result = agent.run("上个月GMV是多少", conn=conn)
-    assert result.error is None
-    assert result.step_tools() == ["query_metric"]
-    assert llm.calls == 2  # 1 次规划 + 1 次重规划终止判定
-
-
 def test_llm_planner_direct_answer(conn):
     llm = FakeLLM([json.dumps({"answer": "这个问题不需要查库"})])
     agent = ToolAgent(planner=LLMPlanner(llm, max_retries=1), max_steps=5)
@@ -454,7 +436,8 @@ def test_replan_prompt_carries_trajectory(conn):
 
 
 def test_replan_done_terminates_and_synthesizes(conn):
-    """规划器判定 done -> 终止调度，答案由合成器从数据产出。"""
+    """规划 -> 执行 -> 重规划判定 done 终止（R1：LLMPlanner 参与重规划循环），
+    答案由合成器从数据产出。"""
     llm = FakeLLM(
         [
             json.dumps({"tool": "query_metric", "args": {"query": "上个月GMV"}}),
