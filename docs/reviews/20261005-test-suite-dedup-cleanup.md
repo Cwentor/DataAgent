@@ -109,3 +109,51 @@
 - 全量：`python -m pytest -q` → **991 passed, 2 skipped**（约 113s）；
 - 格式：`black --check .` / `ruff check .` 全绿（ruff 顺带清理 5 处删测试后的残留 import）；
 - 离线确定性不受影响：无新增外部依赖，live 测试默认跳过行为不变。
+
+---
+
+# 二轮：全量补审与收尾清理（同日追加）
+
+首轮审计覆盖 13 个重点文件（471 测试，47%）；二轮对剩余 41 个文件（483 测试）
+全量补审（三个并行通道，吸取首轮两处误报教训：输入与断言逐字比对、疑者不删）。
+
+## 补审结论
+
+剩余 483 个测试中约 13 个参与冗余（**2.7%**），比重点文件区（清理前 5%~18%）
+低一个量级——按域单文件组织（一模块一文件）的测试天然冗余率低。三个审计通道
+均报告大量"有意冗余"核实记录：SSE/事件面四文件为四层各锚一层（事件源契约/
+注册表缓冲/HTTP 桥/双实现帧 diff）、sql_lift 30 条输入各异矩阵、沙箱 AST 18
+形态参数化、JWT 双攻击向量、内存/SQLite 双实现锚定等，均为设计上的守卫不清理。
+
+## 二轮清理明细（净 -2 用例、-4 函数）
+
+| 类型 | 项目 | 依据 |
+| ---- | ---- | ---- |
+| 无效断言修复 | `test_retrieval.py::test_mask_column_name_heuristics` 的 `assert out[0][0] == out[0][0]`（恒真自比较，注释意图"同值同掩码"） | 输入第二行邮箱改为同值，断言改为 `out[0][0] == out[1][0]`——测试恢复其声称的检测力 |
+| 完全重复删除 | `test_compiler.py::test_having_requires_grouping_and_metrics` | 两分支输入与 M2 互斥矩阵 case1/case2 逐字一致，矩阵断言更强（含 match） |
+| 分支级删除 | `test_compiler.py::test_expression_metric_contract_rejections` 的"ref 未声明"分支 | 与矩阵 case4 逐字一致；其余 3 分支（op 白名单/ref 指 ratio/lit NaN）为独立守卫保留 |
+| 完全重复删除 | `test_present.py::test_viz_pie_for_few_categories` | 与 `test_viz_pie_without_y_signal_unaffected` 同输入同断言（rows 无 y 列，两测触发完全相同分支组合） |
+| 分支级删除 | `test_exec.py::test_unsafe_sql_allows_comment_and_with` 的 WITH 段 | 与 `allows_normal_statements` 同 SQL 逐字重复，注释剥离独有价值保留 |
+| 参数化合并 | `test_sandbox.py` 静态守卫入口拦截 2→1×2 参数（importlib/open 两威胁形态） | 同一 `static_check` 分支，参数 id 保留威胁语义 |
+| 参数化合并 | `test_sandbox.py` title 非法形态 2→1×2 参数（dict 直传/'{'前缀串） | 锚定 `_bootstrap` 校验的两个 or 条件子句，metrics 指引断言两形态共享 |
+
+## 二轮裁决（核实后保留，不清理）
+
+1. **security/scope 单点权限测试**（`test_restricted_denies_refund_table` 等）：
+   虽被 `test_rls_adversarial_matrix_restricted` 循环覆盖（alias 差异不参与权限
+   判定，已核实 `guard.referenced_fields`），但作为"表级/列级"小节的直接文档
+   锚点各仅 5 行，scope 版另承载"纵深防御仍生效"主题落点——保留。
+2. **`build_messages` 内容断言**与 `build_system_prompt` 测试重叠（直通返回）：
+   保留前者独有的消息结构契约断言，内容断言仅 3 行，清理收益为零。
+3. **exec 字面量分号双验证**：输入非逐字相同（多一列 + WHERE），不满足安全
+   合并标准，保留双验证。
+4. **附带观察**（非冗余）：`test_agent_stream.py` 两个 SSE helper 结构重复、
+   `test_retrieval` 恒真断言的姊妹缺口已由 `test_mask_preserves_groupability`
+   正确覆盖——前者归 fixture 卫生。
+
+## 二轮验证
+
+- 全量：`python -m pytest -q` → **989 passed, 2 skipped**（约 103s）；
+- black / ruff 全绿；
+- 两轮累计：1010 → 989 离线用例（-21），函数数约 -39，检测力守恒（每处合并
+  保留断言全集、断言迁移先落后删、无效断言修复为有效）。
