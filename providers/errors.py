@@ -66,6 +66,20 @@ class StreamHandshakeRejected(ProviderError):
     code = "provider_error"
 
 
+class StreamHandshakeTimeout(ProviderTimeoutError):
+    """流式握手期超时：连接建立 / 发送请求 / 等待响应头阶段挂起，
+    未从 socket 收到任何响应字节。
+
+    仅此异常允许触发握手安全重试（计费假设：上游对"连接建立但未返回任何
+    响应字节"的请求未启动推理、不产生计费——免责锚点见 spec §前提假设）；
+    mid-stream 超时永远是 ProviderTimeoutError 本类，结构上不可能误重试。
+    扩展预留：未来编排层若需区分两种超时，可加 err.is_handshake 属性；
+    本期上层无 code=="timeout" 分支区分（2026-10-05 核验），无需额外字段。
+    """
+
+    code = "timeout"
+
+
 # 标准错误码 -> 面向业务用户的可读中文文案（前端 Toast / 服务端错误透传）
 ERROR_MESSAGES: dict[str, str] = {
     "auth_failed": "模型服务鉴权失败，请检查 API Key 是否正确",
@@ -91,5 +105,6 @@ __all__ = [
     "ProviderTimeoutError",
     "RateLimitError",
     "StreamHandshakeRejected",
+    "StreamHandshakeTimeout",
     "error_message",
 ]
