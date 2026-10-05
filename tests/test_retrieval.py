@@ -37,12 +37,12 @@ def test_mask_column_name_heuristics():
     columns = ["user_email", "order_id", "customer_phone", "amount"]
     rows = [
         ["a@x.com", 1, "13812345678", 10],
-        ["b@y.com", 2, "13987654321", 20],
+        ["a@x.com", 2, "13987654321", 20],
     ]
     _, out, report = mask_result_set(columns, rows)
     assert set(report.masked_columns) == {"user_email", "customer_phone"}
-    # 确定性掩码：同值同掩码
-    assert out[0][0] == out[0][0]
+    # 确定性掩码：同值同掩码（两行邮箱同值，掩码输出必须一致）
+    assert out[0][0] == out[1][0]
     assert "@" not in str(out[0][0]) and "13812345678" not in str(out[0][2])
     assert report.total_masked == 4
 

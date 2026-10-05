@@ -55,11 +55,9 @@ def test_unsafe_sql_rejects_multi_statement(big_conn):
 
 
 def test_unsafe_sql_allows_comment_and_with(big_conn):
-    """注释先剥离再校验；WITH 与 SELECT 正常放行。"""
+    """注释先剥离再校验，SELECT 正常放行（WITH 放行由 normal_statements 矩阵守卫）。"""
     result = execute_sql(big_conn, "-- 注释\nSELECT grp, sum(id) AS s FROM big GROUP BY grp")
     assert result.columns == ["grp", "s"]
-    result2 = execute_sql(big_conn, "WITH t AS (SELECT 1 AS x) SELECT x FROM t")
-    assert result2.columns == ["x"]
 
 
 def test_unsafe_sql_literal_with_semicolon_is_allowed(big_conn):

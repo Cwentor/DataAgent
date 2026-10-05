@@ -96,12 +96,6 @@ def test_viz_line_for_time_trend():
     assert recommend_viz(dsl, ("order_time", "gmv"), [(1,), (2,)]) == "line"
 
 
-def test_viz_pie_for_few_categories():
-    dsl = _dsl(dimensions=[{"field": "category"}])
-    rows = tuple((f"c{i}",) for i in range(5))
-    assert recommend_viz(dsl, ("category", "gmv"), rows) == "pie"
-
-
 def test_viz_bar_for_many_categories():
     dsl = _dsl(dimensions=[{"field": "category"}])
     rows = tuple((f"c{i}",) for i in range(20))

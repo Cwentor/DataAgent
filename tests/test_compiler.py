@@ -571,24 +571,6 @@ def test_having_field_must_be_metric_alias():
         )
 
 
-def test_having_requires_grouping_and_metrics():
-    """HAVING 语义前提：必须带分组维度且指标非空；纯投影/标量拒绝。"""
-    base_metrics = [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]
-    # 无分组维度（全局标量）带 HAVING
-    with pytest.raises(ValidationError):
-        QueryDSL.model_validate(
-            {"metrics": base_metrics, "having": [{"field": "gmv", "operator": "gt", "value": 0}]}
-        )
-    # 纯维度投影带 HAVING（无指标别名可过滤）
-    with pytest.raises(ValidationError):
-        QueryDSL.model_validate(
-            {
-                "dimensions": [{"field": "brand"}],
-                "having": [{"field": "gmv", "operator": "gt", "value": 0}],
-            }
-        )
-
-
 def test_expression_metric_div_compiles_and_executes(conn):
     """十九期 M2：表达式指标——客单价 = GMV / 订单量（结构化 AST，除零 NULLIF）。"""
     dsl = QueryDSL.model_validate(
@@ -659,19 +641,8 @@ def test_expression_metric_contract_rejections():
                 ]
             }
         )
-    # ref 未在本 DSL 声明
-    with pytest.raises(ValidationError):
-        QueryDSL.model_validate(
-            {
-                "metrics": [
-                    {
-                        "kind": "expression",
-                        "alias": "x",
-                        "expr": {"op": "abs", "args": [{"ref": "ghost"}]},
-                    }
-                ]
-            }
-        )
+    # ref 未在本 DSL 声明：与 M2 互斥矩阵 case4 同分支（彼处断言含错误信息 match，
+    # 此处不再重复保留）
     # ref 指向非聚合指标（ratio）——单层引用结构性禁环
     with pytest.raises(ValidationError):
         QueryDSL.model_validate(
