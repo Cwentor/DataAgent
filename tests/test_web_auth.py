@@ -101,27 +101,6 @@ def test_startup_security_validation():
         settings.AUTH_STRICT, settings.AUTH_JWT_SECRET, settings.AUTH_ENABLED = original
 
 
-def test_query_without_credentials_401():
-    server, port = _start_server()
-    try:
-        status, body, _ = _request(port, "POST", "/api/query", {"query": "GMV"})
-        assert status == 401
-        assert body["error"] == "unauthorized"
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def test_metrics_without_credentials_401():
-    server, port = _start_server()
-    try:
-        status, _, _ = _request(port, "GET", "/api/metrics")
-        assert status == 401
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
 def test_metrics_authenticated_returns_snapshot():
     server, port = _start_server()
     try:

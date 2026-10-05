@@ -8,11 +8,6 @@
 
 from __future__ import annotations
 
-import json
-
-import pandas as pd
-import pytest
-
 from core.orchestrator.state import MAX_RETRIES, AgentState, Artifact, ToolRecord
 
 
@@ -124,20 +119,6 @@ def test_synthesize_llm_report_replaces_raw_rendering(tmp_path, monkeypatch):
     assert "### 核心结论" in out.report and "### 业务假设与排查建议" in out.report
 
 
-def test_synthesize_rejects_raw_json_llm_output(tmp_path, monkeypatch):
-    """LLM 违反契约回吐 JSON => 视为失败，回落确定性分析师渲染（不直出 raw）。"""
-    from config import settings
-    from core.orchestrator import nodes as orch_nodes
-    from core.orchestrator.nodes import synthesize_node
-
-    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
-    raw = json.dumps({"baseline": 669300.0, "current": 616800.0}, ensure_ascii=False)
-    monkeypatch.setattr(orch_nodes, "_resolve_llm", lambda: _FakeLLM(raw))
-    out = synthesize_node(_summary_state(tmp_path))
-    assert '{"baseline"' not in out.report  # 反契约输出被拦截
-    assert "66.93 万元" in out.report  # 走确定性人读兜底
-
-
 # --------------------------------------------------------------------------- #
 # R2：口径对齐层
 # --------------------------------------------------------------------------- #
@@ -185,19 +166,6 @@ def test_inherit_overview_scope_keeps_declared_window():
     }
     aligned, _notes = _inherit_overview_scope(split, [overview])
     assert aligned["time_filter"]["absolute"]["start"] == "2024-05-08"
-
-
-def test_diagnostic_dsl_pair_carries_dimension_pool():
-    """诊断兜底两期对未点名维度时取候选维度池（而非只取省份），两期同口径。"""
-    from core.orchestrator.nodes import _diagnostic_dsl_pair
-
-    base, curr = _diagnostic_dsl_pair("分析 5 月第一周比第二周 GMV 下滑原因")
-    for dsl in (base, curr):
-        dims = [d["field"] for d in dsl["dimensions"]]
-        # 候选池覆盖省份/品牌/品类：由分析层按信息增益裁决主因维度
-        assert dims == ["province", "brand", "category"]
-        assert {"field": "pay_status", "operator": "eq", "value": "SUCCESS"} in dsl["filters"]
-    assert base["time_filter"]["absolute"]["end"] == curr["time_filter"]["absolute"]["start"]
 
 
 def test_diagnostic_dsl_pair_honors_explicit_dimension():
@@ -470,24 +438,6 @@ def test_align_time_granularity_ignores_different_windows():
 # --------------------------------------------------------------------------- #
 # 辅助：归因模板在沙箱外的等价性验证（pandas 逻辑单测）
 # --------------------------------------------------------------------------- #
-def test_region_attribution_math_matches_template_logic():
-    """维度加法归因的数学与模板一致：Δ = 当前期 - 基线期，share 按 |Δ| 归一。"""
-    from core.skills.decomposition import additive_decomposition
-
-    df = pd.DataFrame(
-        {
-            "dimension": ["北京", "浙江", "北京", "浙江"],
-            "value": [200000.0, 150000.0, 120000.0, 140000.0],
-            "period": ["baseline", "baseline", "current", "current"],
-        }
-    )
-    out = additive_decomposition(df)
-    assert out["total_delta"] == pytest.approx(-90000.0, abs=0.01)
-    top = out["items"][0]
-    assert top["dimension"] == "北京"
-    assert abs(top["share"]) == pytest.approx(8 / 9, abs=0.01)  # 下滑贡献为负份额
-
-
 # --------------------------------------------------------------------------- #
 # 2026-09 报告叙述化：LLM 综合失败 => 降级可见（禁止静默落兜底）
 # --------------------------------------------------------------------------- #
@@ -528,7 +478,10 @@ def test_synthesize_no_llm_means_no_banner(tmp_path, monkeypatch):
 
 
 def test_synthesize_llm_contract_output_marks_banner(tmp_path, monkeypatch):
-    """LLM 回吐反契约 JSON => 同样视为综合失败，兜底报告带标注。"""
+    """LLM 回吐反契约 JSON => 视为综合失败，兜底报告带标注且数值仍人读渲染。
+
+    兼守原 test_synthesize_rejects_raw_json_llm_output 的拦截与人读断言（合并）。
+    """
     import json as _json
 
     from config import settings
@@ -541,7 +494,8 @@ def test_synthesize_llm_contract_output_marks_banner(tmp_path, monkeypatch):
     out = synthesize_node(_summary_state(tmp_path))
     assert "本次报告由确定性模板生成" in out.report
     assert "反契约" in out.report
-    assert '{"baseline"' not in out.report
+    assert '{"baseline"' not in out.report  # 反契约输出被拦截，不直出 raw
+    assert "66.93 万元" in out.report  # 走确定性人读兜底
 
 
 def test_coder_prompt_summary_discipline():

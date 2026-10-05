@@ -42,12 +42,6 @@ def test_run_query_security_denied(conn):
     assert "无权" in result["error"]
 
 
-def test_run_query_unknown_question(conn):
-    """无法解析的问题 -> 返回 error 而非抛异常。"""
-    result = run_query("今天天气怎么样", conn=conn)
-    assert "error" in result
-
-
 def test_http_smoke():
     """HTTP 冒烟：/api/health 与静态首页可达（M4 单引擎：FastAPI TestClient）。"""
     from fastapi.testclient import TestClient

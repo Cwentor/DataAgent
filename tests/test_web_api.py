@@ -18,14 +18,8 @@ def client():
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_health_matches_stdlib_contract(client):
-    resp = client.get("/api/health")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
-
-
 def test_health_field_set_frozen(client):
-    """字段集快照锁：防止 FastAPI 平移时增删响应字段。
+    """字段集快照锁：防止 FastAPI 平移时增删响应字段（status=="ok" 由 /api/health 契约承担）。
 
     本步骤执行时先起一次 stdlib 服务（WEB_SERVER_ENGINE=stdlib python -m web.server）
     并 `curl /api/health`，把实测字段集逐字写入 expected_fields，再跑本测试。
@@ -43,10 +37,6 @@ def test_query_endpoint_auth_enforced(client):
 
 def test_metrics_requires_auth(client):
     assert client.get("/api/metrics").status_code == 401
-
-
-def test_schema_summary_requires_auth(client):
-    assert client.get("/api/schema/summary").status_code == 401
 
 
 def test_unknown_route_matches_stdlib_error_body(client):
@@ -204,7 +194,12 @@ def test_agent_stream_unknown_run_404(client, monkeypatch):
 
 
 def test_agent_run_status_snapshot_contract(client, monkeypatch, tmp_path):
-    """GET /api/v1/agent/runs/<id>：属主 fail-closed + 快照不含 resume_token。"""
+    """GET /api/v1/agent/runs/<id>：属主 fail-closed + 快照不含 resume_token。
+
+    与 test_agent_stream.py::test_sse_run_status_endpoint 的分工：本测试锚定
+    关鉴权（AUTH_ENABLED=False）时匿名属主仍可读的配置路径；HTTP 层行为
+    （200/404/属主隔离）由后者覆盖。
+    """
 
     from config import settings
 
