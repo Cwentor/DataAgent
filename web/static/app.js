@@ -144,6 +144,7 @@
     AgentSidebarUI.init();
     initAgentStatus();
     bindEvents();
+    bindHitlDelegation();
     fillModelSwitch();
   }
 
@@ -598,48 +599,58 @@
   }
 
   // ---------------------------------------------------------------- HITL 交互
-  /** 时间线内渲染 HITL 交互（澄清卡由 stream-ui 按 hitl 事件绘制）：
-   *  只在当前活跃会话的卡上绑定 pill/输入行为；答复后卡片打「已答复」标记，
-   *  严禁对历史快照里的旧卡重复绑定（stale resume_token 误提交防护）。 */
-  function bindHitlCard() {
-    var planCard = document.querySelector("#chat-stream .plan-review-card:not([data-answered])");
-    if (planCard) {
-      planCard.querySelectorAll("[data-plan-action]").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          var action = btn.dataset.planAction;
-          if (action === "edit") {
-            var input = planCard.querySelector(".plan-edit-input");
-            var instruction = (input && input.value.trim()) || "";
-            if (!instruction) { input && input.focus(); return; }
-            submitPlanAction("edit", planCard, instruction);
-          } else {
-            submitPlanAction(action, planCard);
-          }
-        });
-      });
-      return;
-    }
-    var card = document.querySelector("#chat-stream .hitl-card:not([data-answered])");
-    if (!card) { return; }
-    card.querySelectorAll(".hitl-pill:not(.hitl-send)").forEach(function (pill) {
-      pill.addEventListener("click", function () {
-        submitHitlReply(pill.dataset.value || pill.textContent, card);
-      });
-    });
-    var form = card.querySelector(".hitl-input-row");
-    if (form) {
-      form.querySelector(".hitl-send").addEventListener("click", function () {
-        var v = form.querySelector(".hitl-input").value.trim();
-        if (v) { submitHitlReply(v, card); }
-      });
-      form.querySelector(".hitl-input").addEventListener("keydown", function (e) {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          var v = this.value.trim();
-          if (v) { submitHitlReply(v, null); }
+  /** 时间线内渲染 HITL 交互（澄清卡 / 审批卡 / 探索与高危确认卡均由 stream-ui 绘制）：
+   *  交互走容器级事件委托、初始化时只绑一次——时间线是键控协调渲染（虚拟化窗口
+   *  滑动、会话切换、快照恢复都会销毁并重建卡片节点），一次性命令式绑定会随节点
+   *  重建而丢失（旧实现：重规划/刷新后审批卡点击无反应、重放时绑错旧卡）。
+   *  答复态（data-answered）在每次点击时即时校验，历史快照里的旧卡不会误提交。 */
+  function bindHitlDelegation() {
+    var stream = document.getElementById("chat-stream");
+    if (!stream) { return; }
+    stream.addEventListener("click", function (e) {
+      var btn = e.target.closest("[data-plan-action]");
+      if (btn) {
+        var planCard = btn.closest(".plan-review-card");
+        if (!planCard || planCard.dataset.answered) { return; }
+        var action = btn.dataset.planAction;
+        if (action === "edit") {
+          var input = planCard.querySelector(".plan-edit-input");
+          var instruction = (input && input.value.trim()) || "";
+          if (!instruction) { if (input) { input.focus(); } return; }
+          submitPlanAction("edit", planCard, instruction);
+        } else {
+          submitPlanAction(action, planCard);
         }
-      });
-    }
+        return;
+      }
+      var pill = e.target.closest(".hitl-pill:not(.hitl-send)");
+      if (pill) {
+        var card = pill.closest(".hitl-card");
+        // plan-review-card 内的 pill 是审批动作（走 data-plan-action 分支），此处只处理澄清卡
+        if (!card || card.dataset.answered || card.classList.contains("plan-review-card")) { return; }
+        submitHitlReply(pill.dataset.value || pill.textContent, card);
+        return;
+      }
+      var send = e.target.closest(".hitl-send");
+      if (send) {
+        var hitlCard = send.closest(".hitl-card");
+        if (!hitlCard || hitlCard.dataset.answered) { return; }
+        var row = send.closest(".hitl-input-row");
+        var input2 = row && row.querySelector(".hitl-input");
+        var v = (input2 && input2.value.trim()) || "";
+        if (v) { submitHitlReply(v, hitlCard); }
+      }
+    });
+    stream.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter") { return; }
+      var input = e.target.closest(".hitl-input");
+      if (!input) { return; }
+      var card = input.closest(".hitl-card");
+      if (!card || card.dataset.answered) { return; }
+      e.preventDefault();
+      var v = input.value.trim();
+      if (v) { submitHitlReply(v, card); }
+    });
   }
 
   /** 分析计划审批动作提交（M2）：approve/reject 直接续流；edit 弹出修改指令。
@@ -884,7 +895,6 @@
         AgentSidebarUI.noteRunStatus(
           (AgentStore.getRuntime(threadId) || {}).runId, "paused");
         AgentSidebarUI.archiveThread(); // 澄清挂起时也归档，切走再回可看到澄清卡
-        bindHitlCard();
         break;
 
       case "artifact_emit":
