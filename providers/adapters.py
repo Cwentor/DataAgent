@@ -38,6 +38,7 @@ from providers.errors import (
     ProviderTimeoutError,
     RateLimitError,
     StreamHandshakeRejected,
+    StreamHandshakeTimeout,
 )
 from providers.models import (
     ApiProtocol,
@@ -256,7 +257,16 @@ def _http_post_sse(
       截断，达到上限仍无换行 => ProviderError 熔断（防内存无界增长）。
     总预算耗尽抛 ProviderTimeoutError。首包 HTTP 状态非 2xx 与 _http_post
     同映射；EOF（b""）正常结束迭代——终止帧校验归消费方（_consume_stream）。
+
+    握手期（连接建立 + 发送请求 + 等待响应头）使用独立预算
+    min(PROVIDER_HANDSHAKE_TIMEOUT, timeout, max_seconds)：getresponse 返回
+    （已从 socket 读到响应头字节）即进入 mid-stream 域。握手期超时抛
+    StreamHandshakeTimeout——未收到任何字节 => 重试无重复计费风险（计费假设
+    与免责锚点见 spec §前提假设），是否重试由 _consume_stream_handshake_retry
+    裁决；mid-stream 超时抛 ProviderTimeoutError，防重复计费铁律禁止重试。
     """
+    from config import settings
+
     body = json.dumps(payload).encode("utf-8")
     merged_headers = {
         "Content-Type": "application/json",
@@ -269,11 +279,22 @@ def _http_post_sse(
     conn_cls = (
         http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
     )
-    conn = conn_cls(parsed.hostname, parsed.port, timeout=timeout)
+    # 握手期独立预算：与调用方 timeout、流总预算取 min（最坏总延迟不膨胀）；
+    # 配置 <=0 运行时钳制为 1s（非法配置防崩）
+    handshake_timeout = min(
+        max(settings.PROVIDER_HANDSHAKE_TIMEOUT, 1),
+        timeout,
+        max_seconds,
+    )
+    conn = conn_cls(parsed.hostname, parsed.port, timeout=handshake_timeout)
     started = time.perf_counter()
+    # 握手完成标志：getresponse 返回即置位（已从 socket 读到响应头字节，
+    # 按"读到任意字节即进入 mid-stream 域"的保守口径——此后一律禁重试）
+    handshake_done = False
     try:
         conn.request("POST", parsed.path or "/", body=body, headers=merged_headers)
         resp = conn.getresponse()
+        handshake_done = True
         if resp.status >= 400:
             raw = resp.read().decode("utf-8", errors="replace")
             if resp.status == 400:
@@ -299,7 +320,11 @@ def _http_post_sse(
             if len(line) == _SSE_MAX_LINE_BYTES and not line.endswith(b"\n"):
                 raise ProviderError("SSE 行超长（无换行慢滴流），已熔断", code="provider_error")
             yield from _iter_sse_payloads([line.decode("utf-8", errors="replace")])
-    except TimeoutError as exc:  # socket.timeout（块间空闲超时）
+    except TimeoutError as exc:  # socket.timeout（3.10+ 即 TimeoutError）
+        if not handshake_done:
+            # 握手期：connect / request / getresponse 阶段挂起，未收到任何响应
+            # 字节——重试无重复计费风险（计费假设见 spec §前提假设）
+            raise StreamHandshakeTimeout(f"握手期超时（未收到任何响应字节）: {exc}") from exc
         raise ProviderTimeoutError(f"请求超时: {exc}") from exc
     except (http.client.HTTPException, OSError) as exc:
         raise ProviderError(f"网络请求失败: {exc}", code="provider_error") from exc
