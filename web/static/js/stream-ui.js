@@ -109,20 +109,14 @@
     var div = document.createElement("div");
     div.className = "done-card";
     div.innerHTML = '<span class="r-decision">✓ 分析完成</span>'
-      + '<span class="r-reason">报告与产物已生成。</span> ';
-    var link = document.createElement("button");
-    link.type = "button";
-    link.className = "done-link";
-    link.textContent = "查看报告 →";
-    link.addEventListener("click", function () {
-      if (window.AgentSidebarUI) { AgentSidebarUI.showView("report"); }
-    });
-    div.appendChild(link);
+      + '<span class="r-reason">报告与产物已生成。</span> '
+      + '<button type="button" class="done-link">查看报告 →</button>';
+    // 点击行为走 init 的容器级事件委托（条目节点会被虚拟化/协调重建，严禁一次性命令式绑定）
     return div;
   }
 
 /** 分析计划审批卡（M2 Plan Mode）：步骤列表 + 批准/修改/拒绝三操作。
- *  卡片由 app.js 的 bindHitlCard 绑定动作按钮（data-plan-action 契约）。 */
+ *  动作按钮由 app.js 的 HITL 事件委托绑定（data-plan-action 契约）。 */
 /** run manifest 卡（M3）：fan-out 子任务轨迹摘要（task_id/status/steps）。 */
   function elManifest(item) {
     var card = document.createElement("div");
@@ -153,7 +147,7 @@
 
 
     /** M6 探索查询审批卡：SQL 摘要 + 触达表 + 敏感提示 + 三按钮
-     *  卡片由 app.js 的 bindHitlCard 绑定动作按钮（data-plan-action 契约）。 */
+     *  动作按钮由 app.js 的 HITL 事件委托绑定（data-plan-action 契约）。 */
     function elExploration(item) {
     var card = document.createElement("div");
     card.className = "hitl-card plan-review-card exploration-card";
@@ -191,7 +185,7 @@
 
     function elHighRisk(item) {
     var card = document.createElement("div");
-    // 复用 plan-review-card class：bindHitlCard 按 data-plan-action 契约绑定按钮
+    // 复用 plan-review-card class：动作按钮走 app.js 的 HITL 事件委托（data-plan-action 契约）
     card.className = "hitl-card plan-review-card high-risk-card";
     var head = document.createElement("div");
     head.className = "hitl-q";
@@ -402,9 +396,12 @@
     prog.textContent = done + "/" + list.length + " 完成";
   }
 
-  /** 就地更新计划卡步骤状态与进度（复用 DOM，不重绘整卡）。 */
+  /** 就地更新计划卡步骤状态与进度（复用 DOM，不重绘整卡）。
+   *  活动计划恒对应最新一张计划卡（重规划时 store 会替换 plan 条目），取末张更新，
+   *  严禁取首张——会把新计划步骤填进历史计划卡（标题步数与内容不一致）。 */
   function updatePlanCard(plan) {
-    var card = listBox.querySelector('[data-plan-card]');
+    var cards = listBox.querySelectorAll("[data-plan-card]");
+    var card = cards[cards.length - 1];
     if (!card) { return; }
     fillPlanSteps(card.querySelector(".plan-steps"), plan);
     fillPlanProgress(card.querySelector(".act-head"), plan);
@@ -435,7 +432,7 @@
       + '<span class="act-chevron">▾</span>';
     var body = document.createElement("div");
     body.className = "act-body";
-    head.addEventListener("click", function () { acc.classList.toggle("open"); });
+    // head 展开收起走 init 的容器级事件委托（节点重建后监听不丢）
     acc.appendChild(head);
     acc.appendChild(body);
     fillToolBody(body, item);
@@ -636,6 +633,22 @@
     return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/["\\:]/g, "\\$&");
   }
 
+  /** 条目内交互的容器级事件委托（init 时绑一次）：
+   *  虚拟化窗口滑动 / 键控协调会销毁并重建条目节点，命令式监听随之丢失
+   *  （旧实现：工具行滚回可视区后无法展开、完成卡链接失效），委托以
+   *  closest 即时解析目标，节点重建无感。 */
+  function bindDelegatedInteractions() {
+    listBox.addEventListener("click", function (e) {
+      var doneLink = e.target.closest(".done-link");
+      if (doneLink) {
+        if (window.AgentSidebarUI) { AgentSidebarUI.showView("report"); }
+        return;
+      }
+      var head = e.target.closest("button.act-head");
+      if (head) { head.parentElement.classList.toggle("open"); }
+    });
+  }
+
   function fmtDur(ms) {
     var n = Number(ms) || 0;
     return n >= 1000 ? (n / 1000).toFixed(1) + " s" : Math.round(n) + " ms";
@@ -644,6 +657,7 @@
   window.AgentStreamUI = {
     init: function () {
       initScroll();
+      bindDelegatedInteractions();
       AgentStore.subscribe("timelineEvents", render);
       AgentStore.subscribe("toolUpdate", updateToolBlock);
       AgentStore.subscribe("activePlan", function (state) {
