@@ -323,8 +323,10 @@ def _http_post_sse(
             yield from _iter_sse_payloads([line.decode("utf-8", errors="replace")])
     except TimeoutError as exc:  # socket.timeout（3.10+ 即 TimeoutError）
         if not handshake_done:
-            # 握手期：connect / request / getresponse 阶段挂起，未收到任何响应
-            # 字节——重试无重复计费风险（计费假设见 spec §前提假设）
+            # 握手期：connect / request / getresponse 阶段挂起——按"未收到完整
+            # 响应头"口径处理，重试无重复计费风险（计费假设见 spec §前提假设）；
+            # 残余风险：响应头半途到达后停顿（字节已部分收到但仍落本分支）概率
+            # 极低，且可经 PROVIDER_HANDSHAKE_RETRY_MAX=0 一键关闭
             raise StreamHandshakeTimeout(f"握手期超时（未收到任何响应字节）: {exc}") from exc
         raise ProviderTimeoutError(f"请求超时: {exc}") from exc
     except (http.client.HTTPException, OSError) as exc:
@@ -426,17 +428,18 @@ def _consume_stream_handshake_retry(
             if attempt > 0:
                 default_registry().record_llm_handshake("retry_success")
             return content, usage
-        except StreamHandshakeTimeout:
+        except StreamHandshakeTimeout as exc:
             default_registry().record_llm_handshake("handshake_timeout")
             if attempt >= attempts - 1:
                 if attempts > 1:
                     default_registry().record_llm_handshake("retry_fail")
                 raise
             logger.warning(
-                "流式握手期超时（未收到任何响应字节），%.1fs 后安全重试（第 %d/%d 次）",
+                "流式握手期超时（未收到任何响应字节），%.1fs 后安全重试（第 %d/%d 次）: %s",
                 _HANDSHAKE_RETRY_BACKOFF_SECONDS,
                 attempt + 1,
                 attempts - 1,
+                exc,
             )
             time.sleep(_HANDSHAKE_RETRY_BACKOFF_SECONDS)
     raise AssertionError("unreachable: 重试循环每轮要么返回要么上抛")
