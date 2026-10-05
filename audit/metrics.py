@@ -34,6 +34,9 @@ class MetricsRegistry:
         self._circuit_breakers: Counter[str] = Counter()
         # 分层降级兜底（2026-09）：弱解析命中 / 计划获批准执行 / 拒绝或回落拒答
         self._degrade_outcomes: Counter[str] = Counter()
+        # LLM 流式握手重试事件（2026-10）：handshake_timeout=握手期超时发生 /
+        # retry_success=重试救回 / retry_fail=重试后仍失败
+        self._llm_handshake: Counter[str] = Counter()
         # Multi-Tool Agent：工具调用次数与失败次数
         self._tools_called = 0
         self._tool_errors = 0
@@ -83,6 +86,11 @@ class MetricsRegistry:
         with self._lock:
             self._degrade_outcomes[outcome] += 1
 
+    def record_llm_handshake(self, kind: str) -> None:
+        """登记一次 LLM 流式握手重试事件（handshake_timeout / retry_success / retry_fail）。"""
+        with self._lock:
+            self._llm_handshake[kind] += 1
+
     def record_self_heal_failure(self) -> None:
         """登记一次自愈失败（Record a self-heal failure）。"""
         with self._lock:
@@ -118,6 +126,7 @@ class MetricsRegistry:
                 "error_kinds": dict(self._error_kinds),
                 "circuit_breakers": dict(self._circuit_breakers),
                 "degrade_outcomes": dict(self._degrade_outcomes),
+                "llm_handshake": dict(self._llm_handshake),
                 "tools": {
                     "called": self._tools_called,
                     "errors": self._tool_errors,

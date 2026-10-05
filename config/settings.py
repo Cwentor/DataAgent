@@ -157,6 +157,14 @@ PROVIDER_STREAM_MAX_SECONDS: int = int(os.getenv("PROVIDER_STREAM_MAX_SECONDS", 
 if PROVIDER_STREAM_MAX_SECONDS <= 0:
     PROVIDER_STREAM_MAX_SECONDS = 300
 
+# 流式握手期超时（秒）：连接建立 + 发送请求 + 等待响应头的独立预算，与调用方
+# timeout、流总预算取 min——握手挂起无需硬等满 PROVIDER_TIMEOUT，保证开启重试后
+# 最坏总延迟不高于单次 PROVIDER_TIMEOUT 上限；运行时对 <=0 钳制为 1（防非法配置）
+PROVIDER_HANDSHAKE_TIMEOUT: int = int(os.getenv("PROVIDER_HANDSHAKE_TIMEOUT", "30"))
+# 握手期超时安全重试次数：仅限未收到任何响应字节的超时（防重复计费假设见
+# docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md §前提假设）；<=0 关闭
+PROVIDER_HANDSHAKE_RETRY_MAX: int = int(os.getenv("PROVIDER_HANDSHAKE_RETRY_MAX", "1"))
+
 # 报告综合（Synthesizer）专用读超时（秒）：长文生成耗时 > 常规调用，独立预算；
 # 配置 <=0 视为非法，回落默认 180
 SYNTHESIZER_TIMEOUT: int = int(os.getenv("SYNTHESIZER_TIMEOUT", "180"))
