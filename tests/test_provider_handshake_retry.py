@@ -211,8 +211,15 @@ def _flaky_handshake_sse(calls: list, *, ok_frames: list):
     """
 
     def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        # 存快照而非对象引用：两次调用共享同一 dict 时 calls[0] == calls[1] 恒真，
+        # 无法捕获"重试间隔内原地突变 headers/payload"的回归（终审 #4）
         calls.append(
-            {"payload": payload, "headers": headers, "timeout": timeout, "api_key": api_key}
+            {
+                "payload": dict(payload),
+                "headers": dict(headers),
+                "timeout": timeout,
+                "api_key": api_key,
+            }
         )
         if len(calls) == 1:
 
@@ -236,7 +243,12 @@ def _midstream_timeout_sse(calls: list):
 
     def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
         calls.append(
-            {"payload": payload, "headers": headers, "timeout": timeout, "api_key": api_key}
+            {
+                "payload": dict(payload),
+                "headers": dict(headers),
+                "timeout": timeout,
+                "api_key": api_key,
+            }
         )
 
         def gen_fail():
@@ -382,3 +394,19 @@ def test_responses_handshake_retry_recovers(monkeypatch):
     assert len(calls) == 2
     assert calls[0] == calls[1]
     assert reg.snapshot()["llm_handshake"]["retry_success"] == 1
+
+
+def test_handshake_retry_warning_logs_reason(monkeypatch, caplog):
+    """重试 warning 日志携带底层异常原因（spec §4.3：重试成功路径异常不吞，排障可追溯）。"""
+    adapter = OpenAIChatAdapter(_provider(stream=True), "m-1")
+    calls: list = []
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _flaky_handshake_sse(calls, ok_frames=_OPENAI_OK_FRAMES),
+    )
+    _bind_metrics(monkeypatch)
+    monkeypatch.setattr("providers.adapters._HANDSHAKE_RETRY_BACKOFF_SECONDS", 0)
+    with caplog.at_level("WARNING", logger="providers.adapters"):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert "握手期超时" in caplog.text
+    assert "read timed out" in caplog.text  # 底层原因随日志透出

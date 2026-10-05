@@ -46,6 +46,12 @@
 > 计费（哪怕不返回数据）"的计费模式，必须通过 `PROVIDER_HANDSHAKE_RETRY_MAX=0`
 > 关闭重试。
 >
+> **残余风险口径**（2026-10-05 终审补充）：实现以 `getresponse()` 正常返回为
+> mid-stream 分界——若服务端已发出部分响应头字节后在头部中间停顿至超时，该请求仍落
+> 握手分支并可能触发重试，此时"未收到任何响应字节"的字面前提不成立。该形态要求
+> 服务端开始吐响应头后停顿 30s+，概率极低；`http.client` 无法感知已读字节数，不做
+> 代码级区分，凭本条免责扩展与本开关兜底。
+>
 > 该假设与项目既有论证口径一致：`StreamHandshakeRejected`（握手 400 回退）注释
 > 已确立"尚未产出任何 chunk，重发无重复计费风险"。切换供应商时应重新确认本假设。
 
@@ -211,7 +217,9 @@ PROVIDER_HANDSHAKE_RETRY_MAX: int = int(os.getenv("PROVIDER_HANDSHAKE_RETRY_MAX"
 
 ```python
 # LLM 流式握手重试事件（2026-10）：handshake_timeout=握手期超时发生次数 /
-# retry_success=重试救回次数 / retry_fail=重试后仍失败次数
+# retry_success=重试救回次数 / retry_fail=开启重试且最后一次仍握手超时次数
+# （口径窄化说明：重试轮以 mid-stream 超时/断连等其他方式失败时不打 retry_fail，
+# 该失败已由调用方异常路径可见；2026-10-05 终审对齐）
 self._llm_handshake: Counter[str] = Counter()
 
 def record_llm_handshake(self, kind: str) -> None:
