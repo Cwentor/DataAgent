@@ -94,6 +94,9 @@ def chat_text(
 
     429 限流（RateLimitError）按 LLM_MAX_RETRIES（封顶 2，短退避 1s/3s）
     自动重试——共享中转的间歇性限流不应直接打穿为降级；其他异常不重试。
+    （读超时刻意不在此层重试：无法区分"握手挂起"与"mid-stream 超时"，
+    后者重发等于整段重复生成/重复计费——防重复计费铁律优先，见
+    adapters._stream_fallback_eligible 同源约束。）
     """
     from config import settings
 
