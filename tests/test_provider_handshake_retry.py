@@ -8,13 +8,20 @@ mid-stream 禁重试、重试包装（成功 / 双失败 / 开关关闭 / 鉴权
 
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 import pytest
 
 from audit.metrics import MetricsRegistry
 from config import settings
-from providers.adapters import _http_post_sse
+from providers.adapters import (
+    AnthropicAdapter,
+    OpenAIChatAdapter,
+    OpenAIResponsesAdapter,
+    _http_post_sse,
+    _stream_fallback_eligible,
+)
 from providers.errors import (
     ERROR_MESSAGES,
     ProviderTimeoutError,
@@ -22,6 +29,8 @@ from providers.errors import (
     StreamHandshakeTimeout,
     error_message,
 )
+from providers.models import ProviderConfig, UnifiedChatRequest
+from tests.fixture_keys import fake_key
 
 
 # --------------------------------------------------------------------------- #
@@ -42,7 +51,6 @@ def test_stream_handshake_timeout_not_stream_handshake_rejected():
 
 def test_stream_handshake_timeout_not_fallback_eligible():
     """_stream_fallback_eligible 对新异常恒为 False（含附加 hints 场景）。"""
-    from providers.adapters import _stream_fallback_eligible
 
     exc = StreamHandshakeTimeout("握手期超时（未收到任何响应字节）: read timed out")
     assert _stream_fallback_eligible(exc) is False
@@ -174,3 +182,203 @@ def test_handshake_budget_clamps_nonpositive_config(monkeypatch):
             )
         )
     assert conn_cls.created_timeouts == [1]
+
+
+# --------------------------------------------------------------------------- #
+# 重试包装与三协议适配器接入
+# --------------------------------------------------------------------------- #
+def _provider(**overrides) -> ProviderConfig:
+    """供应商配置测试基座（抄自 tests/test_providers.py 同名 helper）。"""
+    base = {
+        "id": "p1",
+        "name": "测试站",
+        "is_preset": False,
+        "enabled": True,
+        "base_url": "https://gw.example.com/v1",
+        "api_key": fake_key("gw"),
+        "protocol": "openai_chat",
+        "models": [{"id": "m-1", "name": "M1"}],
+    }
+    base.update(overrides)
+    return ProviderConfig.model_validate(base)
+
+
+def _flaky_handshake_sse(calls: list, *, ok_frames: list):
+    """构造"首次握手期超时、之后成功"的 _http_post_sse 替身工厂。
+
+    每次调用把 (payload, headers, timeout, api_key) 快照进 calls，供
+    "重试请求与首次逐字段一致"断言（鉴权头完整性专项，Review Focus #4）。
+    """
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        calls.append(
+            {"payload": payload, "headers": headers, "timeout": timeout, "api_key": api_key}
+        )
+        if len(calls) == 1:
+
+            def gen_fail():
+                raise StreamHandshakeTimeout("握手期超时（未收到任何响应字节）: read timed out")
+
+                yield  # pragma: no cover —— 使其成为生成器函数，异常延迟到迭代时抛出
+
+            return gen_fail()
+
+        def gen_ok():
+            yield from ok_frames
+
+        return gen_ok()
+
+    return fake_sse
+
+
+def _midstream_timeout_sse(calls: list):
+    """构造"首次即 mid-stream 超时"的替身：验证穿透不重试。"""
+
+    def fake_sse(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        calls.append(
+            {"payload": payload, "headers": headers, "timeout": timeout, "api_key": api_key}
+        )
+
+        def gen_fail():
+            raise ProviderTimeoutError("请求超时: read timed out")
+
+            yield  # pragma: no cover
+
+        return gen_fail()
+
+    return fake_sse
+
+
+def _bind_metrics(monkeypatch) -> MetricsRegistry:
+    """隔离进程级单例：重定向 providers.adapters 的 default_registry 到独立实例。"""
+    reg = MetricsRegistry()
+    monkeypatch.setattr("providers.adapters.default_registry", lambda: reg)
+    return reg
+
+
+_OPENAI_OK_FRAMES = [
+    json.dumps({"choices": [{"delta": {"content": "ok"}}]}),
+    "[DONE]",
+]
+_ANTHROPIC_OK_FRAMES = [
+    json.dumps({"type": "content_block_delta", "delta": {"text": "ok"}}),
+    json.dumps({"type": "message_stop"}),
+]
+_RESPONSES_OK_FRAMES = [
+    json.dumps({"type": "response.output_text.delta", "delta": "ok"}),
+    json.dumps({"type": "response.completed", "response": {}}),
+]
+
+
+def test_openai_chat_handshake_retry_recovers(monkeypatch):
+    """openai_chat：首次握手超时 → 重试成功返回；两次请求逐字段一致；指标齐全。"""
+    adapter = OpenAIChatAdapter(_provider(stream=True), "m-1")
+    calls: list = []
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _flaky_handshake_sse(calls, ok_frames=_OPENAI_OK_FRAMES),
+    )
+    reg = _bind_metrics(monkeypatch)
+    monkeypatch.setattr("providers.adapters._HANDSHAKE_RETRY_BACKOFF_SECONDS", 0)
+    resp = adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1")
+    )
+    assert resp.content == "ok"
+    assert len(calls) == 2
+    assert calls[0] == calls[1]  # 鉴权头/参数逐字段一致（Review Focus #4）
+    # dict(Counter) 只含已打点键（未发生事件不以 0 导出，同 circuit_breakers 语义）
+    assert reg.snapshot()["llm_handshake"] == {"handshake_timeout": 1, "retry_success": 1}
+
+
+def test_openai_chat_double_handshake_failure_raises(monkeypatch):
+    """两次握手超时 => 上抛 StreamHandshakeTimeout；指标 handshake_timeout=2 + retry_fail=1。"""
+    adapter = OpenAIChatAdapter(_provider(stream=True), "m-1")
+    calls: list = []
+
+    def always_fail(url, *, payload, headers, timeout, max_seconds, api_key=None):
+        calls.append(
+            {"payload": payload, "headers": headers, "timeout": timeout, "api_key": api_key}
+        )
+
+        def gen_fail():
+            raise StreamHandshakeTimeout("握手期超时（未收到任何响应字节）: read timed out")
+
+            yield  # pragma: no cover
+
+        return gen_fail()
+
+    monkeypatch.setattr("providers.adapters._http_post_sse", always_fail)
+    reg = _bind_metrics(monkeypatch)
+    monkeypatch.setattr("providers.adapters._HANDSHAKE_RETRY_BACKOFF_SECONDS", 0)
+    with pytest.raises(StreamHandshakeTimeout):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert len(calls) == 2
+    assert reg.snapshot()["llm_handshake"] == {"handshake_timeout": 2, "retry_fail": 1}
+
+
+def test_openai_chat_mid_stream_timeout_no_retry(monkeypatch):
+    """mid-stream 超时（响应头已到后挂起）=> 原样上抛、零重试、零 retry_* 计数。"""
+    adapter = OpenAIChatAdapter(_provider(stream=True), "m-1")
+    calls: list = []
+    monkeypatch.setattr("providers.adapters._http_post_sse", _midstream_timeout_sse(calls))
+    reg = _bind_metrics(monkeypatch)
+    monkeypatch.setattr("providers.adapters._HANDSHAKE_RETRY_BACKOFF_SECONDS", 0)
+    with pytest.raises(ProviderTimeoutError):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert len(calls) == 1  # 铁律：mid-stream 禁止重试
+    assert reg.snapshot()["llm_handshake"] == {}  # 零打点（未发生任何握手事件）
+
+
+def test_openai_chat_retry_disabled(monkeypatch):
+    """RETRY_MAX=0 关闭重试：首次握手超时即上抛，只打 handshake_timeout、无 retry_fail。"""
+    monkeypatch.setattr("config.settings.PROVIDER_HANDSHAKE_RETRY_MAX", 0)
+    adapter = OpenAIChatAdapter(_provider(stream=True), "m-1")
+    calls: list = []
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _flaky_handshake_sse(calls, ok_frames=_OPENAI_OK_FRAMES),
+    )
+    reg = _bind_metrics(monkeypatch)
+    monkeypatch.setattr("providers.adapters._HANDSHAKE_RETRY_BACKOFF_SECONDS", 0)
+    with pytest.raises(StreamHandshakeTimeout):
+        adapter.chat(UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1"))
+    assert len(calls) == 1
+    assert reg.snapshot()["llm_handshake"] == {"handshake_timeout": 1}  # 从未重试 => 无 retry_fail
+
+
+def test_anthropic_handshake_retry_recovers(monkeypatch):
+    """anthropic 协议：握手重试同样生效（x-api-key 鉴权头一致性随 calls[0]==calls[1] 断言）。"""
+    adapter = AnthropicAdapter(_provider(protocol="anthropic", stream=True), "m-1")
+    calls: list = []
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _flaky_handshake_sse(calls, ok_frames=_ANTHROPIC_OK_FRAMES),
+    )
+    reg = _bind_metrics(monkeypatch)
+    monkeypatch.setattr("providers.adapters._HANDSHAKE_RETRY_BACKOFF_SECONDS", 0)
+    resp = adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1")
+    )
+    assert resp.content == "ok"
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert reg.snapshot()["llm_handshake"]["retry_success"] == 1
+
+
+def test_responses_handshake_retry_recovers(monkeypatch):
+    """responses 协议：握手重试同样生效。"""
+    adapter = OpenAIResponsesAdapter(_provider(protocol="openai_responses", stream=True), "m-1")
+    calls: list = []
+    monkeypatch.setattr(
+        "providers.adapters._http_post_sse",
+        _flaky_handshake_sse(calls, ok_frames=_RESPONSES_OK_FRAMES),
+    )
+    reg = _bind_metrics(monkeypatch)
+    monkeypatch.setattr("providers.adapters._HANDSHAKE_RETRY_BACKOFF_SECONDS", 0)
+    resp = adapter.chat(
+        UnifiedChatRequest(messages=[{"role": "user", "content": "hi"}], model="m-1")
+    )
+    assert resp.content == "ok"
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert reg.snapshot()["llm_handshake"]["retry_success"] == 1

@@ -31,6 +31,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
+from audit.metrics import default_registry
 from providers.errors import (
     AuthenticationError,
     ProtocolError,
@@ -383,6 +384,64 @@ def _consume_stream(
     return content, usage
 
 
+# 握手期安全重试的固定短退避（秒）：对秒~分钟级链路抖动象征意义大于实际，
+# 成本为零，仅避免对同一故障节点的瞬时重发冲击（不设配置，YAGNI）
+_HANDSHAKE_RETRY_BACKOFF_SECONDS = 0.2
+
+
+def _consume_stream_handshake_retry(
+    build: Callable[[], Iterator[str]],
+    *,
+    extract_delta: Callable[[dict[str, Any]], str],
+    terminal: Callable[[dict[str, Any]], bool],
+    extract_usage: Callable[[dict[str, Any]], dict[str, Any] | None],
+    extract_error: Callable[[dict[str, Any]], Any] | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """消费 SSE 流，仅对握手期超时安全重试（防重复计费铁律的唯一例外窗口）。
+
+    - build 工厂闭包重建**全新 HTTP 请求**（绝不复用旧连接），捕获的
+      payload / headers / api_key / 协议参数与首次请求完全一致（原样重发，
+      鉴权头完整性由既有 _build_headers / api_key 透传保证）；
+    - 仅 StreamHandshakeTimeout（未收到任何响应字节）触发重试——计费假设与
+      免责锚点见 docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md
+      §前提假设；mid-stream 超时 / 断连 / 错误帧 / 协议错误原样穿透；
+    - 0.2s 固定短退避后重试；失败连接已在 _http_post_sse 的 finally 关闭，
+      退避期间不持有任何连接；
+    - 事件打点 default_registry().record_llm_handshake：handshake_timeout
+      （每次发生）/ retry_success（重试救回）/ retry_fail（开启重试且最后一次
+      仍握手超时；RETRY_MAX=0 从未重试则不打）。
+    """
+    from config import settings
+
+    attempts = 1 + max(settings.PROVIDER_HANDSHAKE_RETRY_MAX, 0)
+    for attempt in range(attempts):
+        try:
+            content, usage = _consume_stream(
+                build(),
+                extract_delta=extract_delta,
+                terminal=terminal,
+                extract_usage=extract_usage,
+                extract_error=extract_error,
+            )
+            if attempt > 0:
+                default_registry().record_llm_handshake("retry_success")
+            return content, usage
+        except StreamHandshakeTimeout:
+            default_registry().record_llm_handshake("handshake_timeout")
+            if attempt >= attempts - 1:
+                if attempts > 1:
+                    default_registry().record_llm_handshake("retry_fail")
+                raise
+            logger.warning(
+                "流式握手期超时（未收到任何响应字节），%.1fs 后安全重试（第 %d/%d 次）",
+                _HANDSHAKE_RETRY_BACKOFF_SECONDS,
+                attempt + 1,
+                attempts - 1,
+            )
+            time.sleep(_HANDSHAKE_RETRY_BACKOFF_SECONDS)
+    raise AssertionError("unreachable: 重试循环每轮要么返回要么上抛")
+
+
 # --------------------------------------------------------------------------- #
 # 统一抽象基类
 # --------------------------------------------------------------------------- #
@@ -549,8 +608,8 @@ class OpenAIChatAdapter(BaseAdapter):
             return ((frame.get("choices") or [{}])[0].get("delta") or {}).get("content") or ""
 
         try:
-            content, usage = _consume_stream(
-                _http_post_sse(
+            content, usage = _consume_stream_handshake_retry(
+                lambda: _http_post_sse(
                     url,
                     payload=payload,
                     headers=headers,
@@ -571,8 +630,8 @@ class OpenAIChatAdapter(BaseAdapter):
                 raise
             payload.pop("stream_options", None)
             logger.info("网关不认 stream_options，去参数保流式重试")
-            content, usage = _consume_stream(
-                _http_post_sse(
+            content, usage = _consume_stream_handshake_retry(
+                lambda: _http_post_sse(
                     url,
                     payload=payload,
                     headers=headers,
@@ -759,8 +818,8 @@ class OpenAIResponsesAdapter(BaseAdapter):
                 return (frame.get("response") or {}).get("error") or frame
             return None
 
-        content, usage = _consume_stream(
-            _http_post_sse(
+        content, usage = _consume_stream_handshake_retry(
+            lambda: _http_post_sse(
                 url,
                 payload=payload,
                 headers=self._build_headers(),
@@ -966,8 +1025,8 @@ class AnthropicAdapter(BaseAdapter):
                 usage_acc["output_tokens"] = int(delta_usage.get("output_tokens") or 0)
             return dict(usage_acc) if usage_acc else None
 
-        content, usage = _consume_stream(
-            _http_post_sse(
+        content, usage = _consume_stream_handshake_retry(
+            lambda: _http_post_sse(
                 url,
                 payload=payload,
                 headers=headers,
