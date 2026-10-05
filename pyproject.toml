@@ -27,6 +27,9 @@ include = ["semantic*", "agent*", "compiler*", "eval*", "mock*", "config*", "pre
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: 真实 LLM 链路集成测试（依赖外部供应商，产生计费；需 LIVE_LLM_TESTS=1 显式开启，默认跳过）",
+]
 
 [tool.black]
 line-length = 100
