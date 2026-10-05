@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from contextvars import ContextVar
 from datetime import date
 from typing import Any
 
@@ -160,8 +161,20 @@ def _resolve_llm() -> Any | None:
         return None
 
 
+# 最近一次 _llm_json 失败原因摘要（contextvar：调用方在同节点内读取，透出降级水印；
+# 不改 _llm_json 签名——测试桩 monkeypatch 的是它本身，签名变更会破坏 8 处测试）
+_LLM_JSON_LAST_ERROR: ContextVar[str | None] = ContextVar("llm_json_last_error", default=None)
+
+
 def _llm_json(llm: Any, system: str, user: str) -> dict[str, Any] | None:
-    """调用 LLM 并清洗出 JSON 对象；失败返回 None（调用方走兜底）。"""
+    """调用 LLM 并清洗出 JSON 对象；失败返回 None（调用方走兜底）。
+
+    失败原因写入 ``_LLM_JSON_LAST_ERROR``：调用方在调用后读取（None = 成功），
+    用于降级水印的原因透出（诚实铁律——降级不可静默，用户须能区分
+    供应商故障与口径问题）。contextvar 仅在同节点同步执行段内消费，
+    跨线程/协程传播语义不影响该用法。
+    """
+    _LLM_JSON_LAST_ERROR.set(None)
     try:
         from agent.agent import extract_json
         from providers import chat_text
@@ -172,6 +185,7 @@ def _llm_json(llm: Any, system: str, user: str) -> dict[str, Any] | None:
         return extract_json(text)
     except Exception as exc:
         # LLM 调用/解析失败：兜底路径可继续，但故障必须可采集（服务可用性信号）
+        _LLM_JSON_LAST_ERROR.set(f"{type(exc).__name__}: {exc}"[:300])
         logger.warning(
             "LLM 调用或 JSON 解析失败，走确定性兜底",
             extra={"error": f"{type(exc).__name__}: {exc}"[:500]},
@@ -794,6 +808,8 @@ def planner_node(state: AgentState) -> AgentState:
             # LLM 调用/解析失败标记（十九期 M1）：拒答建议按成因分流；
             # 该标记仅在 blocked 路径存续（plan 产出时 scratchpad 被整体替换）
             state = state.apply(scratchpad=[*state.scratchpad, "[planner] llm-call-failed"])
+            # 失败原因随 state 存续（降级水印透出：区分供应商故障与口径问题）
+            state = state.apply(planner_llm_error=_LLM_JSON_LAST_ERROR.get())
         if payload:
             if payload.get("clarification"):
                 # 二轮硬拦截（M3-T2 Review Focus #3）：提示词是软约束，消费层
@@ -3004,13 +3020,17 @@ def _degradation_banner(state: AgentState, synth_llm_used: bool = False) -> str:
         )
     if state.answered_by != "heuristic":
         return ""
+    # 失败原因透出（诚实铁律）：让用户能区分供应商故障（超时/限流/解析失败）
+    # 与系统口径问题——planner_llm_error 为 None 说明走的是非 LLM 失败路径
+    reason = f"，原因：{state.planner_llm_error}" if state.planner_llm_error else ""
     if synth_llm_used:
         return (
-            "> ⚠️ **本次分析计划由离线规则引擎生成**（LLM 规划暂不可用），"
+            f"> ⚠️ **本次分析计划由离线规则引擎生成**（LLM 规划暂不可用{reason}），"
             "分析口径来自预置模板；报告叙述由 AI 综合生成，数值均经溯源校验。\n\n"
         )
     return (
-        "> ⚠️ **本次回答由离线兜底引擎生成**（LLM 规划不可用），"
+        "> ⚠️ **本次回答由离线兜底引擎生成**"
+        f"（LLM 规划不可用{reason}），"
         "分析口径与报告均为确定性规则结果，仅供参考。\n\n"
     )
 

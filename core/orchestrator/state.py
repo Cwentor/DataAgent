@@ -215,6 +215,11 @@ class AgentState(BaseModel):
     )
     # 报告产出方式："llm"（LLM 规划成功）| "heuristic"（兜底接管，报告需降级标注）| "blocked"（拒答）
     answered_by: str = Field(default="", description="规划产出方式（降级可见化标注依据）")
+    # LLM Planner 调用/解析失败原因摘要（降级水印透出）：用户须能区分供应商
+    # 故障（超时/限流）与口径问题——降级不可静默（诚实铁律）
+    planner_llm_error: str | None = Field(
+        default=None, description="LLM Planner 调用失败原因摘要（降级水印透出）"
+    )
     # LLM Planner 回传的意图（仅诊断可观测；L3 守卫不依赖它，用确定性 L1 重判）
     intent_type: str | None = Field(
         default=None,
