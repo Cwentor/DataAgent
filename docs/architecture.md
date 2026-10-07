@@ -31,9 +31,13 @@ flowchart LR
 
 **意图路由收敛与诚实兜底（十八期）**：澄清判定权上收 Planner（clarification 契约，支持选项式反问）；兜底执行准入制——仅诊断、基数（如「有多少个省份」）与硬锚定指标三类意图可确定性直答（附缺省口径说明），其余意图置 `blocked_reason` 走诚实拒答报告（原因 + 已识别锚点 + 能力清单，全程零 LLM 调用）；L3 意图-DSL 错位守卫在执行前拦截「基数意图 + 金额聚合」式错位查询；意图词表以 `FieldMeta.aliases` 为单一事实源。
 
+**枚举预路由确定性渲染（二十期）**：ENUMERATION 意图在编排入口即预路由为确定性渲染路径——全量行清单直答（超过阈值时截断分流），完全绕过 LLM 调用链路，零幻觉零延迟；降级水印区分「枚举预路由直答」与「LLM 故障降级」两种场景，用户侧文案分流可见。
+
 ## 三层同心圆取数架构（十九期）
 
 能力边界 = 治理管道边界（只读 + RLS + 敏感数据保护 + 资源上限），不是 DSL 契约表达力。LLM 产出的 SQL 永不直接执行：L1 确定性核（Planner 直产 DSL）覆盖常规问数；L2 提升闸门（`core/retrieval/sql_lift.py`，sqlglot）把超契约 SQL 转译回 DSL 契约由确定性编译器重编译——拒升 ≠ 拒答，精确清单喂回自愈 ≤2 次；L3 探索层（`core/retrieval/exploration.py`）把不可提升 SQL 经第四类审批门（allow_once / allow_session / deny）后在按 principal 生成的安全视图（`security/views.py`，禁列物理投影 + RLS 固化 + 连接加固）上受治理执行，报告醒目标注"探索查询产出"。分级透明作答：诚实 = 不虚构 + 假设透明（`assumptions` 契约字段，报告头部呈现），二轮歧义转带假设作答，拒答降为最后手段。沙箱 `connect/database` 调用永久封死——取数权只在执行层。
+
+**语义单一事实源（二十期 M-P2）**：`config/semantic.json` 是唯一静态业务事实源——字段/标签/别名/连接规则/指标口径（metrics[]，含 DSL shape）/支付口径（paid_filter）/缺省窗口/反思概念/枚举值标签/大区映射/维度成员种子等一律登记 json，`semantic/catalog.py` 为 import 时 json 直读（缺必要节快速失败），严禁在手写代码（heuristic/nodes/glossary/prompts/labels）里新增业务映射。
 
 ## 多角色架构对齐（pi-agent-harness）
 
@@ -219,9 +223,9 @@ flowchart LR
 
 三条互补的可观测通道，全部以 request_id / session_id 贯穿：
 
-1. **结构化日志**（`audit/logging.py`，JSON 单行输出）：级别纪律——`error` = 熔断 / 审计拒绝 / 自愈额度耗尽终止 / QA error 级发现（可告警）；`warning` = 可自愈报错 / 降级路径（NL→DSL 降级、profiling 降级、LLM 调用失败走兜底）；`info` = HITL 中断 / 编排完成摘要 / 自愈重写成功。覆盖执行层、检索层、编排层与 web 自愈链路的全部异常路径。
+1. **结构化日志**（`audit/logging.py`，JSON 单行输出）：级别纪律——`error` = 熔断 / 审计拒绝 / 自愈额度耗尽终止 / QA error 级发现（可告警）；`warning` = 可自愈报错 / 降级路径（NL→DSL 降级、profiling 降级、LLM 调用失败走兜底）；`info` = HITL 中断 / 编排完成摘要 / 自愈重写成功。覆盖执行层、检索层、编排层与 web 自愈链路的全部异常路径。可选 `RotatingFileHandler` 落盘（`AUDIT_LOG_FILE` 配置路径，二十期 P3）。
 2. **SSE 事件流**（九类事件）：plan_created / step_start / tool_start / tool_end（含审计预览与 guard/qa findings）/ reflection / hitl_request / artifact_emit / done / error——前端任务时间线与数据审计 Tab 的数据源。
-3. **审计快照与指标**（`audit/`）：查询审计记录、QPS / 分位数指标、自愈失败计数（`record_self_heal_failure`）。
+3. **审计快照与指标**（`audit/`）：查询审计记录、QPS / 分位数指标、自愈失败计数（`record_self_heal_failure`）。编排审计快照扩展 `answered_by` / `planner_llm_error` 字段（二十期 P3），区分枚举预路由直答与 LLM 故障降级两种场景；`/api/agent/run` 编排路由接入审计写入，审计闭环。
 
 更多运行步骤、配置与接口说明见：
 

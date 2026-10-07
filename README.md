@@ -66,6 +66,12 @@
     （原因 + 已识别锚点 + 能力清单，全程零 LLM 调用）；L3 意图-DSL 错位守卫执行前拦截"基数意图 + 金额聚合"式错位查询；
     Grounding 定向重试闭环——LLM 报告数值溯源校验（量纲归一化容差），不可溯源超阈值携修正指令重写 1 次，
     仍不达标降级确定性渲染；意图词表以 `FieldMeta.aliases` 为单一事实源，兜底接管降级标注全程可见
+  - **枚举预路由确定性渲染（二十期）**：ENUMERATION 意图在编排入口即预路由为确定性渲染路径——全量行清单直答
+    （超过阈值时截断分流），完全绕过 LLM 调用链路，零幻觉零延迟；降级水印区分"枚举预路由直答"与"LLM 故障降级"两种场景，
+    用户侧文案分流可见
+  - **语义单一事实源（二十期 M-P2）**：`config/semantic.json` 是唯一静态业务事实源——字段/标签/别名/连接规则/指标口径/
+    支付口径/缺省窗口/反思概念/枚举值标签/大区映射/维度成员种子一律登记 json，`semantic/catalog.py` import 时 json 直读，
+    严禁在手写代码（heuristic/nodes/glossary/prompts/labels）里新增业务映射
   - **HTTP 入口**：`POST /api/agent/run`（同步编排，鉴权 + HITL 澄清中断/恢复，resume_token 属主绑定）与
     `GET /api/v1/agent/chat/stream`（SSE 流式：plan_created / step_start / tool_start / tool_end /
     reflection / hitl_request / artifact_emit / done / error 九类事件实时推送，异常收敛为 error 事件不崩流）
@@ -84,7 +90,7 @@
   （供应商全部由用户添加，无预置条目），SSE 编排支持请求级 `provider_id` / `model_id`
   模型切换
 - **可解释交付**：DSL → 中文话术 + 图表自适应推荐，零前端框架
-- **可观测**：全链路审计快照、结构化 JSON 日志（request_id 贯穿，error=熔断/审计拒绝/额度耗尽、warning=可自愈/降级、info=流程转折）、QPS/分位数指标、DataQA 质检发现分级采集
+- **可观测**：全链路审计快照（含 `answered_by` / `planner_llm_error` 编排字段）、结构化 JSON 日志（request_id 贯穿，error=熔断/审计拒绝/额度耗尽、warning=可自愈/降级、info=流程转折；可选 RotatingFileHandler 落盘）、QPS/分位数指标、DataQA 质检发现分级采集
 
 ## 🚀 快速开始
 
@@ -271,10 +277,10 @@ curl -X POST http://127.0.0.1:8000/api/query \
 
 ```text
 DataAgent/
-├── semantic/     # 语义层：受限 DSL 契约 + 数据驱动字段目录
+├── semantic/     # 语义层：受限 DSL 契约 + 数据驱动字段目录（import 时读 config/semantic.json）
 ├── agent/        # NL -> DSL：LLM / 启发式双路径、意图路由、RAG、多轮记忆、重规划与反思
 ├── core/         # Data Agent 升级层：retrieval 门面（typed Tool + PII 脱敏 + 裸 SQL 网关 +
-│                 # 动态 profiling + DataQA 结果断言）、orchestrator（LangGraph 六节点编排 +
+│                 # 动态 profiling + DataQA 结果断言 + SQL 提升闸门 + 探索执行器）、orchestrator（LangGraph 六节点编排 +
 │                 # 重规划错误上下文）、sandbox（AST 守卫 + 限权 runner + Docker/子进程后端）、
 │                 # skills（熵下钻 / 分解树 / DTW / HW / Shapley）
 ├── providers/    # 多模型供应商网关：四协议适配 / API Key 加密存储 / 连通性探测
@@ -282,13 +288,14 @@ DataAgent/
 ├── exec/         # SQL 执行层：只读 AST 校验 / 执行前审计（笛卡尔积熔断）/ 超时 / 熔断 / 连接池 / 自愈
 ├── tools/        # 多工具编排：查数 / 趋势 / 导出 / 口径解释
 ├── present/      # 解释 + 图表自适应推荐
-├── security/     # 权限：表级 / 列级 / 行级 RLS（配置驱动）
+├── security/     # 权限：表级 / 列级 / 行级 RLS（配置驱动）+ 安全视图层
 ├── auth/         # 身份认证：JWT + Session + 登录限流
-├── audit/        # 审计快照 + 可观测性指标
+├── audit/        # 审计快照 + 可观测性指标 + 结构化日志
 ├── web/          # Web UI / HTTP 服务 / 异步查询 / 编排端点
-├── eval/         # Golden 评测（25 用例，双模式）+ 意图路由评测（答非所问率防回归）
-├── mock/         # 确定性 DuckDB 数仓
-├── tests/        # 48 个测试文件（766 用例，含意图路由 / 诚实拒答 / Grounding 溯源回归）
+├── eval/         # Golden 评测（31 条 Gmall 用例，双模式）+ 意图路由评测（12 用例，含枚举预路由）
+├── mock/         # 确定性 DuckDB 数仓（Gmall 电商模型：种子提取 / 会话行为链模拟 / 埋点 JSON 日志 / 解析入仓）
+├── tests/        # 59 个测试文件（与源码包一一对应 14 个子目录：agent / audit / auth / compiler / core / eval / exec /
+│                 #   persistence / present / providers / security / semantic / tools / web）
 └── docs/         # 详细文档 + 评审归档
 ```
 
@@ -310,9 +317,9 @@ DataAgent/
 | 权限与认证 `security/` `auth/` | 表 / 列 / 行级 RLS（配置驱动）+ 自研 JWT（HMAC-SHA256 签名 + 恒定时间比较）+ PBKDF2 密码哈希 | 全部标准库实现（零 pyjwt / cryptography 依赖）；生成前作用域收窄 + 生成后策略校验构成双防线 |
 | 模型网关 `providers/` | 四协议适配（OpenAI Chat / Responses、Anthropic、Gemini）+ JSON Mode 抹平 + 自研 Key 加密（HMAC-SHA256 密钥派生 + 流加密 + 篡改校验标签） | 一套契约抹平供应商差异；Key 落盘加密、列表零回传，SSE 编排支持请求级模型切换免重启 |
 | Web 层 `web/` | FastAPI + uvicorn 服务层（十七期 M4 单引擎收敛，依赖精确 pin）+ 原生 JS 零前端框架 + vendored ECharts / PrismJS + SSE 流式 | 服务层借力成熟框架的并发与 SSE 原语并精确 pin + 全量回归门；前端零构建链，>50 步窗口化虚拟渲染保证长会话流畅 |
-| 数仓 `mock/` | DuckDB 确定性数仓（`AS_OF_DATE=2024-06-30`、随机种子 42） | 嵌入式零部署；评测与演示完全可复现 |
-| 评测 `eval/` | Golden Dataset（25 用例，oracle / agent 双模式）+ 意图路由评测（8 用例行为断言）+ 确定性锚点 | 同一份数据同时考核编译器上限（oracle）与端到端正确率（agent）；答非所问率与虚构风险进 CI 持续监控 |
-| 质量保障 `tests/` | pytest（678 用例）+ black + ruff + CI | 契约 / 编译 / 审计 / 自愈 / 可观测全路径回归覆盖 |
+| 数仓 `mock/` | DuckDB 确定性数仓（Gmall 电商模型：业务表 + 埋点日志解析入仓，`AS_OF_DATE=2025-12-31`、随机种子 42） | 嵌入式零部署；评测与演示完全可复现 |
+| 评测 `eval/` | Golden Dataset（31 条 Gmall 用例，oracle / agent 双模式，断言分层 contract/snapshot）+ 意图路由评测（12 用例行为断言，含枚举预路由直答）+ 确定性锚点 | 同一份数据同时考核编译器上限（oracle）与端到端正确率（agent）；答非所问率与虚构风险进 CI 持续监控 |
+| 质量保障 `tests/` | pytest（59 个测试文件，测试目录与源码包一一对应 14 个子目录）+ black + ruff + CI | 契约 / 编译 / 审计 / 自愈 / 可观测全路径回归覆盖 |
 
 ---
 
@@ -326,7 +333,7 @@ DataAgent/
 | [Web UI 与 API](docs/api.md) | 端点、鉴权与查询示例 |
 | [安全模型](docs/security.md) | 认证、数据权限、演示账号 |
 | [质量保障](docs/quality.md) | Golden 评测、CI、可复现锚点 |
-| [演进里程碑](docs/roadmap.md) | 十八期能力演进 |
+| [演进里程碑](docs/roadmap.md) | 二十期能力演进 |
 | [生产就绪评审](./docs/reviews/20260905-production-readiness-audit.md) | 生产就绪度评估与整改项 |
 | [评审归档](./docs/reviews/README.md) | 历次评审落盘文件统一归档目录 |
 | [工程约定](./AGENTS.md) | 面向 AI 协作者的运行环境与命令 |
