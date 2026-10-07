@@ -62,6 +62,13 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
 - metrics: [{"kind": "aggregate", "field": "<语义字段>", "agg": "sum|count|avg|min|max|count_distinct", "alias": "<英文标识符>"}]
 - 纯维度投影（维度取值枚举，如"列出全部品牌"）：metrics 允许为空数组，只给
   dimensions（契约层校验投影形态；无指标时严禁再配 having/top_n/fill_gaps）
+- **全局 Top N（如"销售量 Top10 商品"）的唯一正确形态是顶层 order_by + limit**：
+  order_by: [{"field": "<指标别名或维度字段名>", "direction": "asc|desc"}]，
+  limit: <N>（1~10000 整数）。严禁用 top_n 表达全局 Top N。
+- top_n（分组 Top-N，如"每省 GMV Top3 品类"）：仅限"按某维度分组后每组取前 N"，
+  必须写成对象，三个键缺一不可：
+  {"n": <N>, "partition_by": ["<分组维度字段>"], "order_by": [{"field": "<指标别名>", "direction": "desc"}]}
+  —— 严禁写成裸整数 N、严禁只写 {"field": ..., "n": ...}（field 不是 top_n 的合法键）
 - having（聚合后过滤，如"只要GMV超过1000的品类"）：[{"field": "<本计划内指标别名>", "operator": "gt|gte|lt|lte|eq|ne", "value": <数值>}]
   —— field 只能引用同一 DSL 的 metrics 别名，且必须带 dimensions 分组；
   与窗口指标/分组 Top-N/日期补零/同比环比互斥
@@ -170,7 +177,9 @@ REFLECTOR_SYSTEM = """你是数据分析 Agent 的反思器（Reflector/Critic�
   数据/分析（可执行），否则判 sufficient。
 
 # 检查清单
-1. 完整性：问题要求的每个子问题都有数据支撑（不是猜测）；
+1. 完整性：问题要求的每个子问题都有数据支撑（不是猜测）；用户要求 Top N 排名时，
+   列表必须恰好 N 条，缺第 N 名即 insufficient（数据已在结果集中而未完整呈现属于
+   可补齐的缺口，判 replan）；
 2. 正确性：数值是否自洽（分解贡献之和≈总偏差、占比∈[0,1]、无除零/空值异常）；
 3. 现实一致性：结论与常识/业务逻辑是否冲突（如份额>100%、负的销量）。
 
@@ -231,6 +240,16 @@ PLANNER_FEWSHOT = """# 示例
 用户: "分析一下 GMV 为什么下滑"（未点名任何维度）
 输出要点：s1 取 **候选维度池**（province + category 联合明细，而非只取 province）；
 s3 由信息增益裁决主因维度并在结论中写明入选依据——**严禁默认只做分省**。
+
+用户: "2023年销售量Top10的商品"（全局 Top N，非分组）
+输出要点：**全局 Top N 一律用顶层 order_by + limit，严禁 top_n**；
+s1 dsl 示例：
+{"metrics": [{"kind": "aggregate", "field": "sku_num", "agg": "sum", "alias": "sales_volume"}],
+ "dimensions": [{"field": "sku_name"}],
+ "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
+ "time_filter": {"range_type": "absolute", "absolute": {"start": "2023-01-01", "end": "2024-01-01"}},
+ "order_by": [{"field": "sales_volume", "direction": "desc"}],
+ "limit": 10}
 
 # 诊断规划的口径一致性纪律（审计修复 R2）：归因拆分（按地区/品类等维度）
 必须继承总览口径——
@@ -316,6 +335,8 @@ SYNTHESIZER_SYSTEM = """你是一名资深商业数据分析师。根据上游�
 严禁凭空引入材料未下钻的维度；若材料给出了维度入选依据（信息增益/集中度），\
 必须一并说明"为何下钻该维度"，让读者知道入选理由而非凭空冒出一个维度；
 6. 输出纯 Markdown 正文（小节标题用 ###），不要用代码围栏包裹，不要输出 JSON。
+7. **列表完整性**：用户要求 Top N 排名列表时，必须完整呈现全部 N 条，严禁因
+   篇幅截断第 N 名——截断即判定为未回答问题（反思会据此触发重规划）。
 """
 
 # 降级 Summarizer（自愈额度耗尽时的最后一道出口；带惩罚约束）
