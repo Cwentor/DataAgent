@@ -105,3 +105,16 @@ json 中声明），一行推导替换两处字面量。
 | LOW | 规格 2.2 补 `_SCALAR_FIELD_AGG` 与 price 特判的豁免声明或真移除 |
 | LOW | reset_defaults 改重读 json（或修订规格表述） |
 | PENDING | 执行 Web LLM 路径手测并登记；sql_lift._COLUMN_INDEX 登记观察 |
+
+## 8. 收口记录（2026-10-07 同日）
+
+| 事项 | 处置结果 |
+|---|---|
+| §4.1 两期诊断窗口硬编码（MEDIUM） | 已修：`_diagnostic_dsl_pair` 从 `catalog.DEFAULT_WINDOW` 按 `two_period_midpoint` 中点推导（未声明标记时两期共用整窗）；新增 `test_diagnostic_dsl_pair_default_window_from_catalog` |
+| §4.2 `_SCALAR_FIELD_AGG` 豁免 | 规格已补豁免声明（语义不同不可从 metrics shape 派生，代码内注释为准） |
+| §4.3 price 特判 | 已修：semantic.json `fields[].non_aggregatable` 登记（price=true），`FieldMeta` 增 `non_aggregatable` 位，intent.py 按 meta 派生分组；`test_capability_catalog_groups_price_separately` 增加单一事实源断言 |
+| §4.4 reset_defaults | 已修：`semantic/catalog.py` 新增 `apply_builtin()` 单一派生路径（import 初始化与 reset 共用；容器原地 clear/update 保对象身份，import 绑定消费方不 stale），`reset_defaults` 重读 json；新增 `test_reset_defaults_rereads_json` |
+| §5.3 Web LLM 路径手测 | 未执行（需真实供应商），仍欠 |
+| §5.1 _COLUMN_INDEX | 已在 sql_lift.py 注明约束（纯 schema 索引可 import 绑定；引入业务语义须改动态读） |
+
+同步更新：规格 §2.2 豁免声明 + 新增 §6 兑现状态节。

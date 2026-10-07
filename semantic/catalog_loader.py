@@ -30,7 +30,8 @@ from config import settings
 from semantic import catalog
 from semantic.catalog import FieldMeta, JoinRule
 
-# 内置默认目录快照（reset_defaults / 无覆写回退使用）
+# 内置默认目录快照（overlay 缺省回退 / 无覆写构建使用；reset_defaults 已改为
+# 重读 semantic.json，不再回放本快照）
 _DEFAULT_COLUMNS = dict(catalog.COLUMNS)
 _DEFAULT_ALIASES = dict(catalog.ALIASES)
 _DEFAULT_FACT_TABLE = catalog.FACT_TABLE
@@ -319,7 +320,14 @@ def _build_from_overlay(
             aliases = default_meta.aliases if default_meta is not None else ()
         else:
             aliases = tuple(str(a) for a in aliases_raw)
-        columns[str(name)] = FieldMeta(table, column, dtype, label=label, aliases=aliases)
+        columns[str(name)] = FieldMeta(
+            table,
+            column,
+            dtype,
+            label=label,
+            aliases=aliases,
+            non_aggregatable=bool(spec.get("non_aggregatable", False)),
+        )
 
     aliases = {str(k): str(v) for k, v in dict(overlay.get("aliases", {})).items()}
     fact_table = str(overlay.get("fact_table", _DEFAULT_FACT_TABLE))
@@ -512,41 +520,13 @@ def refresh_catalog(
 
 
 def reset_defaults() -> None:
-    """恢复内置默认目录（测试隔离用）。"""
-    catalog.COLUMNS.clear()
-    catalog.COLUMNS.update(_DEFAULT_COLUMNS)
-    catalog.ALIASES.clear()
-    catalog.ALIASES.update(_DEFAULT_ALIASES)
-    catalog.JOIN_RULES.clear()
-    catalog.JOIN_RULES.update(_DEFAULT_JOIN_RULES)
-    catalog.FACT_JOIN_RULES.clear()
-    catalog.FACT_JOIN_RULES.update(_DEFAULT_FACT_JOIN_RULES)
-    catalog.FACT_TABLE = _DEFAULT_FACT_TABLE
-    catalog.FACT_TABLES = _DEFAULT_FACT_TABLES
-    catalog.DIMENSION_MEMBERS.clear()
-    catalog.DIMENSION_MEMBERS.update(_DEFAULT_DIMENSION_MEMBERS)
-    catalog.QUERY_DOMAINS.clear()
-    catalog.QUERY_DOMAINS.update({a: dict(r) for a, r in _DEFAULT_QUERY_DOMAINS.items()})
-    catalog.TABLE_LABELS.clear()
-    catalog.TABLE_LABELS.update(_DEFAULT_TABLE_LABELS)
-    catalog.DRILLDOWN_DIM_FIELDS = _DEFAULT_DRILLDOWN_DIM_FIELDS
-    catalog.REGION_PROVINCE_MAPPING.clear()
-    catalog.REGION_PROVINCE_MAPPING.update(_DEFAULT_REGION_PROVINCE_MAPPING)
-    catalog.DIMENSION_MEMBER_FIELDS = _DEFAULT_DIMENSION_MEMBER_FIELDS
-    catalog.METRICS = _DEFAULT_METRICS
-    catalog.COUNT_ENTITIES = _DEFAULT_COUNT_ENTITIES
-    catalog.PAID_FILTER = dict(_DEFAULT_PAID_FILTER)
-    catalog.DEFAULT_WINDOW = dict(_DEFAULT_DEFAULT_WINDOW)
-    catalog.REFLECTOR_CONCEPTS.clear()
-    catalog.REFLECTOR_CONCEPTS.update(_DEFAULT_REFLECTOR_CONCEPTS)
-    catalog.OUT_OF_SCOPE_CONCEPTS = _DEFAULT_OUT_OF_SCOPE_CONCEPTS
-    catalog.UNDEFINED_METRICS = _DEFAULT_UNDEFINED_METRICS
-    catalog.VALUE_LABELS.clear()
-    catalog.VALUE_LABELS.update(_DEFAULT_VALUE_LABELS)
-    catalog.METRIC_ALIASES.clear()
-    catalog.METRIC_ALIASES.update(_DEFAULT_METRIC_ALIASES)
-    catalog.DIMENSION_MEMBERS_SEED.clear()
-    catalog.DIMENSION_MEMBERS_SEED.update(_DEFAULT_DIMENSION_MEMBERS_SEED)
+    """恢复内置默认目录（测试隔离用）。
+
+    重读 config/semantic.json（不回放 import 时快照）：运行中编辑 json 后
+    reset 即时生效，与"单一事实源"约定一致。派生逻辑唯一入口 =
+    catalog.apply_builtin，严禁在本文件维护第二份派生。
+    """
+    catalog.apply_builtin(catalog._load_builtin())
 
 
 def main() -> None:

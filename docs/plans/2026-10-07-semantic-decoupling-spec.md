@@ -66,7 +66,9 @@
 - `heuristic.py`：`_metrics` 改**表驱动**（遍历 metrics[].aliases 匹配 → 按 shape 产 DSL；
   流量域/计数实体从 json 读）；`_DIM_KEYWORDS` 改读 catalog aliases；`_HAVING_FIELD_ALIAS`
   从 metrics 派生；窗口/TopN/时间主轴等**问法层逻辑保留**；
-- `nodes.py`：`_SCALAR_FIELD_AGG` → json；`_SCALAR_ANCHOR_TABLE` 删除（读 catalog）；
+- `nodes.py`：`_SCALAR_FIELD_AGG` 保留手写（**豁免声明**：order_id 标量兜底语义用 count
+  而非 metrics 的 count_distinct，两者语义不同、不可从 metrics shape 派生——见
+  nodes.py 内注释）；`_SCALAR_ANCHOR_TABLE` 删除（读 catalog）；
   `_REFLECTOR_*` 三常量 → json；`_DIMENSION_LABELS` → catalog label；缺省窗口字面量 →
   `default_window` 推导；'1002' 五处 → `paid_filter`；
 - `glossary.py` 变适配层（GLOSSARY/METRIC_TERMS 从 catalog.METRICS 派生，保留
@@ -78,7 +80,8 @@
   VALUE_LABELS 从 json；
 - 问法层词表单源化：memory/tool_agent 重复的趋势/时间等词表合并到 `agent/lexicon.py`
   （独立于 semantic.json——问法层非业务事实）；
-- `intent.capability_catalog_lines` 从 json 派生（去 price 特判）；
+- `intent.capability_catalog_lines` 从 json 派生：标价类分组依据 `fields[].non_aggregatable`
+  标记（如商品标价），不在 intent.py 维护字段字面量；
 - 修 import 值绑定 stale：`nodes._DIAGNOSTIC_DIM_POOL`、`sql_lift._MAIN_TABLE` 改函数内动态读。
 
 ### 2.3 守护网
@@ -109,3 +112,19 @@ golden 31/31（oracle + 离线 agent）+ `test_agent.py` 的 heuristic 全量 go
    "关键词→指标形态"，小步提交 + 全量 golden 断言守护；
 2. prompt 渲染变化影响 LLM 路径 → golden/oracle 不经 prompt，离线评测不受影响；P1 后手测 Web；
 3. json 直读后配置损坏面扩大 → loader 严格校验 + 缺节报错 + 测试覆盖坏配置路径。
+
+## 6. 兑现状态（2026-10-07 评审收口后）
+
+规格落盘晚于实现（实现在 e147927..6b2a24e），评审报告
+`docs/reviews/20261007-plan-review-semantic-decoupling-spec.md` 复跑门禁全绿并清出 4 项偏差，
+当日收口：
+
+| 偏差 | 处置 |
+|---|---|
+| [中] nodes.py 两期诊断缺省窗口硬编码（json 有 two_period_midpoint 但消费方不读） | 已修：从 `catalog.DEFAULT_WINDOW` 按中点推导，未声明切分标记时两期共用整窗；补推导测试 |
+| [低] `_SCALAR_FIELD_AGG` 未迁 json | 规格补豁免声明（§2.2，语义不同不可从 metrics shape 派生） |
+| [低] intent.py `price` 字面量特判 | 已修：`fields[].non_aggregatable` 登记进 semantic.json，`FieldMeta` 增标记位，intent 按 meta 派生分组 |
+| [低] reset_defaults 回放 import 快照不重读 json | 已修：`catalog.apply_builtin()` 单一派生路径（import 与 reset 共用，容器原地变更保对象身份），reset 重读 json；补测试 |
+
+观察项：`sql_lift._COLUMN_INDEX` import 绑定为纯 schema 索引，可接受（代码内已注明约束）；
+Web LLM 路径手测仍欠一次。
