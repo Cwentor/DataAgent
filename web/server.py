@@ -136,7 +136,9 @@ def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
     import uvicorn
 
-    uvicorn.run("web.api:app", host=host, port=port, log_level="warning")
+    # log_config=None：跳过 uvicorn 的 dictConfig，保留 setup_logging 配置的
+    # stderr + RotatingFileHandler（否则 root logger 被重置，AUDIT_LOG_FILE 落盘失效）
+    uvicorn.run("web.api:app", host=host, port=port, log_level="warning", log_config=None)
 
 
 if __name__ == "__main__":
