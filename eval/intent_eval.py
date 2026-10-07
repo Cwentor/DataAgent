@@ -8,7 +8,8 @@
 - refusal => 报告含"无法作答"（诚实拒答 + 能力清单）；2026-09 分层降级起，
   LLM 失联时枚举未命中的筛选取值走选项式澄清挂起（零查询/零 LLM/无报告），
   与 blocked 拒答同属"不答非所问"的诚实不产出终态，同样判 PASS。
-- list_answer => 维度取值枚举直答（十九期 M1）：报告含结果小节与指定取值。
+- list_answer => 维度取值枚举直答（十九期 M1 + 二十期 P1 确定性渲染）：
+  报告含"维度取值清单"小节与指定取值。
 
 用法：
     python -m mock.init_duckdb   # 若数仓文件不存在
@@ -73,12 +74,13 @@ def main() -> int:
                 and not report
             )
         elif expect == "list_answer":
-            # 十九期 M1：维度取值枚举直答——报告含结果小节与指定取值，
-            # 不得出现拒答文案（多行清单经表格渲染，非"查询答案："单值形态）
+            # 十九期 M1 + 二十期枚举直答（P1）：维度取值枚举直答——报告含
+            # "维度取值清单"小节（确定性渲染，非"查询答案："单值形态）与指定取值，
+            # 不得出现拒答文案
             expected_contains = case.get("expected_contains")
             ok = (
                 trace.phase == "done"
-                and "查询结果" in report
+                and "维度取值清单" in report
                 and "无法作答" not in report
                 and (expected_contains is None or expected_contains in report)
             )
