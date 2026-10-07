@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import logging.handlers
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -73,14 +74,24 @@ def get_request_id() -> str:
     return _request_id.get()
 
 
-def setup_logging(level: int = logging.INFO) -> None:
-    """把根 logger 配成结构化 JSON 输出（幂等）。"""
+def setup_logging(level: int = logging.INFO, log_file: str | None = None) -> None:
+    """把根 logger 配成结构化 JSON 输出（幂等）。
+
+    log_file 非空时追加 RotatingFileHandler 落盘（P3 可观测性：服务进程退出后
+    日志不丢）；为空时仅 stderr。已有 JsonFormatter handler 时直接返回（幂等）。
+    """
     root = logging.getLogger()
     if any(isinstance(h.formatter, JsonFormatter) for h in root.handlers):
         return
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(JsonFormatter())
     root.addHandler(handler)
+    if log_file:
+        fh = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10_000_000, backupCount=5, encoding="utf-8"
+        )
+        fh.setFormatter(JsonFormatter())
+        root.addHandler(fh)
     root.setLevel(level)
 
 

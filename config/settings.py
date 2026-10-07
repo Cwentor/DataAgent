@@ -186,6 +186,9 @@ AUDIT_LOG_PATH: Path = AUDIT_DIR / "audit.jsonl"
 AUDIT_DB_PATH: Path = AUDIT_DIR / "audit.duckdb"
 # 结构化日志级别（web.server 启动时 setup_logging 使用）
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+# 结构化日志落盘路径（P3 可观测性）：None=仅 stderr，进程退出日志即失；
+# 配置路径时追加 RotatingFileHandler（10MB × 5 份），服务重启后日志可回溯
+AUDIT_LOG_FILE: str | None = os.getenv("AUDIT_LOG_FILE") or None
 
 # --------------------------------------------------------------------------- #
 # 统一身份认证（P0）—— 见 auth/ 包
