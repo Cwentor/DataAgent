@@ -2,14 +2,16 @@
 
 链路：自然语言 -> DSL (run_pipeline 插槽) -> 确定性 SQL (compiler) -> DuckDB 执行。
 
-对每个 golden 用例做两类断言：
-1. 结构断言：run_pipeline 返回的 QueryDSL 与预期 DSL 完全一致；
-2. 结果断言：编译出的 SQL 与 golden 标准 SQL 在 DuckDB 执行后结果集完全一致
-   （列名一致 + 行集一致，sha256 结果哈希便于回归比对）。
+对每个 golden 用例做分层断言（语义层去耦 M-P0）：
+1. 契约断言（零数据依赖）：run_pipeline 返回的 QueryDSL 与预期 DSL 完全一致，
+   且编译出的 SQL 与 golden 标准 SQL 归一化后一致（dsl_ok + sql_ok = contract_ok）；
+2. 快照断言（依赖数仓快照）：编译 SQL 与 golden 标准 SQL 在 DuckDB 执行后
+   结果集完全一致（列名一致 + 行集一致，sha256 结果哈希便于回归比对）。
 
-用法：
-    python -m eval.eval_runner              # 连接项目根目录的 duckdb 文件跑全量
-    python -m eval.eval_runner --print-sql  # 额外打印每个用例的编译 SQL
+CLI 入口：
+    python -m eval.eval_runner                      # 全量（契约 + 快照）
+    python -m eval.eval_runner --skip-snapshot     # 快速契约回归（零数据依赖）
+    python -m eval.eval_runner --print-sql         # 额外打印每个用例的编译 SQL
 """
 
 from __future__ import annotations
@@ -90,14 +92,22 @@ def _normalize_sql(sql: str) -> str:
 # --------------------------------------------------------------------------- #
 @dataclass
 class CaseReport:
-    """单个用例的评测报告：DSL / 结果 / SQL 三重校验与哈希。"""
+    """单个用例的评测报告：DSL / 结果 / SQL 三重校验与哈希。
+
+    断言分层（语义层去耦 M-P0）：contract_ok = dsl_ok + sql_ok（零数据依赖，
+    只校验 DSL 契约与确定性编译）；snapshot_ok = result_ok（依赖数仓快照，
+    同库差分比对）。snapshot_skipped 标记 --skip-snapshot 快速契约回归路径。
+    """
 
     id: str
     question: str
-    dsl_ok: bool
-    result_ok: bool
-    sql_ok: bool
-    hash: str
+    dsl_ok: bool = False
+    result_ok: bool = False
+    sql_ok: bool = False
+    contract_ok: bool = False  # dsl_ok + sql_ok，零数据依赖
+    snapshot_ok: bool = False  # result_ok，依赖数仓快照
+    snapshot_skipped: bool = False  # --skip-snapshot 时未执行快照断言
+    hash: str = ""
     error: str | None = None
     compiled_sql: str = ""
     golden_sql: str = ""
@@ -110,6 +120,8 @@ class EvalSummary:
     total: int = 0
     passed: int = 0
     failed: int = 0
+    contract_failed: int = 0  # 契约断言失败数（零数据依赖分节）
+    snapshot_failed: int = 0  # 快照断言失败数（数仓快照分节，跳过不计失败）
     reports: list[CaseReport] = field(default_factory=list)
 
 
@@ -117,8 +129,13 @@ def evaluate_case(
     conn: duckdb.DuckDBPyConnection,
     item: dict[str, Any],
     pipeline: Callable[[str], QueryDSL] = run_pipeline,
+    skip_snapshot: bool = False,
 ) -> CaseReport:
-    """评测单个用例。"""
+    """评测单个用例。
+
+    skip_snapshot=True 时只做契约断言（DSL 结构 + SQL 编译），不执行任何
+    SQL、不计算结果哈希——快速契约回归路径，快照断言标记跳过、不计失败。
+    """
     case_id = item.get("id", "?")
     question = item["question"]
     expected_dsl = QueryDSL.model_validate(item["dsl"])
@@ -127,10 +144,6 @@ def evaluate_case(
     report = CaseReport(
         id=case_id,
         question=question,
-        dsl_ok=False,
-        result_ok=False,
-        sql_ok=False,
-        hash="",
         golden_sql=golden_sql,
     )
 
@@ -144,6 +157,14 @@ def evaluate_case(
         report.compiled_sql = compiled_sql
         report.sql_ok = _normalize_sql(compiled_sql) == _normalize_sql(golden_sql)
 
+        # 契约断言（零数据依赖）：DSL 结构 + SQL 编译
+        report.contract_ok = report.dsl_ok and report.sql_ok
+
+        if skip_snapshot:
+            # 快照断言跳过（--skip-snapshot 快速契约回归）：不执行 SQL
+            report.snapshot_skipped = True
+            return report
+
         # 3. 结果断言：标准 SQL 与编译 SQL 执行结果一致。
         #    无 ORDER BY 时行序不确定，因此按"列名 + 排序后行集"做集合判等；
         #    对带 ORDER BY 的用例（如 Top N）排序判等依然正确。
@@ -151,6 +172,7 @@ def evaluate_case(
         c_cols, c_rows = execute(conn, compiled_sql)
         report.hash = result_hash(c_cols, c_rows)
         report.result_ok = (g_cols == c_cols) and (sorted(g_rows) == sorted(c_rows))
+        report.snapshot_ok = report.result_ok
     except Exception as exc:  # 有意捕获任意异常，以便逐用例呈现错误
         report.error = f"{type(exc).__name__}: {exc}"
 
@@ -164,6 +186,7 @@ def evaluate_multi_turn_case(
     conn: duckdb.DuckDBPyConnection,
     item: dict[str, Any],
     run_one: Callable[[str, str], dict[str, Any]] | None = None,
+    skip_snapshot: bool = False,
 ) -> CaseReport:
     """评测多轮对话序列用例。
 
@@ -172,6 +195,8 @@ def evaluate_multi_turn_case(
 
     run_one(query, session_id) -> result dict（复用 conn 与唯一的 session_id，
     保证各用例会话状态互不污染；返回结果中须含 dsl / sql / error）。
+
+    skip_snapshot=True 时每轮只校验 DSL/SQL 契约，不执行结果集差分。
     """
     case_id = item.get("id", "?")
     turns = item.get("turns", [])
@@ -179,10 +204,7 @@ def evaluate_multi_turn_case(
     report = CaseReport(
         id=case_id,
         question=f"[多轮x{len(turns)}] {first_q}",
-        dsl_ok=False,
-        result_ok=False,
-        sql_ok=False,
-        hash="",
+        golden_sql=item.get("sql", ""),
     )
     if not turns:
         report.error = "multi_turn 用例缺少 turns"
@@ -212,6 +234,8 @@ def evaluate_multi_turn_case(
                 report.error = f"第{turn_no}轮 SQL 不一致"
                 report.sql_ok = False
                 return report
+            if skip_snapshot:
+                continue
             g_cols, g_rows = execute(conn, golden_sql)
             c_cols, c_rows = execute(conn, compiled_sql)
             report.hash = result_hash(c_cols, c_rows)
@@ -220,7 +244,13 @@ def evaluate_multi_turn_case(
                 report.result_ok = False
                 return report
 
-        report.dsl_ok = report.sql_ok = report.result_ok = True
+        report.dsl_ok = report.sql_ok = True
+        report.contract_ok = True
+        if skip_snapshot:
+            report.snapshot_skipped = True
+        else:
+            report.result_ok = True
+            report.snapshot_ok = True
     except Exception as exc:  # 有意捕获，逐用例呈现错误
         report.error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -231,6 +261,9 @@ def evaluate_multi_turn_case(
             default_session_store().clear(session_id, "eval")
         except Exception:
             pass
+    # 短路失败路径：契约/快照分节随对应标志位如实呈现
+    report.contract_ok = report.dsl_ok and report.sql_ok
+    report.snapshot_ok = report.result_ok
     return report
 
 
@@ -273,8 +306,12 @@ def _force_offline_routing() -> None:
 def evaluate_all(
     conn: duckdb.DuckDBPyConnection,
     pipeline: Callable[[str], QueryDSL] = run_pipeline,
+    skip_snapshot: bool = False,
 ) -> EvalSummary:
     """遍历 Golden 数据集逐条评测（单轮 + 多轮），汇总通过率。
+
+    skip_snapshot=True 时只做契约断言（dsl_ok + sql_ok，零数据依赖），
+    快照断言标记跳过、不计失败——快速契约回归路径。
 
     十九期 M3：M2 临时引入的 contract-pending SKIP 豁免已移除——确定性
     启发式已具备 HAVING / 表达式指标产出能力，agent 模式全量覆盖。
@@ -283,24 +320,39 @@ def evaluate_all(
     for item in load_golden():
         summary.total += 1
         if item.get("type") == "multi_turn":
-            report = evaluate_multi_turn_case(conn, item)
+            report = evaluate_multi_turn_case(conn, item, skip_snapshot=skip_snapshot)
         else:
-            report = evaluate_case(conn, item, pipeline=pipeline)
+            report = evaluate_case(conn, item, pipeline=pipeline, skip_snapshot=skip_snapshot)
         summary.reports.append(report)
-        ok = report.dsl_ok and report.result_ok and report.sql_ok
+        # 通过/失败语义不变：任一断言失败即失败；skip_snapshot 时快照断言跳过不计失败
+        ok = report.dsl_ok and report.sql_ok and (report.result_ok or report.snapshot_skipped)
         if ok and report.error is None:
             summary.passed += 1
         else:
             summary.failed += 1
+        # 断言分层计数：契约分节（零数据依赖）+ 快照分节（数仓快照）
+        if not report.contract_ok:
+            summary.contract_failed += 1
+        if not report.snapshot_skipped and not report.snapshot_ok:
+            summary.snapshot_failed += 1
     return summary
 
 
 def _print_summary(summary: EvalSummary, print_sql: bool = False) -> None:
     print("=" * 90)
     print(f"评测结果: {summary.passed}/{summary.total} 通过")
+    print(f"契约断言（零数据依赖）: {summary.total - summary.contract_failed}/{summary.total} 通过")
+    skipped = sum(1 for r in summary.reports if r.snapshot_skipped)
+    if skipped:
+        print(f"快照断言（数仓快照）: 跳过 {skipped} 条（--skip-snapshot 快速契约回归）")
+    else:
+        print(
+            f"快照断言（数仓快照）: {summary.total - summary.snapshot_failed}/{summary.total} 通过"
+        )
     print("=" * 90)
     for r in summary.reports:
-        ok = r.dsl_ok and r.result_ok and r.sql_ok and r.error is None
+        # skip_snapshot 时快照断言跳过不计失败（与 evaluate_all 判定口径一致）
+        ok = r.dsl_ok and r.sql_ok and (r.result_ok or r.snapshot_skipped) and r.error is None
         flag = "PASS" if ok else "FAIL"
         print(f"[{flag}] {r.id}  {r.question}")
         if not ok:
@@ -333,9 +385,14 @@ def _lock_determinism() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """命令行入口：--pipeline 选择 oracle/agent，--print-sql 输出编译 SQL。"""
+    """命令行入口：--pipeline 选择 oracle/agent，--skip-snapshot 快速契约回归。"""
     parser = argparse.ArgumentParser(description="DataAgent Golden Dataset 评测")
     parser.add_argument("--print-sql", action="store_true", help="打印每个用例的编译 SQL")
+    parser.add_argument(
+        "--skip-snapshot",
+        action="store_true",
+        help="只做契约断言（dsl_ok + sql_ok，零数据依赖），跳过快照断言——快速契约回归",
+    )
     parser.add_argument(
         "--pipeline",
         choices=["oracle", "agent"],
@@ -349,11 +406,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.pipeline == "agent":
         _lock_determinism()
+        # 单轮评测同样钉死离线确定性（与多轮 _force_offline_routing 同源）：
+        # 否则 run_pipeline 走 LLM 路径（resolve_default_client 返回非 None），
+        # 产出非确定性 DSL，契约断言不稳定。agent 模式守护网要求逐字一致，
+        # 必须走确定性降级路径（DeterministicNL2DSL）。
+        _force_offline_routing()
 
     conn = duckdb.connect(str(settings.DB_PATH), read_only=True)
     try:
         pipeline = _production_pipeline if args.pipeline == "agent" else run_pipeline
-        summary = evaluate_all(conn, pipeline=pipeline)
+        summary = evaluate_all(conn, pipeline=pipeline, skip_snapshot=args.skip_snapshot)
     finally:
         conn.close()
 

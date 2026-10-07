@@ -29,6 +29,7 @@ _orch_nodes._resolve_llm = lambda: None
 
 from core.orchestrator.agent import AgentTrace, run_agent  # noqa: E402  (需在 patch 后导入链路)
 from core.orchestrator.state import AgentState  # noqa: E402
+from semantic import catalog  # noqa: E402
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "intent_golden.json"
 
@@ -61,7 +62,7 @@ def main() -> int:
             ok = trace.phase == "done" and "order_id_count" in report and "无法作答" not in report
         elif expect == "refusal":
             ok = trace.phase == "done" and "无法作答" in report and "万元" not in report
-            # 2026-09 分层降级：枚举未命中的筛选取值（如数仓无"海南"）=>
+            # 2026-09 分层降级：枚举未命中的筛选取值（如数仓无"琼崖省"）=>
             # 选项式澄清挂起（设计 Review Focus #2：严禁自动猜测条件）。
             # 该终态零查询、零 LLM、无报告，与 blocked 拒答同属诚实不产出，
             # 达成 golden refusal 的根本意图（不答非所问、不编造口径）。
@@ -92,17 +93,19 @@ def main() -> int:
     # 旧澄清卡仍可在本轮线程恢复（checkpointer 线程按轮隔离）。严禁用每用例
     # 隔离会话掩盖多轮误路由。
     mixed_session = "intent-eval-mixed"
-    paused = run_agent("海南省的GMV是多少", session_id=mixed_session, autonomy_level="L4")
+    paused = run_agent("琼崖省的GMV是多少", session_id=mixed_session, autonomy_level="L4")
     ok = isinstance(paused, AgentState) and paused.phase == "clarify"
-    print(f"[{'PASS' if ok else 'FAIL'}] 混排#1 澄清挂起（海南GMV）")
+    print(f"[{'PASS' if ok else 'FAIL'}] 混排#1 澄清挂起（琼崖GMV）")
     if not ok:
         failures.append("多轮混排#1 澄清挂起")
 
     trace = run_agent("有多少个省份", session_id=mixed_session, autonomy_level="L4")
+    # 省份计数动态断言（去 pin）：与数仓实际省份基数同源，防夹具漂移
+    province_answer = f"查询答案：{len(catalog.DIMENSION_MEMBERS['province'])}"
     ok = (
         isinstance(trace, AgentTrace)
         and trace.phase == "done"
-        and "查询答案：8" in trace.report
+        and province_answer in trace.report
         and "用户补充" not in trace.report
     )
     print(f"[{'PASS' if ok else 'FAIL'}] 混排#2 挂起后新问题独立作答（省份计数）")
@@ -110,7 +113,7 @@ def main() -> int:
         failures.append("多轮混排#2 挂起后新问题独立作答")
 
     final = run_agent(
-        "海南省的GMV是多少",
+        "琼崖省的GMV是多少",
         session_id=mixed_session,
         autonomy_level="L4",
         resume_state=paused.apply(human_reply="广东省"),
