@@ -812,6 +812,32 @@ def test_diagnostic_dsl_pair_respects_explicit_time():
     assert c_default["time_filter"]["absolute"] == {"start": "2024-05-08", "end": "2024-05-15"}
 
 
+def test_diagnostic_dsl_pair_default_window_from_catalog(monkeypatch):
+    """缺省两期锚必须从 semantic.json default_window 推导（评审收口：严禁字面量）。"""
+    from core.orchestrator.nodes import _diagnostic_dsl_pair
+    from semantic import catalog
+
+    monkeypatch.setattr(
+        catalog,
+        "DEFAULT_WINDOW",
+        {
+            "start": "2023-01-01",
+            "end": "2023-01-11",
+            "two_period_midpoint": True,
+            "description": "测试窗口",
+        },
+    )
+    base, curr = _diagnostic_dsl_pair("为什么 GMV 下滑了")
+    assert base["time_filter"]["absolute"] == {"start": "2023-01-01", "end": "2023-01-06"}
+    assert curr["time_filter"]["absolute"] == {"start": "2023-01-06", "end": "2023-01-11"}
+
+    # 未声明中点切分 => 两期共用整个缺省窗口
+    monkeypatch.setattr(catalog, "DEFAULT_WINDOW", {"start": "2023-02-01", "end": "2023-02-10"})
+    b2, c2 = _diagnostic_dsl_pair("为什么 GMV 下滑了")
+    assert b2["time_filter"]["absolute"] == {"start": "2023-02-01", "end": "2023-02-10"}
+    assert c2["time_filter"]["absolute"] == {"start": "2023-02-01", "end": "2023-02-10"}
+
+
 def test_run_agent_fabricated_year_reports_no_data(tmp_path, monkeypatch):
     """E2E：编造年份（2030）严禁产出归因报告，必须如实说明无数据。
 

@@ -75,6 +75,9 @@ def _build_column_index() -> dict[tuple[str, str], str]:
     return index
 
 
+# 纯 schema 索引（物理表列 -> 逻辑字段），import 时绑定可接受：内容不含业务
+# 语义，refresh_catalog 不改变表列结构。若未来引入业务语义，须改为函数内
+# 动态读取（同 _main_table 的 M-P0 活缺陷修复口径），严禁扩展本绑定。
 _COLUMN_INDEX = _build_column_index()
 
 

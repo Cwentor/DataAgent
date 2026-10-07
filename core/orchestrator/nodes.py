@@ -948,7 +948,8 @@ def _diagnostic_dsl_pair(query: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
     时间窗口（2026-09 审计修复：无数据诚实原则）：用户显式给出年份/月份时
     必须尊重——经 ``parse_explicit_time_window`` 解析后按天数中点切成基线/
-    当前两期；未显式给时间才回退 2024-05 缺省锚（评测确定性）。解析出的
+    当前两期；未显式给时间才回退 semantic.json default_window 缺省锚
+    （按 two_period_midpoint 声明做中点切分，评测确定性）。解析出的
     超界窗口由取数执行前的时间域守卫拦截并如实告知——严禁静默替换成域内
     窗口（拿 2024 数据回答用户问的 2030 问题 = 数据造假）。
 
@@ -973,8 +974,16 @@ def _diagnostic_dsl_pair(query: str) -> tuple[dict[str, Any], dict[str, Any]]:
         baseline_window = {"start": explicit[0], "end": _split_window_midpoint(*explicit)}
         current_window = {"start": _split_window_midpoint(*explicit), "end": explicit[1]}
     else:
-        baseline_window = {"start": "2024-05-01", "end": "2024-05-08"}
-        current_window = {"start": "2024-05-08", "end": "2024-05-15"}
+        # M-P1 评审收口：缺省两期锚从 semantic.json default_window 推导（禁止字面量）。
+        # 未声明 two_period_midpoint 时两期共用整个缺省窗口（口径由报告侧缺省说明承担）。
+        dw = catalog.DEFAULT_WINDOW
+        if dw.get("two_period_midpoint"):
+            midpoint = _split_window_midpoint(str(dw["start"]), str(dw["end"]))
+            baseline_window = {"start": str(dw["start"]), "end": midpoint}
+            current_window = {"start": midpoint, "end": str(dw["end"])}
+        else:
+            baseline_window = {"start": str(dw["start"]), "end": str(dw["end"])}
+            current_window = dict(baseline_window)
     metrics = [
         {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"},
         {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
@@ -1040,7 +1049,7 @@ def _scalar_dsl(anchors: tuple[str, ...], query: str) -> dict[str, Any] | None:
     - 跨表混合锚（GMV+退款金额）单查询无法同口径构造 => None（兜底拒答，
       LLM 在场时由 Planner 规划）；
     - 时间窗口：用户显式时间优先（parse_explicit_time_window），
-      缺省 2024-05 锚（报告侧说明缺省口径）。
+      缺省 semantic.json default_window 锚（报告侧说明缺省口径）。
     """
     if not anchors or any(a not in _SCALAR_FIELD_AGG for a in anchors):
         return None
@@ -2249,7 +2258,7 @@ def _fmt_pct(value: Any) -> str:
 def _default_scope_note(state: AgentState) -> str:
     """缺省口径说明（十八期，规格 §3.2；终审 Important #5）。
 
-    兜底 scalar 直答使用缺省时间窗（2024-05 锚）与支付状态过滤，报告必须
+    兜底 scalar 直答使用缺省时间窗（semantic.json default_window）与支付状态过滤，报告必须
     说明口径——用户不能只看到"查询答案：XXX 万元"而不知道统计范围。
     扫描计划内 query 步骤 DSL，命中缺省锚/支付过滤时生成口径行。
     """

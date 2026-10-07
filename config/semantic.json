@@ -278,6 +278,7 @@
       "column": "price",
       "dtype": "float",
       "label": "商品标价",
+      "non_aggregatable": true,
       "aliases": [
         "标价",
         "原价"

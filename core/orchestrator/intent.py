@@ -213,7 +213,8 @@ def enumeration_dsl(query: str) -> dict | None:
 def capability_catalog_lines() -> list[str]:
     """拒答报告的能力清单（诚实告知系统边界，含中文 label）。
 
-    price 标价非金额聚合语义，独立"其他"分组（对齐原 unit_price 设计）。
+    标价类字段（semantic.json fields 登记 non_aggregatable，如商品标价）
+    非金额聚合语义，独立"其他"分组（对齐原 unit_price 设计）。
     """
     from semantic import catalog
     from semantic.catalog import COLUMNS, DRILLDOWN_DIM_FIELDS
@@ -223,10 +224,10 @@ def capability_catalog_lines() -> list[str]:
     metrics = "、".join(
         f"{name}（{meta.label or name}）"
         for name, meta in COLUMNS.items()
-        if meta.dtype == "float" and name != "price"
+        if meta.dtype == "float" and not meta.non_aggregatable
     )
     others = "、".join(
-        f"{name}（{meta.label or name}）" for name, meta in COLUMNS.items() if name == "price"
+        f"{name}（{meta.label or name}）" for name, meta in COLUMNS.items() if meta.non_aggregatable
     )
     # 计数指标从 semantic.json metrics[] 派生（M-P1：能力清单严禁硬编码指标名）
     count_metrics = "、".join(

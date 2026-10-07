@@ -55,9 +55,6 @@ def _load_builtin(path: Path | None = None) -> dict:
     return data
 
 
-_BUILTIN = _load_builtin()
-
-
 @dataclass(frozen=True)
 class FieldMeta:
     """字段元数据：物理表 + 列名 + 类型（dtype 用于字面量安全转义）。
@@ -72,6 +69,8 @@ class FieldMeta:
     dtype: str  # 用于字面量安全转义：str / int / float / bool / timestamp
     label: str | None = None
     aliases: tuple[str, ...] = ()
+    # 标价类参考字段（如商品标价）：非可聚合交易金额，消费方据此归入独立分组
+    non_aggregatable: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,94 +94,142 @@ def _rules(raw: dict) -> dict[str, JoinRule]:
     }
 
 
-# --------------------------------------------------------------------------- #
-# 内置目录常量（全部派生自 semantic.json，本文件零手写业务事实）
-# --------------------------------------------------------------------------- #
+_BUILTIN = _load_builtin()
 
-# 逻辑字段 -> 物理字段
-COLUMNS: dict[str, FieldMeta] = {
-    name: FieldMeta(
-        str(spec["table"]),
-        str(spec["column"]),
-        str(spec.get("dtype") or ""),
-        label=spec.get("label"),
-        aliases=tuple(str(a) for a in spec.get("aliases", ())),
+
+# 以下目录容器统一定义为空壳、由 apply_builtin 填充：import 初始化与 reset_defaults
+# 共用单一派生路径，reset 前后对象身份不变（`from catalog import COLUMNS` 式 import
+# 绑定消费方在 reset 后依然指向同一容器）。
+COLUMNS: dict[str, FieldMeta] = {}
+TABLE_LABELS: dict[str, str] = {}
+ALIASES: dict[str, str] = {}
+JOIN_RULES: dict[str, JoinRule] = {}
+FACT_JOIN_RULES: dict[str, JoinRule] = {}
+QUERY_DOMAINS: dict[str, dict[str, JoinRule]] = {}
+DIMENSION_MEMBERS_SEED: dict[str, list[str]] = {}
+DIMENSION_MEMBERS: dict[str, tuple[str, ...]] = {}
+REGION_PROVINCE_MAPPING: dict[str, tuple[str, ...]] = {}
+VALUE_LABELS: dict[str, dict[str, str]] = {}
+METRIC_ALIASES: dict[str, str] = {}
+REFLECTOR_CONCEPTS: dict[str, dict] = {}
+
+FACT_TABLE: str = ""
+FACT_TABLES: tuple[str, ...] = ()
+DIMENSION_MEMBER_FIELDS: tuple[str, ...] = ()
+DRILLDOWN_DIM_FIELDS: tuple[str, ...] = ()
+METRICS: list[dict] = []
+COUNT_ENTITIES: list[dict] = []
+PAID_FILTER: dict = {}
+DEFAULT_WINDOW: dict = {}
+OUT_OF_SCOPE_CONCEPTS: list[str] = []
+UNDEFINED_METRICS: list[dict] = []
+
+
+def apply_builtin(data: dict) -> None:
+    """把 semantic.json 派生目录写入本模块全局。
+
+    - 容器一律原地 clear/update（对象身份不变，import 绑定消费方 reset 后不 stale）；
+    - 标量（str/tuple/list）允许重绑定，消费方须动态读 ``catalog.X``
+      （M-P1 stale 修复约定，见 nodes/sql_lift）；
+    - import 初始化与 catalog_loader.reset_defaults 共用本路径，严禁另写第二份派生。
+    """
+    g = globals()
+
+    # 逻辑字段 -> 物理字段
+    columns = {
+        name: FieldMeta(
+            str(spec["table"]),
+            str(spec["column"]),
+            str(spec.get("dtype") or ""),
+            label=spec.get("label"),
+            aliases=tuple(str(a) for a in spec.get("aliases", ())),
+            non_aggregatable=bool(spec.get("non_aggregatable", False)),
+        )
+        for name, spec in data["fields"].items()
+    }
+    COLUMNS.clear()
+    COLUMNS.update(columns)
+
+    # 物理表 -> 中文表标签：Web 侧栏分组标题与 Planner 摘要展示用
+    TABLE_LABELS.clear()
+    TABLE_LABELS.update(data.get("table_labels", {}))
+
+    # 表别名（编译器内部使用；主锚点别名固定为 f，编译器 FROM 子句引用）
+    ALIASES.clear()
+    ALIASES.update(data["aliases"])
+
+    # 主事实表（交易域查询锚点，FROM 主表）与全部事实表（用于校验/文档）
+    g["FACT_TABLE"] = str(data["fact_table"])
+    g["FACT_TABLES"] = tuple(str(t) for t in data["fact_tables"])
+
+    # 受控连接规则：只允许从主事实表星型连接维度表（全部 N:1，无扇出）
+    JOIN_RULES.clear()
+    JOIN_RULES.update(_rules(data["join_rules"]))
+
+    # 第二事实表 -> 主事实表 的受控连接（LEFT JOIN）
+    FACT_JOIN_RULES.clear()
+    FACT_JOIN_RULES.update(_rules(data["fact_join_rules"]))
+
+    # 独立查询域：锚点表 -> 该域允许的维度连接（编译器域锚点解析，跨域报错）
+    QUERY_DOMAINS.clear()
+    QUERY_DOMAINS.update({anchor: _rules(rules) for anchor, rules in data["query_domains"].items()})
+
+    # 维度成员词汇表离线回退种子（生产由 catalog_loader 从库内 distinct 重建）
+    DIMENSION_MEMBERS_SEED.clear()
+    DIMENSION_MEMBERS_SEED.update(data.get("dimension_members_seed", {}))
+
+    # 维度成员词汇表（逻辑字段 -> 成员值）：启发式解析与多轮继承从问题文本抽取维度值用。
+    # 内置默认 = seed 快照；服务启动时由 catalog_loader 按白名单从数仓 distinct 重建。
+    DIMENSION_MEMBERS.clear()
+    DIMENSION_MEMBERS.update({k: tuple(v) for k, v in DIMENSION_MEMBERS_SEED.items()})
+
+    # 维度成员词汇表重建的字段白名单（逻辑字段名）
+    g["DIMENSION_MEMBER_FIELDS"] = tuple(str(f) for f in data["dimension_member_fields"])
+
+    # 可下钻字符串维度白名单（诊断归因候选维度池）
+    g["DRILLDOWN_DIM_FIELDS"] = tuple(str(f) for f in data.get("drilldown_dim_fields", ()))
+
+    # 大区 -> 省份成员映射（区域词展开；消费方一律经 region_provinces() 与成员词表求交）
+    REGION_PROVINCE_MAPPING.clear()
+    REGION_PROVINCE_MAPPING.update(
+        {
+            region: tuple(provinces)
+            for region, provinces in data.get("region_province_mapping", {}).items()
+        }
     )
-    for name, spec in _BUILTIN["fields"].items()
-}
 
-# 物理表 -> 中文表标签：Web 侧栏分组标题与 Planner 摘要展示用
-TABLE_LABELS: dict[str, str] = dict(_BUILTIN.get("table_labels", {}))
+    # 指标口径（glossary/heuristic/提示词的公共事实源）：key/title/aliases/
+    # definition/formula/fields/shape（DSL 产出形态）
+    g["METRICS"] = list(data.get("metrics", []))
 
-# 表别名（编译器内部使用；主锚点别名固定为 f，编译器 FROM 子句引用）
-ALIASES: dict[str, str] = dict(_BUILTIN["aliases"])
+    # 计数实体词表（"多少订单/用户/商品" -> count/count_distinct 形态）
+    g["COUNT_ENTITIES"] = list(data.get("count_entities", []))
 
-# 主事实表（交易域查询锚点，FROM 主表）
-FACT_TABLE: str = str(_BUILTIN["fact_table"])
+    # 支付口径（成功过滤的字段/值/问法词/反义问法）
+    PAID_FILTER.clear()
+    PAID_FILTER.update(data.get("paid_filter", {}))
 
-# 全部事实表（用于校验/文档）
-FACT_TABLES: tuple[str, ...] = tuple(str(t) for t in _BUILTIN["fact_tables"])
+    # 缺省分析窗口（无显式时间解析时使用；两期诊断按中点切分）
+    DEFAULT_WINDOW.clear()
+    DEFAULT_WINDOW.update(data.get("default_window", {}))
 
-# 受控连接规则：只允许从主事实表星型连接维度表（全部 N:1，无扇出）
-JOIN_RULES: dict[str, JoinRule] = _rules(_BUILTIN["join_rules"])
+    # 反思器概念覆盖表：概念 -> {fields, produced_aliases}
+    REFLECTOR_CONCEPTS.clear()
+    REFLECTOR_CONCEPTS.update(data.get("reflector_concepts", {}))
 
-# 第二事实表 -> 主事实表 的受控连接（LEFT JOIN）
-FACT_JOIN_RULES: dict[str, JoinRule] = _rules(_BUILTIN["fact_join_rules"])
+    # 数仓未覆盖的业务概念（出现在反思理由中即为不可执行缺口）
+    g["OUT_OF_SCOPE_CONCEPTS"] = list(data.get("out_of_scope_concepts", []))
 
-# 独立查询域：锚点表 -> 该域允许的维度连接（编译器域锚点解析，跨域报错）
-QUERY_DOMAINS: dict[str, dict[str, JoinRule]] = {
-    anchor: _rules(rules) for anchor, rules in _BUILTIN["query_domains"].items()
-}
+    # 明确未定义业务指标清单（澄清层"宁拒答不近似"词源）
+    g["UNDEFINED_METRICS"] = list(data.get("undefined_metrics", []))
 
-# 维度成员词汇表离线回退种子（生产由 catalog_loader 从库内 distinct 重建）
-DIMENSION_MEMBERS_SEED: dict[str, list[str]] = dict(_BUILTIN.get("dimension_members_seed", {}))
+    # 枚举值 -> 中文标签（order_status 码表/退款类型/评价/性别）
+    VALUE_LABELS.clear()
+    VALUE_LABELS.update(data.get("value_labels", {}))
 
-# 维度成员词汇表（逻辑字段 -> 成员值）：启发式解析与多轮继承从问题文本抽取维度值用。
-# 内置默认 = seed 快照；服务启动时由 catalog_loader 按白名单从数仓 distinct 重建。
-DIMENSION_MEMBERS: dict[str, tuple[str, ...]] = {
-    k: tuple(v) for k, v in DIMENSION_MEMBERS_SEED.items()
-}
+    # 聚合产物别名 -> 中文（gmv/orders/buyers 等产物列的人读化）
+    METRIC_ALIASES.clear()
+    METRIC_ALIASES.update(data.get("metric_aliases", {}))
 
-# 维度成员词汇表重建的字段白名单（逻辑字段名）
-DIMENSION_MEMBER_FIELDS: tuple[str, ...] = tuple(
-    str(f) for f in _BUILTIN["dimension_member_fields"]
-)
 
-# 可下钻字符串维度白名单（诊断归因候选维度池）
-DRILLDOWN_DIM_FIELDS: tuple[str, ...] = tuple(
-    str(f) for f in _BUILTIN.get("drilldown_dim_fields", ())
-)
-
-# 大区 -> 省份成员映射（区域词展开；消费方一律经 region_provinces() 与成员词表求交）
-REGION_PROVINCE_MAPPING: dict[str, tuple[str, ...]] = {
-    region: tuple(provinces)
-    for region, provinces in _BUILTIN.get("region_province_mapping", {}).items()
-}
-
-# 指标口径（glossary/heuristic/提示词的公共事实源）：key/title/aliases/
-# definition/formula/fields/shape（DSL 产出形态）
-METRICS: list[dict] = list(_BUILTIN.get("metrics", []))
-
-# 计数实体词表（"多少订单/用户/商品" -> count/count_distinct 形态）
-COUNT_ENTITIES: list[dict] = list(_BUILTIN.get("count_entities", []))
-
-# 支付口径（成功过滤的字段/值/问法词/反义问法）
-PAID_FILTER: dict = dict(_BUILTIN.get("paid_filter", {}))
-
-# 缺省分析窗口（无显式时间解析时使用；两期诊断按中点切分）
-DEFAULT_WINDOW: dict = dict(_BUILTIN.get("default_window", {}))
-
-# 反思器概念覆盖表：概念 -> {fields, produced_aliases}
-REFLECTOR_CONCEPTS: dict[str, dict] = dict(_BUILTIN.get("reflector_concepts", {}))
-
-# 数仓未覆盖的业务概念（出现在反思理由中即为不可执行缺口）
-OUT_OF_SCOPE_CONCEPTS: list[str] = list(_BUILTIN.get("out_of_scope_concepts", []))
-
-# 明确未定义业务指标清单（澄清层"宁拒答不近似"词源）
-UNDEFINED_METRICS: list[dict] = list(_BUILTIN.get("undefined_metrics", []))
-
-# 枚举值 -> 中文标签（order_status 码表/退款类型/评价/性别）
-VALUE_LABELS: dict[str, dict[str, str]] = dict(_BUILTIN.get("value_labels", {}))
-
-# 聚合产物别名 -> 中文（gmv/orders/buyers 等产物列的人读化）
-METRIC_ALIASES: dict[str, str] = dict(_BUILTIN.get("metric_aliases", {}))
+apply_builtin(_BUILTIN)

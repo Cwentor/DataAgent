@@ -87,7 +87,12 @@ def test_dimension_scoped_metric_query_is_unknown():
 
 
 def test_capability_catalog_groups_price_separately():
-    """price 标价不属于金额指标（对齐原 unit_price 独立分组设计）。"""
+    """标价类字段（json 登记 non_aggregatable）不属金额指标，独立"其他"分组。"""
+    from semantic import catalog
+
+    # 分组依据 = 字段元数据标记（单一事实源），而非 intent.py 字面量特判
+    assert catalog.COLUMNS["price"].non_aggregatable is True
+    assert catalog.COLUMNS["order_price"].non_aggregatable is False
     lines = capability_catalog_lines()
     money_line = next(line for line in lines if line.startswith("- 金额指标"))
     assert "price（商品标价）" not in money_line  # order_price 成交单价除外，标价单列

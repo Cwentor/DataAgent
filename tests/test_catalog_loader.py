@@ -178,6 +178,25 @@ def test_refresh_mutates_globals_and_reset_restores(conn, tmp_path):
     assert set(catalog.COLUMNS) == before
 
 
+def test_reset_defaults_rereads_json():
+    """reset_defaults 重读 semantic.json（不回放 import 快照）：运行中改配置即时生效。"""
+    mutated = catalog._load_builtin()
+    mutated["default_window"] = {
+        "start": "2023-01-01",
+        "end": "2023-03-31",
+        "two_period_midpoint": True,
+        "description": "评审收口测试",
+    }
+    try:
+        catalog.apply_builtin(mutated)
+        assert catalog.DEFAULT_WINDOW["end"] == "2023-03-31"
+    finally:
+        reset_defaults()
+    # 磁盘上 json 未变 => reset 后恢复锚点窗口（golden 确定性锚）
+    assert catalog.DEFAULT_WINDOW["start"] == "2024-05-01"
+    assert catalog.DEFAULT_WINDOW["end"] == "2024-05-15"
+
+
 def test_unknown_field_still_rejected_after_refresh(conn, tmp_path):
     """刷新后未登记的字段依然被编译器拒绝（目录即白名单）。"""
     overlay = _overlay(tmp_path)
