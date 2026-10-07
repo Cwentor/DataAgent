@@ -220,7 +220,7 @@ def _fake_last_dsl():
     return QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [],
             "time_filter": {
@@ -358,7 +358,7 @@ def test_e2e_system_action_view_permissions(conn):
     )
     assert result["detected_intent"] == "system_action"
     assert "analyst" in result["answer"]
-    assert "fact_orders" in result["answer"]
+    assert "order_detail" in result["answer"]
     assert result.get("sql") is None
 
 
@@ -476,7 +476,9 @@ def test_e2e_context_isolation_through_chitchat(conn):
     assert third["context_summary"] and "华南" in third["context_summary"]
     # 继承第 1 轮的指标（GMV）与时间窗口，仅替换地区筛选
     prov = [f for f in third["dsl"]["filters"] if f["field"] == "province"]
-    assert prov == [{"field": "province", "operator": "in", "value": ["广东"]}]
+    assert prov == [
+        {"field": "province", "operator": "in", "value": ["广东", "广西", "海南", "香港", "澳门"]}
+    ]
     assert [m["alias"] for m in third["dsl"]["metrics"]] == ["gmv"]
     assert third["dsl"]["time_filter"] == first["dsl"]["time_filter"]
 

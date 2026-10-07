@@ -9,7 +9,9 @@ from semantic.dsl_schema import QueryDSL
 
 def _dsl(**over):
     base = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
     }
     base.update(over)
     return QueryDSL.model_validate(base)
@@ -20,17 +22,17 @@ def _dsl(**over):
 # --------------------------------------------------------------------------- #
 def test_explain_single_metric():
     dsl = _dsl(
-        filters=[{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+        filters=[{"field": "order_status", "operator": "eq", "value": "1002"}],
     )
     text = explain(dsl)
     assert "gmv" in text
-    assert "求和订单金额" in text
-    assert "支付状态 等于 成功" in text
+    assert "求和实付金额" in text
+    assert "订单状态 等于 已支付" in text
 
 
 def test_explain_dimension_and_time():
     dsl = _dsl(
-        dimensions=[{"field": "category"}],
+        dimensions=[{"field": "category1_name"}],
         time_filter={
             "granularity": "day",
             "range_type": "absolute",
@@ -38,7 +40,7 @@ def test_explain_dimension_and_time():
         },
     )
     text = explain(dsl)
-    assert "按 类目 分组" in text
+    assert "按 一级类目 分组" in text
     assert "2024-06-01 至 2024-07-01" in text
 
 
@@ -50,7 +52,7 @@ def test_explain_ratio_metric():
                     "kind": "ratio",
                     "numerator": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "gmv",
                     },
@@ -97,26 +99,26 @@ def test_viz_line_for_time_trend():
 
 
 def test_viz_bar_for_many_categories():
-    dsl = _dsl(dimensions=[{"field": "category"}])
+    dsl = _dsl(dimensions=[{"field": "category1_name"}])
     rows = tuple((f"c{i}",) for i in range(20))
-    assert recommend_viz(dsl, ("category", "gmv"), rows) == "bar"
+    assert recommend_viz(dsl, ("category1_name", "gmv"), rows) == "bar"
 
 
 def test_viz_pivot_for_multi_dimension():
-    dsl = _dsl(dimensions=[{"field": "category"}, {"field": "brand"}])
+    dsl = _dsl(dimensions=[{"field": "category1_name"}, {"field": "tm_name"}])
     rows = (("a", "b", 1),)
-    assert recommend_viz(dsl, ("category", "brand", "gmv"), rows) == "pivot"
+    assert recommend_viz(dsl, ("category1_name", "tm_name", "gmv"), rows) == "pivot"
 
 
 def test_viz_pivot_for_multi_metric():
     dsl = _dsl(
         metrics=[
-            {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"},
             {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "order_count"},
         ],
-        dimensions=[{"field": "category"}],
+        dimensions=[{"field": "category1_name"}],
     )
-    assert recommend_viz(dsl, ("category", "gmv", "order_count"), (("a", 1, 2),)) == "pivot"
+    assert recommend_viz(dsl, ("category1_name", "gmv", "order_count"), (("a", 1, 2),)) == "pivot"
 
 
 def test_explain_window_metric():
@@ -126,7 +128,7 @@ def test_explain_window_metric():
                 "kind": "window",
                 "base": {
                     "kind": "aggregate",
-                    "field": "order_amount",
+                    "field": "split_total_amount",
                     "agg": "sum",
                     "alias": "gmv",
                 },
@@ -148,7 +150,7 @@ def test_explain_moving_avg():
                 "kind": "window",
                 "base": {
                     "kind": "aggregate",
-                    "field": "order_amount",
+                    "field": "split_total_amount",
                     "agg": "sum",
                     "alias": "gmv",
                 },
@@ -165,7 +167,7 @@ def test_explain_moving_avg():
 
 def test_explain_top_n():
     dsl = _dsl(
-        dimensions=[{"field": "province"}, {"field": "category"}],
+        dimensions=[{"field": "province"}, {"field": "category1_name"}],
         top_n={
             "n": 3,
             "partition_by": ["province"],
@@ -189,7 +191,7 @@ def test_viz_window_metric_is_line():
                 "kind": "window",
                 "base": {
                     "kind": "aggregate",
-                    "field": "order_amount",
+                    "field": "split_total_amount",
                     "agg": "sum",
                     "alias": "gmv",
                 },
@@ -204,10 +206,10 @@ def test_viz_window_metric_is_line():
 
 
 def test_viz_config_shape():
-    dsl = _dsl(dimensions=[{"field": "category"}])
-    cfg = viz_config(dsl, ("category", "gmv"), (("a",),))
+    dsl = _dsl(dimensions=[{"field": "category1_name"}])
+    cfg = viz_config(dsl, ("category1_name", "gmv"), (("a",),))
     assert cfg["chart"] == "pie"
-    assert cfg["x"] == "category"
+    assert cfg["x"] == "category1_name"
     assert cfg["y"] == "gmv"
     # ECharts 级渲染契约：series/axis/legend/tooltip 齐全（报告整改指令3-1）
     e = cfg["echarts"]
@@ -232,20 +234,20 @@ def test_viz_config_line_has_axes():
 
 def test_viz_table_for_non_numeric_y():
     """数值类型信号：y 列显著非数值（占比 < 0.5）时强制降级明细表。"""
-    dsl = _dsl(dimensions=[{"field": "category"}])
+    dsl = _dsl(dimensions=[{"field": "category1_name"}])
     rows = (("数码", "高"), ("家电", "中"), ("服饰", "低"))
-    assert recommend_viz(dsl, ("category", "gmv"), rows) == "table"
+    assert recommend_viz(dsl, ("category1_name", "gmv"), rows) == "table"
 
 
 def test_viz_pivot_contract():
     """多维结果：pivot 契约提供列结构标注（前端表格渲染依据）。"""
-    dsl = _dsl(dimensions=[{"field": "category"}, {"field": "brand"}])
-    cfg = viz_config(dsl, ("category", "brand", "gmv"), (("a", "b", 1),))
+    dsl = _dsl(dimensions=[{"field": "category1_name"}, {"field": "tm_name"}])
+    cfg = viz_config(dsl, ("category1_name", "tm_name", "gmv"), (("a", "b", 1),))
     assert cfg["chart"] == "pivot"
     e = cfg["echarts"]
     assert e["columns"] == [
-        {"name": "category", "index": 0},
-        {"name": "brand", "index": 1},
+        {"name": "category1_name", "index": 0},
+        {"name": "tm_name", "index": 1},
         {"name": "gmv", "index": 2},
     ]
 
@@ -254,12 +256,12 @@ def test_build_chart_spec_echarts_contract():
     """ChartSpec 复合契约：携带 echarts option 且 to_dict 可序列化。"""
     from present.viz import build_chart_spec
 
-    dsl = _dsl(dimensions=[{"field": "category"}])
-    spec = build_chart_spec(dsl, ("category", "gmv"), (("a", 1),))
+    dsl = _dsl(dimensions=[{"field": "category1_name"}])
+    spec = build_chart_spec(dsl, ("category1_name", "gmv"), (("a", 1),))
     assert spec.chart == "pie"
     payload = spec.to_dict()
     assert payload["echarts"]["series"][0]["type"] == "pie"
-    assert payload["columns"] == ["category", "gmv"]
+    assert payload["columns"] == ["category1_name", "gmv"]
     assert payload["rows"] == [["a", 1]]
 
 
@@ -268,20 +270,20 @@ def test_build_chart_spec_echarts_contract():
 # --------------------------------------------------------------------------- #
 def test_viz_bar_when_all_values_nonpositive():
     """y 列可判定且全部非正 -> 拒绝 pie（退回 bar）。"""
-    dsl = _dsl(dimensions=[{"field": "category"}])
+    dsl = _dsl(dimensions=[{"field": "category1_name"}])
     rows = tuple((f"c{i}", -10.0 - i) for i in range(5))
-    assert recommend_viz(dsl, ("category", "gmv"), rows) == "bar"
+    assert recommend_viz(dsl, ("category1_name", "gmv"), rows) == "bar"
 
 
 def test_viz_pie_when_any_positive_value():
     """存在正数值 -> pie 信号满足（即使夹杂负值）。"""
-    dsl = _dsl(dimensions=[{"field": "category"}])
+    dsl = _dsl(dimensions=[{"field": "category1_name"}])
     rows = tuple((f"c{i}", -5.0 if i == 0 else 10.0 + i) for i in range(5))
-    assert recommend_viz(dsl, ("category", "gmv"), rows) == "pie"
+    assert recommend_viz(dsl, ("category1_name", "gmv"), rows) == "pie"
 
 
 def test_viz_pie_without_y_signal_unaffected():
     """无可判定 y 值（全部缺列）：信号不足不拦截，维持原 pie 行为。"""
-    dsl = _dsl(dimensions=[{"field": "category"}])
+    dsl = _dsl(dimensions=[{"field": "category1_name"}])
     rows = tuple((f"c{i}",) for i in range(5))
-    assert recommend_viz(dsl, ("category", "gmv"), rows) == "pie"
+    assert recommend_viz(dsl, ("category1_name", "gmv"), rows) == "pie"

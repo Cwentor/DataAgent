@@ -152,14 +152,19 @@ def test_m2_new_shapes_pass_audit_gate(conn):
     from exec.audit import audit_compiled_sql
     from semantic.dsl_schema import QueryDSL
 
-    projection_sql = compile_sql(QueryDSL.model_validate({"dimensions": [{"field": "brand"}]}))
+    projection_sql = compile_sql(QueryDSL.model_validate({"dimensions": [{"field": "tm_name"}]}))
     having_sql = compile_sql(
         QueryDSL.model_validate(
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    }
                 ],
-                "dimensions": [{"field": "category"}],
+                "dimensions": [{"field": "category1_name"}],
                 "having": [{"field": "gmv", "operator": "gt", "value": 0}],
             }
         )
@@ -168,7 +173,12 @@ def test_m2_new_shapes_pass_audit_gate(conn):
         QueryDSL.model_validate(
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    },
                     {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
                     {
                         "kind": "expression",
@@ -176,7 +186,7 @@ def test_m2_new_shapes_pass_audit_gate(conn):
                         "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "orders"}]},
                     },
                 ],
-                "dimensions": [{"field": "category"}],
+                "dimensions": [{"field": "category1_name"}],
             }
         )
     )

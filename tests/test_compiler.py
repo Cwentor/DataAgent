@@ -13,13 +13,13 @@ def test_single_metric_no_dimension(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
         }
     )
     sql = compile_sql(dsl)
-    assert 'SUM(f.order_amount) AS "gmv"' in sql
+    assert 'SUM(f.split_total_amount) AS "gmv"' in sql
     row = conn.execute(sql).fetchone()
     assert row[0] > 0
 
@@ -28,15 +28,16 @@ def test_dimension_triggers_group_by_and_join(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "dimensions": [{"field": "category"}],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            # gender 落在 user_info（维度表）：应触发受控 JOIN + GROUP BY
+            "dimensions": [{"field": "gender"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
         }
     )
     sql = compile_sql(dsl)
-    assert "JOIN dim_product p" in sql
-    assert "GROUP BY p.category" in sql
+    assert "JOIN user_info u ON u.user_id = f.user_id" in sql
+    assert "GROUP BY u.gender" in sql
     rows = conn.execute(sql).fetchall()
     assert len(rows) > 0
 
@@ -49,7 +50,7 @@ def test_ratio_metric(conn):
                     "kind": "ratio",
                     "numerator": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "gmv",
                     },
@@ -62,7 +63,7 @@ def test_ratio_metric(conn):
                     "alias": "arpu",
                 }
             ],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
         }
     )
     sql = compile_sql(dsl)
@@ -87,7 +88,7 @@ def test_string_literal_escaped():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "filters": [{"field": "province", "operator": "eq", "value": "O'Reilly"}],
         }
@@ -101,9 +102,9 @@ def test_comparison_mom_compiles_cte(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
             "time_filter": {
                 "granularity": "day",
                 "range_type": "absolute",
@@ -118,15 +119,17 @@ def test_comparison_mom_compiles_cte(conn):
     assert "gmv_mom" in sql
     row = conn.execute(sql).fetchone()
     cur, prev, mom = row
-    assert cur > 0 and prev > 0
-    assert abs(mom - (cur - prev) / prev) < 1e-9
+    # 金额列 DECIMAL：SUM 产出 decimal.Decimal，统一转 float 参与数值断言
+    cur_f, prev_f = float(cur), float(prev)
+    assert cur_f > 0 and prev_f > 0
+    assert abs(mom - (cur_f - prev_f) / prev_f) < 1e-9
 
 
 def test_comparison_yoy_uses_year_shift():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "time_filter": {
                 "granularity": "day",
@@ -142,7 +145,7 @@ def test_comparison_yoy_uses_year_shift():
 
 
 def test_multi_fact_refund_join(conn):
-    """多事实表：退款指标应触发 fact_orders LEFT JOIN fact_refunds。"""
+    """多事实表：退款指标应触发 order_detail LEFT JOIN order_refund_info。"""
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
@@ -153,12 +156,13 @@ def test_multi_fact_refund_join(conn):
                     "alias": "refund_amount",
                 }
             ],
-            "dimensions": [{"field": "category"}],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "dimensions": [{"field": "category1_name"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
         }
     )
     sql = compile_sql(dsl)
-    assert "LEFT JOIN fact_refunds r ON r.order_id = f.order_id" in sql
+    # sku 级退款：(order_id, sku_id) 双键 LEFT JOIN 与明细行 1:1 对齐（无扇出）
+    assert "LEFT JOIN order_refund_info r ON r.order_id = f.order_id AND r.sku_id = f.sku_id" in sql
     assert 'SUM(r.refund_amount) AS "refund_amount"' in sql
     rows = conn.execute(sql).fetchall()
     assert len(rows) > 0
@@ -173,7 +177,7 @@ def test_window_cumsum(conn):
                     "kind": "window",
                     "base": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "gmv",
                     },
@@ -182,7 +186,7 @@ def test_window_cumsum(conn):
                 }
             ],
             "dimensions": [{"field": "order_time"}],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
             "time_filter": {
                 "granularity": "day",
                 "range_type": "absolute",
@@ -192,7 +196,7 @@ def test_window_cumsum(conn):
         }
     )
     sql = compile_sql(dsl)
-    assert "SUM(SUM(f.order_amount)) OVER (ORDER BY date_trunc('day', f.order_time))" in sql
+    assert "SUM(SUM(f.split_total_amount)) OVER (ORDER BY date_trunc('day', f.order_time))" in sql
     rows = conn.execute(sql).fetchall()
     # 累计单调不减
     vals = [r[1] for r in rows]
@@ -208,7 +212,7 @@ def test_window_moving_avg(conn):
                     "kind": "window",
                     "base": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "gmv",
                     },
@@ -218,7 +222,7 @@ def test_window_moving_avg(conn):
                 }
             ],
             "dimensions": [{"field": "order_time"}],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
             "time_filter": {
                 "granularity": "day",
                 "range_type": "absolute",
@@ -240,7 +244,7 @@ def test_window_requires_time_dimension():
                     "kind": "window",
                     "base": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "gmv",
                     },
@@ -259,10 +263,10 @@ def test_fill_gaps_zero_fill(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [{"field": "order_time"}],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
             "time_filter": {
                 "granularity": "day",
                 "range_type": "absolute",
@@ -282,7 +286,7 @@ def test_fill_gaps_requires_time_filter():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [{"field": "order_time"}],
             "fill_gaps": True,
@@ -297,10 +301,10 @@ def test_top_n_partition(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "dimensions": [{"field": "province"}, {"field": "category"}],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "dimensions": [{"field": "province"}, {"field": "category1_name"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
             "top_n": {
                 "n": 3,
                 "partition_by": ["province"],
@@ -309,7 +313,7 @@ def test_top_n_partition(conn):
         }
     )
     sql = compile_sql(dsl)
-    assert "ROW_NUMBER() OVER (PARTITION BY u.province" in sql
+    assert "ROW_NUMBER() OVER (PARTITION BY pr.province_name" in sql
     assert "__rn <= 3" in sql
     rows = conn.execute(sql).fetchall()
     # 每省最多 3 行
@@ -324,10 +328,10 @@ def test_multi_metric_comparison(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"},
                 {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "order_count"},
             ],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
             "time_filter": {
                 "granularity": "day",
                 "range_type": "absolute",
@@ -345,7 +349,7 @@ def test_multi_metric_comparison(conn):
 
 
 def test_multi_fact_ratio_refund_rate(conn):
-    """跨事实表比率：退款率 = SUM(refund_amount)/SUM(order_amount)。"""
+    """跨事实表比率：退款率 = SUM(refund_amount)/SUM(split_total_amount)。"""
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
@@ -359,18 +363,18 @@ def test_multi_fact_ratio_refund_rate(conn):
                     },
                     "denominator": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "gmv",
                     },
                     "alias": "refund_rate",
                 }
             ],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
         }
     )
     sql = compile_sql(dsl)
-    assert "LEFT JOIN fact_refunds r" in sql
+    assert "LEFT JOIN order_refund_info r" in sql
     rate = conn.execute(sql).fetchone()[0]
     assert 0 <= rate <= 1
 
@@ -383,10 +387,10 @@ def test_comparison_with_dimension_groups_and_pairs(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "dimensions": [{"field": "category"}],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "dimensions": [{"field": "category1_name"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
             "time_filter": {
                 "granularity": "day",
                 "range_type": "absolute",
@@ -397,16 +401,17 @@ def test_comparison_with_dimension_groups_and_pairs(conn):
         }
     )
     sql = compile_sql(dsl)
-    assert "GROUP BY p.category" in sql
-    assert 'LEFT JOIN prev USING ("category")' in sql
-    assert 'cur."category" AS "category"' in sql
+    assert "GROUP BY f.category1_name" in sql
+    assert 'LEFT JOIN prev USING ("category1_name")' in sql
+    assert 'cur."category1_name" AS "category1_name"' in sql
     assert 'ORDER BY "gmv_yoy" DESC' in sql
     rows = conn.execute(sql).fetchall()
     assert len(rows) > 0
-    # 每行校验增长率 = (cur - prev) / prev
+    # 每行校验增长率 = (cur - prev) / prev（DECIMAL 列转 float 参与断言）
     for _category, cur, prev, yoy in rows:
         if prev:
-            assert abs(yoy - (cur - prev) / prev) < 1e-6
+            cur_f, prev_f = float(cur), float(prev)
+            assert abs(yoy - (cur_f - prev_f) / prev_f) < 1e-6
         else:
             assert yoy is None
 
@@ -416,7 +421,7 @@ def test_comparison_with_time_dimension_aligned_pairing(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [{"field": "order_time"}],
             "time_filter": {
@@ -438,7 +443,7 @@ def test_comparison_with_time_dimension_aligned_pairing(conn):
     assert len(rows) > 0
     for _t, cur, prev, mom in rows:
         if prev:
-            assert abs(mom - (cur - prev) / prev) < 1e-6
+            assert abs(mom - (float(cur) - float(prev)) / float(prev)) < 1e-6
         else:
             assert mom is None
 
@@ -448,7 +453,7 @@ def test_comparison_yoy_time_dimension_pairing():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [{"field": "order_time"}],
             "time_filter": {
@@ -468,7 +473,7 @@ def test_comparison_yoy_time_dimension_pairing():
 def test_projection_dsl_valid_and_invalid_shapes():
     """十九期 M1：metrics 可空的纯维度投影契约（形态越界契约层即拒）。"""
     # 合法：纯维度投影（无指标）
-    dsl = QueryDSL.model_validate({"dimensions": [{"field": "brand"}]})
+    dsl = QueryDSL.model_validate({"dimensions": [{"field": "tm_name"}]})
     assert dsl.metrics == []
 
     # 非法：指标与维度同时为空（无查询目标）
@@ -490,13 +495,13 @@ def test_projection_dsl_valid_and_invalid_shapes():
 
     # 非法：投影 + 日期补零（无指标可填充）
     with pytest.raises(ValidationError):
-        QueryDSL.model_validate({"dimensions": [{"field": "brand"}], "fill_gaps": True})
+        QueryDSL.model_validate({"dimensions": [{"field": "tm_name"}], "fill_gaps": True})
 
     # 非法：投影 + 同比/环比（无指标可对比）
     with pytest.raises(ValidationError):
         QueryDSL.model_validate(
             {
-                "dimensions": [{"field": "brand"}],
+                "dimensions": [{"field": "tm_name"}],
                 "time_filter": {
                     "range_type": "absolute",
                     "absolute": {"start": "2024-05-01", "end": "2024-06-01"},
@@ -510,8 +515,8 @@ def test_projection_compiles_distinct_and_orders(conn):
     """十九期 M1：纯维度投影编译 SELECT DISTINCT（无 GROUP BY），执行返回真实取值。"""
     dsl = QueryDSL.model_validate(
         {
-            "dimensions": [{"field": "brand"}],
-            "order_by": [{"field": "brand", "direction": "asc"}],
+            "dimensions": [{"field": "tm_name"}],
+            "order_by": [{"field": "tm_name", "direction": "asc"}],
             "limit": 100,
         }
     )
@@ -522,15 +527,14 @@ def test_projection_compiles_distinct_and_orders(conn):
     assert "LIMIT 100" in sql
     rows = conn.execute(sql).fetchall()
     assert len(rows) > 0
-    # dim_product 经 fact_orders JOIN 语义：返回的是订单事实中出现过的品牌
-    # （mock 数仓订单仅覆盖部分 DIMENSION_MEMBERS 品牌，小米必在）
+    # 明细宽表冗余品牌：返回的是订单事实中出现过的品牌（小米必在）
     values = {r[0] for r in rows}
     assert "小米" in values
 
 
 def test_projection_respects_limit_cap(conn):
     """十九期 M1 Review Focus #5：投影无界输出由 LIMIT 硬上限兜底。"""
-    dsl = QueryDSL.model_validate({"dimensions": [{"field": "brand"}], "limit": 3})
+    dsl = QueryDSL.model_validate({"dimensions": [{"field": "tm_name"}], "limit": 3})
     sql = compile_sql(dsl)
     assert "LIMIT 3" in sql
     rows = conn.execute(sql).fetchall()
@@ -542,9 +546,9 @@ def test_having_filters_after_group_by(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "dimensions": [{"field": "category"}],
+            "dimensions": [{"field": "category1_name"}],
             "having": [{"field": "gmv", "operator": "gt", "value": 0}],
             "order_by": [{"field": "gmv", "direction": "desc"}],
         }
@@ -563,9 +567,14 @@ def test_having_field_must_be_metric_alias():
         QueryDSL.model_validate(
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    }
                 ],
-                "dimensions": [{"field": "category"}],
+                "dimensions": [{"field": "category1_name"}],
                 "having": [{"field": "category", "operator": "gt", "value": 0}],
             }
         )
@@ -576,7 +585,7 @@ def test_expression_metric_div_compiles_and_executes(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"},
                 {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
                 {
                     "kind": "expression",
@@ -584,18 +593,18 @@ def test_expression_metric_div_compiles_and_executes(conn):
                     "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "orders"}]},
                 },
             ],
-            "dimensions": [{"field": "category"}],
+            "dimensions": [{"field": "category1_name"}],
         }
     )
     sql = compile_sql(dsl)
     assert 'NULLIF("orders", 0)' in sql or "NULLIF" in sql
     rows = conn.execute(sql).fetchall()
     assert len(rows) > 0
-    # 数学正确性：aov = gmv / orders（有订单的品类）
+    # 数学正确性：aov = gmv / orders（有订单的品类；DECIMAL 列转 float 参与断言）
     gmv_idx, orders_idx, aov_idx = 1, 2, 3
     for r in rows:
         if r[orders_idx] and r[orders_idx] > 0:
-            assert abs(r[aov_idx] - r[gmv_idx] / r[orders_idx]) < 1e-6
+            assert abs(r[aov_idx] - float(r[gmv_idx]) / r[orders_idx]) < 1e-6
 
 
 def test_expression_metric_nested_ops(conn):
@@ -603,7 +612,7 @@ def test_expression_metric_nested_ops(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"},
                 {
                     "kind": "expression",
                     "alias": "gmv_k",
@@ -632,7 +641,12 @@ def test_expression_metric_contract_rejections():
         QueryDSL.model_validate(
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    },
                     {
                         "kind": "expression",
                         "alias": "x",
@@ -648,12 +662,21 @@ def test_expression_metric_contract_rejections():
         QueryDSL.model_validate(
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    },
                     {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
                     {
                         "kind": "ratio",
                         "alias": "rate",
-                        "numerator": {"kind": "aggregate", "field": "order_amount", "agg": "sum"},
+                        "numerator": {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                        },
                         "denominator": {"kind": "aggregate", "field": "order_id", "agg": "count"},
                     },
                     {
@@ -670,7 +693,12 @@ def test_expression_metric_contract_rejections():
         QueryDSL.model_validate(
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    },
                     {
                         "kind": "expression",
                         "alias": "x",
@@ -687,7 +715,7 @@ def test_expression_metric_contract_rejections():
         # HAVING × 纯投影（无指标别名可过滤）
         (
             {
-                "dimensions": [{"field": "brand"}],
+                "dimensions": [{"field": "tm_name"}],
                 "having": [{"field": "gmv", "operator": "gt", "value": 0}],
             },
             "纯维度投影",
@@ -696,7 +724,12 @@ def test_expression_metric_contract_rejections():
         (
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    }
                 ],
                 "having": [{"field": "gmv", "operator": "gt", "value": 0}],
             },
@@ -708,7 +741,7 @@ def test_expression_metric_contract_rejections():
                 "metrics": [
                     {
                         "kind": "window",
-                        "base": {"field": "order_amount", "agg": "sum", "alias": "gmv_base"},
+                        "base": {"field": "split_total_amount", "agg": "sum", "alias": "gmv_base"},
                         "func": "cumsum",
                         "alias": "gmv_cum",
                     },

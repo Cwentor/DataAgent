@@ -12,6 +12,7 @@ import pytest
 
 from compiler.sql_compiler import compile_sql
 from security.guard import apply_policy
+from security.policy import PRINCIPAL_ATTRS
 from security.views import install_secure_views
 from semantic.catalog import COLUMNS
 from semantic.dsl_schema import QueryDSL
@@ -29,34 +30,42 @@ def _make_conn():
 def test_restricted_views_exclude_forbidden_columns_physically(conn):
     """禁列物理不存在于视图（非查询时拦截）。"""
     install_secure_views(conn, "restricted")
-    cols = {row[0] for row in conn.execute("DESCRIBE sec_fact_orders").fetchall()}
-    assert "discount_amount" not in cols
+    cols = {row[0] for row in conn.execute("DESCRIBE sec_order_detail").fetchall()}
+    assert "split_coupon_amount" not in cols
     assert "refund_amount" not in cols
-    assert "order_amount" in cols  # 合法列仍在
+    assert "split_total_amount" in cols  # 合法列仍在
 
 
 def test_restricted_view_enforces_row_filter(conn):
-    """行过滤固化在视图定义：restricted 只能看广东。"""
+    """行过滤固化在视图定义：restricted 只能看主体属性 ∩ 库内省份。
+
+    数据 pin 清理（M-P0）：期望集由 PRINCIPAL_ATTRS ∩ 库内省份动态计算，
+    防主体属性或数仓成员变更导致夹具漂移。
+    """
     install_secure_views(conn, "restricted")
-    rows = conn.execute("SELECT DISTINCT province FROM sec_fact_orders").fetchall()
-    assert {r[0] for r in rows} == {"广东"}
+    rows = conn.execute("SELECT DISTINCT province FROM sec_order_detail").fetchall()
+    db_provinces = {
+        r[0] for r in conn.execute("SELECT DISTINCT province_name FROM base_province").fetchall()
+    }
+    expected = set(PRINCIPAL_ATTRS["restricted"]["provinces"]) & db_provinces
+    assert {r[0] for r in rows} == expected
 
 
 def test_out_of_scope_table_has_no_view(conn):
     """越权表不生成视图——引用即报错（表不存在）。"""
     install_secure_views(conn, "restricted")
     with pytest.raises(duckdb.Error):
-        conn.execute("SELECT COUNT(*) FROM sec_fact_refunds").fetchone()
+        conn.execute("SELECT COUNT(*) FROM sec_order_refund_info").fetchone()
 
 
 def test_admin_views_full_columns_no_row_filter(conn):
     """admin 视图全列、无行过滤（对照基线）。"""
     install_secure_views(conn, "admin")
-    cols = {row[0] for row in conn.execute("DESCRIBE sec_fact_orders").fetchall()}
-    expected = {m.column for m in COLUMNS.values() if m.table == "fact_orders"}
+    cols = {row[0] for row in conn.execute("DESCRIBE sec_order_detail").fetchall()}
+    expected = {m.column for m in COLUMNS.values() if m.table == "order_detail"}
     assert expected <= cols
     provinces = {
-        r[0] for r in conn.execute("SELECT DISTINCT province FROM sec_fact_orders").fetchall()
+        r[0] for r in conn.execute("SELECT DISTINCT province FROM sec_order_detail").fetchall()
     }
     assert len(provinces) > 1
 
@@ -65,14 +74,19 @@ def test_view_semantics_match_guard_rls(conn):
     """双保险交叉验证：restricted 视图聚合 == guard 注入 RLS 后编译查询。"""
     install_secure_views(conn, "restricted")
     view_rows = conn.execute(
-        "SELECT province, SUM(order_amount) FROM sec_fact_orders GROUP BY province ORDER BY 1"
+        "SELECT province, SUM(split_total_amount) FROM sec_order_detail GROUP BY province ORDER BY 1"
     ).fetchall()
 
     dsl = apply_policy(
         QueryDSL.model_validate(
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    }
                 ],
                 "dimensions": [{"field": "province"}],
             }

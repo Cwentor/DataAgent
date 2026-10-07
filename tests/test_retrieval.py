@@ -25,8 +25,8 @@ from core.retrieval.tools import compile_dsl_to_duckdb, execute_dsl_query
 from semantic.dsl_schema import QueryDSL
 
 DSL = {
-    "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-    "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+    "metrics": [{"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}],
+    "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
 }
 
 
@@ -93,9 +93,9 @@ def test_export_rejects_bad_name_and_duplicate_columns(tmp_path):
 # 原始 SQL 网关
 # --------------------------------------------------------------------------- #
 def test_looks_like_sql_detection():
-    assert looks_like_sql("SELECT * FROM fact_orders")
-    assert looks_like_sql("select order_id from fact_orders where 1=1")
-    assert looks_like_sql("DROP TABLE fact_orders")
+    assert looks_like_sql("SELECT * FROM order_detail")
+    assert looks_like_sql("select order_id from order_detail where 1=1")
+    assert looks_like_sql("DROP TABLE order_detail")
     assert looks_like_sql("COPY (SELECT 1) TO 'x.parquet'")
     assert not looks_like_sql("GMV 环比趋势如何")
     assert not looks_like_sql("")
@@ -103,7 +103,7 @@ def test_looks_like_sql_detection():
 
 def test_validate_payload_rejects_string_and_sql_keys():
     with pytest.raises(GuardrailViolation):
-        validate_dsl_payload("SELECT * FROM fact_orders")
+        validate_dsl_payload("SELECT * FROM order_detail")
     with pytest.raises(GuardrailViolation):
         validate_dsl_payload({**DSL, "sql": "SELECT 1"})
     with pytest.raises(GuardrailViolation):
@@ -112,8 +112,10 @@ def test_validate_payload_rejects_string_and_sql_keys():
 
 def test_validate_payload_rejects_sql_smuggled_in_free_text():
     bad = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-        "filters": [{"field": "pay_status", "operator": "eq", "value": "SELECT * FROM x"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
+        "filters": [{"field": "order_status", "operator": "eq", "value": "SELECT * FROM x"}],
     }
     with pytest.raises(GuardrailViolation):
         validate_dsl_payload(bad)
@@ -130,7 +132,7 @@ def test_validate_payload_rebuilds_contract():
 # --------------------------------------------------------------------------- #
 def test_compile_dsl_to_duckdb_returns_sql():
     sql = compile_dsl_to_duckdb(DSL, principal="admin")
-    assert "SELECT" in sql and "fact_orders" in sql
+    assert "SELECT" in sql and "order_detail" in sql
 
 
 def test_execute_dsl_query_end_to_end(tmp_path):
@@ -143,4 +145,4 @@ def test_execute_dsl_query_end_to_end(tmp_path):
 
 def test_execute_dsl_query_rejects_raw_sql(tmp_path):
     with pytest.raises(GuardrailViolation):
-        execute_dsl_query("SELECT * FROM fact_orders", workspace=tmp_path, name="evil")
+        execute_dsl_query("SELECT * FROM order_detail", workspace=tmp_path, name="evil")

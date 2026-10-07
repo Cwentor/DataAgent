@@ -46,32 +46,32 @@ def test_heuristic_rejects_unknown_query(query):
 # --------------------------------------------------------------------------- #
 def test_heuristic_extreme_product_dimension():
     """测试用例 1（极值单实体）：'2024年GMV最高的产品是什么'
-    -> 产品维度 + 按 gmv 降序 + limit 1 + SQL 含 JOIN dim_product / GROUP BY。"""
+    -> 商品维度 + 按 gmv 降序 + limit 1（dwd 宽表冗余 sku_name，单表直查）。"""
     h = DeterministicNL2DSL()
     dsl = h.run("2024年GMV最高的产品是什么")
-    assert [d.field for d in dsl.dimensions] == ["product_name"]
+    assert [d.field for d in dsl.dimensions] == ["sku_name"]
     assert [(o.field, o.direction.value) for o in dsl.order_by] == [("gmv", "desc")]
     assert dsl.limit == 1
     sql = compile_sql(dsl)
-    assert "JOIN dim_product p ON p.product_id = f.product_id" in sql
-    assert "GROUP BY p.product_name" in sql
+    assert "FROM order_detail f" in sql
+    assert "GROUP BY f.sku_name" in sql
     assert 'ORDER BY "gmv" DESC' in sql
-    assert 'SELECT p.product_name AS "product_name", SUM(f.order_amount) AS "gmv"' in sql
+    assert 'SELECT f.sku_name AS "sku_name", SUM(f.split_total_amount) AS "gmv"' in sql
 
 
-def test_heuristic_extreme_shop_dimension():
-    """测试用例 2（极值多实体）：'上季度退款率最低的3个店铺有哪些'
-    -> 店铺维度 + 退款率升序 + limit 3 + SQL 含 JOIN dim_shop / GROUP BY。"""
+def test_heuristic_extreme_product_dimension_refund_rate():
+    """测试用例 2（极值多实体）：'上季度退款率最低的3个商品有哪些'
+    -> 商品维度 + 退款率升序 + limit 3 + SQL 含 sku 级双键 LEFT JOIN 退款表。"""
     h = DeterministicNL2DSL()
-    dsl = h.run("上季度退款率最低的3个店铺有哪些")
-    assert [d.field for d in dsl.dimensions] == ["shop_name"]
+    dsl = h.run("上季度退款率最低的3个商品有哪些")
+    assert [d.field for d in dsl.dimensions] == ["sku_name"]
     assert dsl.metrics[0].kind == "ratio" and dsl.metrics[0].alias == "refund_rate"
     assert [(o.field, o.direction.value) for o in dsl.order_by] == [("refund_rate", "asc")]
     assert dsl.limit == 3
     sql = compile_sql(dsl)
-    assert "JOIN dim_shop s ON s.shop_id = f.shop_id" in sql
-    assert "LEFT JOIN fact_refunds r ON r.order_id = f.order_id" in sql
-    assert "GROUP BY s.shop_name" in sql
+    # sku 级退款：(order_id, sku_id) 双键 LEFT JOIN，防止跨商品错配
+    assert "LEFT JOIN order_refund_info r ON r.order_id = f.order_id AND r.sku_id = f.sku_id" in sql
+    assert "GROUP BY f.sku_name" in sql
     assert 'ORDER BY "refund_rate" ASC' in sql
 
 
@@ -88,26 +88,26 @@ def test_heuristic_scalar_no_orderby_limit():
 
 
 def test_heuristic_time_plus_order_count():
-    """模块 B 验收 1：'2024年有多少订单' -> COUNT(order_id)，严禁生成 SUM(order_amount)。"""
+    """模块 B 验收 1：'2024年有多少订单' -> COUNT(DISTINCT order_id)（明细粒度），严禁生成 SUM(split_total_amount)。"""
     h = DeterministicNL2DSL()
     dsl = h.run("2024年有多少订单")
     assert len(dsl.metrics) == 1
     assert dsl.metrics[0].field == "order_id"
-    assert dsl.metrics[0].agg == "count"
+    assert dsl.metrics[0].agg == "count_distinct"
     assert dsl.metrics[0].alias == "order_count"
     assert dsl.time_filter is not None  # 2024 年时间窗口
     sql = compile_sql(dsl)
-    assert "SUM(" not in sql and "order_amount" not in sql
-    assert 'COUNT(f.order_id) AS "order_count"' in sql
+    assert "SUM(" not in sql and "split_total_amount" not in sql
+    assert 'COUNT(DISTINCT f.order_id) AS "order_count"' in sql
 
 
 def test_heuristic_order_count_variants():
-    """模块 B 变体：'多少笔/几个订单/多少单' 均解析为 COUNT(order_id)。"""
+    """模块 B 变体：'多少笔/几个订单/多少单' 均解析为 COUNT(DISTINCT order_id)。"""
     h = DeterministicNL2DSL()
     for q in ("2024年有多少笔订单", "上个月几个订单", "今年多少单", "有多少订单"):
         dsl = h.run(q)
         assert dsl.metrics[0].field == "order_id"
-        assert dsl.metrics[0].agg == "count"
+        assert dsl.metrics[0].agg == "count_distinct"
         assert dsl.metrics[0].alias == "order_count"
 
 
@@ -140,7 +140,11 @@ def test_extract_json_strips_markdown_fence():
     import json as _json
 
     raw = _json.dumps(
-        {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]}
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+            ]
+        }
     )
     fenced = "```json\n" + raw + "\n```"
     assert extract_json(fenced)["metrics"][0]["alias"] == "gmv"
@@ -150,8 +154,10 @@ def test_llm_agent_valid_output():
     import json as _json
 
     payload = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
+        "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
     }
     fake = FakeLLM([_json.dumps(payload)])
     agent = LLMNL2DSL(fake, max_retries=1)
@@ -165,14 +171,18 @@ def test_llm_agent_semantic_retry_for_entity_ranking():
     import json as _json
 
     bad = _json.dumps(
-        {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]}
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+            ]
+        }
     )
     good = _json.dumps(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "dimensions": [{"field": "product_name"}],
+            "dimensions": [{"field": "sku_name"}],
             "order_by": [{"field": "gmv", "direction": "desc"}],
             "limit": 1,
         }
@@ -180,7 +190,7 @@ def test_llm_agent_semantic_retry_for_entity_ranking():
     fake = FakeLLM([bad, good])
     agent = LLMNL2DSL(fake, max_retries=1)
     dsl = agent.run("2024年GMV最高的产品是什么")
-    assert [d.field for d in dsl.dimensions] == ["product_name"]
+    assert [d.field for d in dsl.dimensions] == ["sku_name"]
     assert dsl.order_by[0].field == "gmv"
     assert dsl.limit == 1
     assert fake.calls == 2
@@ -191,7 +201,12 @@ def test_llm_agent_semantic_retry_for_entity_ranking():
     good = _json.dumps(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "order_count"}
+                {
+                    "kind": "aggregate",
+                    "field": "order_id",
+                    "agg": "count_distinct",
+                    "alias": "order_count",
+                }
             ]
         }
     )
@@ -226,17 +241,17 @@ def test_llm_agent_rewrite_success():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
         }
     )
     corrected = _json.dumps(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
             "time_filter": {
                 "granularity": "day",
                 "range_type": "absolute",
@@ -255,10 +270,18 @@ def test_llm_agent_rewrite_retries_then_succeeds():
     import json as _json
 
     dsl = QueryDSL.model_validate(
-        {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]}
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+            ]
+        }
     )
     good = _json.dumps(
-        {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]}
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+            ]
+        }
     )
     fake = FakeLLM(["not json", good])
     agent = LLMNL2DSL(fake, max_retries=2)
@@ -283,13 +306,15 @@ def test_heuristic_vocabulary_data_driven(monkeypatch):
     from semantic import catalog
 
     h = DeterministicNL2DSL()
+    new_member = "新增省"
+    assert new_member not in catalog.DIMENSION_MEMBERS["province"]  # 前置：模拟新增成员
     monkeypatch.setitem(
         catalog.DIMENSION_MEMBERS,
         "province",
-        catalog.DIMENSION_MEMBERS["province"] + ("西藏",),
+        catalog.DIMENSION_MEMBERS["province"] + (new_member,),
     )
-    dsl = h.run("西藏的GMV是多少")
-    assert any(f.field == "province" and f.value == "西藏" for f in dsl.filters)
+    dsl = h.run(f"{new_member}的GMV是多少")
+    assert any(f.field == "province" and f.value == new_member for f in dsl.filters)
 
     monkeypatch.setitem(
         catalog.DIMENSION_MEMBERS,
@@ -319,8 +344,8 @@ def test_heuristic_region_expansion_intersects_warehouse(monkeypatch):
     ("query", "field", "alias"),
     [
         ("有几个地区", "province", "region_count"),
-        ("有几个品牌", "brand", "brand_count"),
-        ("有几个品类", "category", "category_count"),
+        ("有几个品牌", "tm_name", "brand_count"),
+        ("有几个品类", "category1_name", "category_count"),
         ("有几个省", "province", "region_count"),  # 方言变体："省"命中 province 维度计数
     ],
 )
@@ -361,7 +386,7 @@ def test_heuristic_dim_count_fallback_still_handles_defined_metrics():
     h = DeterministicNL2DSL()
 
     dsl = h.run("每个地区的GMV")
-    assert any(m.field == "order_amount" and m.agg == "sum" for m in dsl.metrics)
+    assert any(m.field == "split_total_amount" and m.agg == "sum" for m in dsl.metrics)
     assert any(d.field == "province" for d in dsl.dimensions)
 
 
@@ -371,7 +396,7 @@ def test_heuristic_dim_count_fallback_still_handles_defined_metrics():
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     ("query", "field"),
-    [("有哪些地区", "province"), ("所有品牌", "brand"), ("全部品类", "category")],
+    [("有哪些地区", "province"), ("所有品牌", "tm_name"), ("全部品类", "category1_name")],
 )
 def test_heuristic_dim_enum(query, field):
     """维度枚举查询：count_distinct 指标 + 维度入 dimensions，纯枚举不强加时间窗口。"""

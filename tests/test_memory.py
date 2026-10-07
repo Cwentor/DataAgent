@@ -31,7 +31,7 @@ def _last_dsl() -> QueryDSL:
     return QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [],
             "time_filter": {
@@ -222,10 +222,10 @@ def test_resolve_inherit_region():
     assert [m.alias for m in res.dsl.metrics] == ["gmv"]
     assert res.dsl.time_filter is not None
     assert res.dsl.time_filter.relative.unit.value == "month"
-    # 筛选替换为华南（仅一条 province 过滤，无重复）
+    # 筛选替换为华南（仅一条 province 过滤，无重复；值域为行政区划映射∩数仓成员）
     province_filters = [f for f in res.dsl.filters if f.field == "province"]
     assert len(province_filters) == 1
-    assert province_filters[0].value == ["广东"]
+    assert province_filters[0].value == ["广东", "广西", "海南", "香港", "澳门"]
 
 
 def test_resolve_inherit_single_province():
@@ -247,8 +247,10 @@ def test_resolve_inherit_time_delta():
     assert res.dsl.time_filter.range_type.value == "relative"
     assert res.dsl.time_filter.relative.amount == 30
     assert res.dsl.time_filter.relative.unit.value == "day"
-    # 原有省份筛选保持
-    assert [f.value for f in res.dsl.filters if f.field == "province"] == [["广东"]]
+    # 原有省份筛选保持（单条 IN，无重复）
+    province_filters = [f for f in res.dsl.filters if f.field == "province"]
+    assert len(province_filters) == 1
+    assert province_filters[0].value == ["广东"]
 
 
 def test_resolve_drilldown_trend():
@@ -265,15 +267,15 @@ def test_resolve_drilldown_dimension():
     """下钻语句：追加品类维度。"""
     res = resolve_context("按品类展开", _last_dsl(), None)
     assert res.mode == "drilldown" and res.reason == "drilldown_dim"
-    assert [d.field for d in res.dsl.dimensions] == ["category"]
+    assert [d.field for d in res.dsl.dimensions] == ["category1_name"]
 
 
 def test_resolve_drilldown_generic_dimensions():
-    """维度通用化（回归）：按省份 / 按支付状态 / 按性别 / 按品牌展开均被识别。"""
+    """维度通用化（回归）：按省份 / 按订单状态 / 按性别 / 按品牌展开均被识别。"""
     cases = {
         "按省份展开": "province",
-        "按品牌展开": "brand",
-        "按支付状态展开": "pay_status",
+        "按品牌展开": "tm_name",
+        "按支付状态展开": "order_status",
         "按性别展开": "gender",
     }
     for query, expected in cases.items():
@@ -284,10 +286,10 @@ def test_resolve_drilldown_generic_dimensions():
 
 def test_resolve_drilldown_dimension_no_duplicate():
     """同一维度已存在时不重复追加（维度置换：仅一次）。"""
-    base = _last_dsl().model_copy(update={"dimensions": [{"field": "category"}]})
+    base = _last_dsl().model_copy(update={"dimensions": [{"field": "category1_name"}]})
     res = resolve_context("再按品类展开", base, None)
     assert res.mode == "drilldown"
-    assert [d.field for d in res.dsl.dimensions] == ["category"]
+    assert [d.field for d in res.dsl.dimensions] == ["category1_name"]
 
 
 def test_resolve_no_delta():
@@ -304,9 +306,9 @@ def _gmv_category_dsl() -> QueryDSL:
     return QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "dimensions": [{"field": "category"}],
+            "dimensions": [{"field": "category1_name"}],
             "time_filter": {
                 "granularity": "month",
                 "range_type": "relative",
@@ -354,7 +356,7 @@ def test_resolve_time_plus_order_count_resets_metrics():
     res = resolve_context("2024年有多少订单", _last_dsl(), None)
     assert res.mode == "fresh" and res.reason == "topic_switch"
     assert "已识别为新问题" in res.summary
-    # RESET 不产出基于上轮 DSL 的合并结果（严禁沿用 SUM(order_amount)/gmv）
+    # RESET 不产出基于上轮 DSL 的合并结果（严禁沿用 SUM(split_total_amount)/gmv）
     assert res.dsl is None
 
 
@@ -368,7 +370,7 @@ def test_resolve_pure_time_inherit_keeps_metric():
     assert res.dsl.time_filter is not None
     assert res.dsl.time_filter.range_type.value == "absolute"
     assert res.dsl.time_filter.absolute.start.isoformat() == "2024-01-01"
-    assert [m.field for m in res.dsl.metrics] == ["order_amount"]  # 仍是 SUM，未变 count
+    assert [m.field for m in res.dsl.metrics] == ["split_total_amount"]  # 仍是 SUM，未变 count
 
 
 # --------------------------------------------------------------------------- #
@@ -421,7 +423,7 @@ def test_strip_rls_filters_removes_injected_rls():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [],
             "filters": [
@@ -467,7 +469,11 @@ def test_e2e_inherit_region_then_trend(conn):
     assert "error" not in first, first.get("error_detail")
     prov_f1 = [f for f in first["dsl"]["filters"] if f["field"] == "province"]
     assert prov_f1 == [
-        {"field": "province", "operator": "in", "value": ["上海", "江苏", "浙江", "山东"]}
+        {
+            "field": "province",
+            "operator": "in",
+            "value": ["上海", "江苏", "浙江", "安徽", "福建", "江西", "山东", "台湾"],
+        }
     ]
 
     # 轮次 2：那华南地区呢？ -> 继承上轮时间与指标，仅替换地区
@@ -476,7 +482,9 @@ def test_e2e_inherit_region_then_trend(conn):
     assert second["context_summary"] and "华南" in second["context_summary"]
     assert second["session_id"] == sid
     prov_f2 = [f for f in second["dsl"]["filters"] if f["field"] == "province"]
-    assert prov_f2 == [{"field": "province", "operator": "in", "value": ["广东"]}]
+    assert prov_f2 == [
+        {"field": "province", "operator": "in", "value": ["广东", "广西", "海南", "香港", "澳门"]}
+    ]
     # 时间窗口与指标被继承（与第一轮完全一致）
     assert second["dsl"]["time_filter"] == first["dsl"]["time_filter"]
     assert second["dsl"]["metrics"] == first["dsl"]["metrics"]
@@ -490,7 +498,9 @@ def test_e2e_inherit_region_then_trend(conn):
     assert third["dsl"]["time_filter"]["granularity"] == "day"
     # 继承的省份筛选仍在
     prov_f3 = [f for f in third["dsl"]["filters"] if f["field"] == "province"]
-    assert prov_f3 == [{"field": "province", "operator": "in", "value": ["广东"]}]
+    assert prov_f3 == [
+        {"field": "province", "operator": "in", "value": ["广东", "广西", "海南", "香港", "澳门"]}
+    ]
     assert [m["alias"] for m in third["dsl"]["metrics"]] == ["gmv"]
 
 
@@ -525,7 +535,7 @@ def test_e2e_exclusive_count_intent_resets_previous_metric(conn):
     first = run_query("上个月各品类的GMV排名", conn=conn, session_id=sid, user="alice")
     assert "error" not in first, first.get("error_detail")
     assert [m["alias"] for m in first["dsl"]["metrics"]] == ["gmv"]
-    assert [d["field"] for d in first["dsl"]["dimensions"]] == ["category"]
+    assert [d["field"] for d in first["dsl"]["dimensions"]] == ["category1_name"]
 
     # 轮次 2：排他 + 维度基数请求 -> 必须 RESET，指标改为 count_distinct(category)
     second = run_query("我只需要知道，广东有多少种品类", conn=conn, session_id=sid, user="alice")
@@ -533,7 +543,7 @@ def test_e2e_exclusive_count_intent_resets_previous_metric(conn):
     # 指标被重置为 count_distinct(category)，不再沿用上轮的 gmv
     metrics = second["dsl"]["metrics"]
     assert len(metrics) == 1
-    assert metrics[0]["field"] == "category"
+    assert metrics[0]["field"] == "category1_name"
     assert metrics[0]["agg"] == "count_distinct"
     assert [m["alias"] for m in metrics] != ["gmv"]
     # count 型基数查询不按品类分组（否则组内 count 恒为 1）
@@ -596,7 +606,7 @@ def test_e2e_self_heal_updates_last_dsl(conn, monkeypatch):
     state = default_session_store().get(sid, "alice")
     assert state is not None and state.last_dsl is not None
     prov = [f.value for f in state.last_dsl.filters if f.field == "province"]
-    assert prov == [["广东"]]
+    assert prov == [["广东", "广西", "海南", "香港", "澳门"]]
 
 
 def test_e2e_self_heal_failure_preserves_last_dsl(conn, monkeypatch):
@@ -636,9 +646,9 @@ def test_e2e_rls_injected_once_after_inherit(conn):
     )
     assert "error" not in second, second.get("error_detail")
     prov = [f for f in second["dsl"]["filters"] if f["field"] == "province"]
-    # 用户增量（华南 in 广东） + RLS（analyst 五省），恰好各一份，无重复注入
+    # 用户增量（华南 in 五省区） + RLS（analyst 五省），恰好各一份，无重复注入
     assert len(prov) == 2
-    assert ["广东"] in [f["value"] for f in prov]
+    assert ["广东", "广西", "海南", "香港", "澳门"] in [f["value"] for f in prov]
     assert len([f for f in prov if f["value"] == ["广东", "浙江", "江苏", "北京", "上海"]]) == 1
 
 
@@ -651,10 +661,13 @@ def test_collect_deltas_vocabulary_data_driven(monkeypatch):
     from agent import memory
     from semantic import catalog
 
+    new_member = "新增省"
+    members = catalog.DIMENSION_MEMBERS["province"]
+    assert new_member not in members  # 前置：模拟"新增维度成员"必须选未存在成员
     monkeypatch.setitem(
         catalog.DIMENSION_MEMBERS,
         "province",
-        catalog.DIMENSION_MEMBERS["province"] + ("西藏",),
+        (*members, new_member),
     )
-    d = memory._collect_deltas("那西藏呢")
-    assert d.provinces == ["西藏"]
+    d = memory._collect_deltas(f"那{new_member}呢")
+    assert d.provinces == [new_member]

@@ -22,7 +22,10 @@ def test_audit_record_roundtrip():
         session_id="sess-1",
         user="alice",
         prompt="各品类GMV",
-        retrieval_context={"fields": ["category", "order_amount"], "tables": ["fact_orders"]},
+        retrieval_context={
+            "fields": ["category", "split_total_amount"],
+            "tables": ["order_detail"],
+        },
         dsl={"metrics": []},
         sql="SELECT 1",
         latency_ms=12.34,
@@ -34,7 +37,7 @@ def test_audit_record_roundtrip():
     assert data["session_id"] == "sess-1"
     assert data["user"] == "alice"
     assert data["prompt"] == "各品类GMV"
-    assert data["retrieval_context"]["fields"] == ["category", "order_amount"]
+    assert data["retrieval_context"]["fields"] == ["category", "split_total_amount"]
     assert data["sql"] == "SELECT 1"
     assert data["latency_ms"] == 12.34
     assert data["row_count"] == 3
@@ -109,9 +112,9 @@ def test_audit_store_duckdb(tmp_path):
             session_id="s1",
             user="u1",
             prompt="GMV",
-            retrieval_context={"fields": ["order_amount"]},
+            retrieval_context={"fields": ["split_total_amount"]},
             dsl={"metrics": []},
-            sql="SELECT SUM(order_amount) AS gmv",
+            sql="SELECT SUM(split_total_amount) AS gmv",
             latency_ms=5.0,
             row_count=1,
             error=None,
@@ -127,7 +130,9 @@ def test_audit_store_duckdb(tmp_path):
         ).fetchall()
     finally:
         conn.close()
-    assert rows == [("r1", "s1", "u1", "GMV", "SELECT SUM(order_amount) AS gmv", 5.0, 1, None)]
+    assert rows == [
+        ("r1", "s1", "u1", "GMV", "SELECT SUM(split_total_amount) AS gmv", 5.0, 1, None)
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -152,7 +157,7 @@ def test_run_query_writes_audit(conn, tmp_path):
     assert line["prompt"] == "2024年6月成功订单的GMV是多少？"
     assert "SELECT" in line["sql"]
     assert line["dsl"] is not None
-    assert line["retrieval_context"]["fields"] == ["order_amount", "pay_status"]
+    assert line["retrieval_context"]["fields"] == ["order_status", "split_total_amount"]
     assert line["row_count"] == 1
     assert line["latency_ms"] >= 0
     assert line["error"] is None

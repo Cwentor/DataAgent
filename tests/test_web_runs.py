@@ -36,7 +36,7 @@ def registry():
 
 def test_run_events_seq_monotonic(registry):
     """事件 seq 从 1 单调递增且随帧下发（前端游标续传契约）。"""
-    run = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t1")
+    run = registry.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t1")
     _wait_terminal(run)
     seqs = [s for s, _ in run._events]
     assert seqs and seqs[0] == 1
@@ -49,7 +49,7 @@ def test_run_events_seq_monotonic(registry):
 
 def test_subscribe_replays_from_cursor(registry):
     """游标订阅：after=0 全量重放无缺无重；after=中段只取增量。"""
-    run = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t1")
+    run = registry.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t1")
     _wait_terminal(run)
 
     full: list[dict] = []
@@ -69,7 +69,7 @@ def test_subscribe_unknown_run_or_owner_emits_error(registry):
     registry.subscribe("run-deadbeef", 0, got.append, owner="alice")
     assert got[-1]["event"] == "error"
 
-    run = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t1")
+    run = registry.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t1")
     _wait_terminal(run)
     got2: list[dict] = []
     registry.subscribe(run.run_id, 0, got2.append, owner="mallory")
@@ -98,7 +98,7 @@ def test_buffer_overflow_honest_degradation():
 
 def test_status_owner_fail_closed(registry):
     """状态快照属主校验：本人可见、他人 None、admin 全局可见。"""
-    run = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t1")
+    run = registry.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t1")
     _wait_terminal(run)
     assert registry.status(run.run_id, owner="alice") is not None
     assert registry.status(run.run_id, owner="bob") is None
@@ -162,7 +162,7 @@ def test_hitl_resume_wrong_owner_fail_closed(registry, planner_clarify_then_plan
 
 def test_ttl_cleanup(registry):
     """TTL 过期的终态 run 被惰性清理；运行中不受影响。"""
-    run = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t1")
+    run = registry.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t1")
     _wait_terminal(run)
     with run._cond:
         run.finished_at = time.time() - 7200  # 人为过期
@@ -174,11 +174,11 @@ def test_registry_overflow_evicts_oldest_terminal():
     """超容量：最旧终态 run 先淘汰，运行中 run 不淘汰。"""
     reg = RunRegistry(max_runs=2, ttl_seconds=3600)
     try:
-        r1 = reg.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t1")
+        r1 = reg.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t1")
         _wait_terminal(r1)
-        r2 = reg.start("2024年6月上海的GMV是多少", owner="alice", session_key="webui:t2")
+        r2 = reg.start("2024年6月的GMV是多少", owner="alice", session_key="webui:t2")
         _wait_terminal(r2)
-        r3 = reg.start("2024年7月广州的GMV是多少", owner="alice", session_key="webui:t3")
+        r3 = reg.start("2024年7月的GMV是多少", owner="alice", session_key="webui:t3")
         _wait_terminal(r3)
         assert reg.status(r1.run_id, owner="alice") is None  # 最旧被淘汰
         assert reg.status(r3.run_id, owner="alice") is not None
@@ -188,7 +188,7 @@ def test_registry_overflow_evicts_oldest_terminal():
 
 def test_parallel_runs_isolated(registry):
     """并行会话隔离：两个 run 各自执行、事件互不串台。"""
-    r1 = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t1")
+    r1 = registry.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t1")
     r2 = registry.start("2024年5月各省份的订单量是多少", owner="alice", session_key="webui:t2")
     assert _wait_terminal(r1) == "done"
     assert _wait_terminal(r2) == "done"
@@ -215,7 +215,7 @@ def test_memory_writeback_and_history_inheritance(registry):
     """
     from agent.memory import default_session_store
 
-    r1 = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t-mem")
+    r1 = registry.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t-mem")
     assert _wait_terminal(r1) == "done"
     state = default_session_store().get("webui:t-mem", "alice")
     assert state is not None
@@ -242,16 +242,16 @@ def test_memory_writeback_and_history_inheritance(registry):
 
 def test_find_active_idempotent_reuse(registry):
     """幂等保护：同属主+同会话+同提问的执行中 run 被复用，杜绝重复执行。"""
-    r1 = registry.start("2024年5月北京的GMV是多少", owner="alice", session_key="webui:t1")
-    found = registry.find_active("alice", "webui:t1", "2024年5月北京的GMV是多少")
+    r1 = registry.start("2024年5月的GMV是多少", owner="alice", session_key="webui:t1")
+    found = registry.find_active("alice", "webui:t1", "2024年5月的GMV是多少")
     assert found is r1  # 复用同一 run，不新建
     # 不同提问 / 不同会话 / 不同属主都不复用
     assert registry.find_active("alice", "webui:t1", "别的问题") is None
-    assert registry.find_active("alice", "webui:t2", "2024年5月北京的GMV是多少") is None
-    assert registry.find_active("bob", "webui:t1", "2024年5月北京的GMV是多少") is None
+    assert registry.find_active("alice", "webui:t2", "2024年5月的GMV是多少") is None
+    assert registry.find_active("bob", "webui:t1", "2024年5月的GMV是多少") is None
     # 终态后不再复用（允许同问重问）
     _wait_terminal(r1)
-    assert registry.find_active("alice", "webui:t1", "2024年5月北京的GMV是多少") is None
+    assert registry.find_active("alice", "webui:t1", "2024年5月的GMV是多少") is None
 
 
 def test_subscribe_idle_timeout_configurable():

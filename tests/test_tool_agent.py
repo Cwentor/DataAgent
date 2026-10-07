@@ -102,7 +102,7 @@ def test_export_truncation_and_desensitization(tmp_path, monkeypatch):
     prior = ToolResult(
         success=True,
         data={
-            "columns": ["order_id", "user_id", "user_name", "order_amount"],
+            "columns": ["order_id", "user_id", "user_name", "split_total_amount"],
             "rows": [
                 ["o1", "u1", "张三", 100.0],
                 ["o2", "u2", "李四", 200.0],

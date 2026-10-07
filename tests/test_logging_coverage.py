@@ -69,7 +69,9 @@ def test_dataqa_findings_logged(tmp_path, monkeypatch, caplog):
 
     monkeypatch.setattr(tools, "execute_sql", fake_execute_sql)
     dsl = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
     }
     tools.execute_dsl_query(dsl, principal="admin", workspace=tmp_path, name="log_qa")
     assert any(

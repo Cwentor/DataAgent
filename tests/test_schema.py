@@ -13,7 +13,9 @@ from semantic.dsl_schema import (
 
 def _base_dsl(**overrides) -> dict:
     dsl = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
         "filters": [],
         "order_by": [],
         "limit": 100,
@@ -39,7 +41,7 @@ def test_order_by_preserved_when_dimension_present():
     """有分组维度时保留 order_by（非标量，排序有语义）。"""
     dsl = QueryDSL.model_validate(
         _base_dsl(
-            dimensions=[{"field": "product_name"}],
+            dimensions=[{"field": "sku_name"}],
             order_by=[{"field": "gmv", "direction": "desc"}],
         )
     )
@@ -48,7 +50,11 @@ def test_order_by_preserved_when_dimension_present():
 
 def test_default_limit_is_100():
     dsl = QueryDSL.model_validate(
-        {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}]}
+        {
+            "metrics": [
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+            ]
+        }
     )
     assert dsl.limit == 100
 
@@ -61,9 +67,9 @@ def test_alias_rejects_sql_injection_payload():
                 metrics=[
                     {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
-                        "alias": "gmv FROM dim_user u JOIN fact_orders f2 ON 1=1 WHERE 1=1 --",
+                        "alias": "gmv FROM user_info u JOIN order_detail f2 ON 1=1 WHERE 1=1 --",
                     }
                 ]
             )
@@ -94,7 +100,9 @@ def test_extra_field_is_forbidden():
 def test_between_requires_two_values():
     with pytest.raises(ValidationError):
         QueryDSL.model_validate(
-            _base_dsl(filters=[{"field": "order_amount", "operator": "between", "value": [1]}])
+            _base_dsl(
+                filters=[{"field": "split_total_amount", "operator": "between", "value": [1]}]
+            )
         )
 
 
@@ -132,7 +140,7 @@ def test_window_metric_cumsum_parses():
                     "kind": "window",
                     "base": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "gmv",
                     },
@@ -155,7 +163,7 @@ def test_moving_avg_requires_window_size():
                         "kind": "window",
                         "base": {
                             "kind": "aggregate",
-                            "field": "order_amount",
+                            "field": "split_total_amount",
                             "agg": "sum",
                             "alias": "gmv",
                         },

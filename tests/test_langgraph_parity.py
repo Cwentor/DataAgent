@@ -71,9 +71,14 @@ def test_clarify_interrupt_and_resume_roundtrip(monkeypatch):
             kind="query",
             dsl={
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    }
                 ],
-                "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
                 "time_filter": {
                     "range_type": "absolute",
                     "absolute": {"start": "2024-05-01", "end": "2024-05-15"},

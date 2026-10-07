@@ -174,7 +174,7 @@ def test_unsafe_sql_rejects_copy_export_import(big_conn):
     """P0-1：COPY/EXPORT/IMPORT 等语句导致文件读写，应被拒绝。"""
     for sql in (
         "COPY (SELECT 1) TO 'x.csv'",
-        "COPY fact_orders TO 'fact_orders.csv'",
+        "COPY order_detail TO 'order_detail.csv'",
         "EXPORT DATABASE 'dir'",
         "IMPORT DATABASE 'dir'",
         "INSTALL 'http://example.com/extension'",
