@@ -1,23 +1,84 @@
 {
   "principal_attrs": {
-    "analyst": { "provinces": ["广东", "浙江", "江苏", "北京", "上海"] },
-    "restricted": { "provinces": ["广东"] }
-  },
-  "policies": {
-    "admin": {
-      "allowed_tables": ["fact_orders", "fact_refunds", "dim_user", "dim_product", "dim_shop"]
-    },
     "analyst": {
-      "allowed_tables": ["fact_orders", "fact_refunds", "dim_user", "dim_product", "dim_shop"],
-      "row_filters": [
-        { "field": "province", "operator": "in", "param": "principal.provinces" }
+      "provinces": [
+        "广东",
+        "浙江",
+        "江苏",
+        "北京",
+        "上海"
       ]
     },
     "restricted": {
-      "allowed_tables": ["fact_orders", "dim_user", "dim_product"],
-      "forbidden_columns": ["discount_amount", "refund_amount"],
+      "provinces": [
+        "广东"
+      ]
+    }
+  },
+  "policies": {
+    "admin": {
+      "allowed_tables": [
+        "order_detail",
+        "order_info",
+        "order_refund_info",
+        "payment_info",
+        "sku_info",
+        "user_info",
+        "base_province",
+        "cart_info",
+        "favor_info",
+        "coupon_use",
+        "comment_info",
+        "fact_page_view",
+        "fact_action",
+        "fact_display",
+        "fact_start"
+      ]
+    },
+    "analyst": {
+      "allowed_tables": [
+        "order_detail",
+        "order_info",
+        "order_refund_info",
+        "payment_info",
+        "sku_info",
+        "user_info",
+        "base_province",
+        "cart_info",
+        "favor_info",
+        "coupon_use",
+        "comment_info",
+        "fact_page_view",
+        "fact_action",
+        "fact_display",
+        "fact_start"
+      ],
       "row_filters": [
-        { "field": "province", "operator": "in", "param": "principal.provinces" }
+        {
+          "field": "province",
+          "operator": "in",
+          "param": "principal.provinces"
+        }
+      ]
+    },
+    "restricted": {
+      "allowed_tables": [
+        "order_detail",
+        "order_info",
+        "sku_info",
+        "user_info",
+        "base_province"
+      ],
+      "forbidden_columns": [
+        "split_coupon_amount",
+        "refund_amount"
+      ],
+      "row_filters": [
+        {
+          "field": "province",
+          "operator": "in",
+          "param": "principal.provinces"
+        }
       ]
     }
   }

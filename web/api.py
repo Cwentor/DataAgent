@@ -581,13 +581,14 @@ async def post_agent_run(request: Request) -> Response:
         else:
             payload["clarification"] = result.clarification
         return Response(
-            content=json.dumps(payload, ensure_ascii=False),
+            content=json.dumps(payload, ensure_ascii=False, default=str),
             media_type="application/json; charset=utf-8",
         )
     result_dict = result.to_dict()
     result_dict["auth"] = ctx.to_dict()
+    # default=str：结果行含 DECIMAL 金额，裸 dumps 抛 TypeError
     return Response(
-        content=json.dumps(result_dict, ensure_ascii=False),
+        content=json.dumps(result_dict, ensure_ascii=False, default=str),
         media_type="application/json; charset=utf-8",
     )
 
@@ -602,15 +603,20 @@ async def get_agent_run_status(run_id: str, request: Request) -> Response:
     if snap is None:
         raise HTTPException(status_code=404, detail="run not found")
     snap.pop("resume_token", None)  # 恢复句柄仅经事件流下发，轮询快照不暴露
+    # default=str：快照可含数据集预览行（DECIMAL 金额），裸 dumps 抛 TypeError
     return Response(
-        content=json.dumps(snap, ensure_ascii=False),
+        content=json.dumps(snap, ensure_ascii=False, default=str),
         media_type="application/json; charset=utf-8",
     )
 
 
 def _sse_frame_bytes(event: dict) -> bytes:
-    """SSE 帧构造：与 stdlib _sse_write 逐字节同源（json.dumps ensure_ascii=False）。"""
-    frame = json.dumps(event, ensure_ascii=False)
+    """SSE 帧构造：与 stdlib _sse_write 逐字节同源（json.dumps ensure_ascii=False）。
+
+    default=str：数仓金额列为 DECIMAL，tool_end/artifact 载荷行数据携带
+    decimal.Decimal，裸 json.dumps 在泵线程抛 TypeError 导致流静默截断。
+    """
+    frame = json.dumps(event, ensure_ascii=False, default=str)
     return f"data: {frame}\n\n".encode()
 
 
