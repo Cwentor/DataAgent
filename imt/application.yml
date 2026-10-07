@@ -1,0 +1,97 @@
+# 外部配置打开
+logging.config: ./logback.xml
+
+
+#http模式下，发送的地址
+mock:
+  log:
+    type: "file"      #"file" "http" "kafka" "none"
+    http:
+      url: "http://localhost:8090/applog"
+    kafka:
+        server: "hadoop102:9092,hadoop102:9092,hadoop102:9092"
+        topic: "topic_log"
+
+spring:
+    datasource:
+      type: com.alibaba.druid.pool.DruidDataSource
+      druid:
+        url: jdbc:mysql://hadoop102:3306/gmall?characterEncoding=utf-8&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=GMT%2B8
+        username: root
+        password: "000000"
+        driver-class-name:  com.mysql.cj.jdbc.Driver
+        max-active: 20
+        test-on-borrow: true
+
+
+mybatis-plus.global-config.db-config.field-strategy: not_null
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+
+mybatis:
+   mapper-locations: classpath:mapper/*.xml
+
+#业务日期
+mock.date: "2022-06-08"
+
+# 日志是否写入数据库一份  写入z_log表中
+mock.log.db.enable: 1
+
+# 清空
+mock.clear.busi: 1
+
+# 清空用户
+mock.clear.user: 0
+
+# 批量生成新用户
+mock.new.user: 0
+  #session次数
+mock.user-session.count: 200
+  #设备最大值
+mock.max.mid: 1000000
+
+mock.if-realtime: 0
+#访问时间分布权重
+mock.start-time-weight: "10:5:0:0:0:0:5:5:5:10:10:15:20:10:10:10:10:10:20:25:30:35:30:20"
+
+#支付类型占比 支付宝 ：微信 :银联
+mock.payment_type_weight: "40:50:10"
+
+  #页面平均访问时间
+mock.page.during-time-ms: 20000
+  #错误概率 百分比
+mock.error.rate: 3
+  #每条日志发送延迟 ms
+mock.log.sleep: 100
+  #课程详情来源  用户查询，商品推广，智能推荐, 促销活动
+mock.detail.source-type-rate: "40:25:15:20"
+
+mock.if-cart-rate: 100
+
+mock.if-favor-rate: 70
+
+mock.if-order-rate: 100
+
+mock.if-refund-rate: 50
+
+
+
+  #搜索关键词
+mock.search.keyword: "轻薄本,拯救者,联想,小米,iPhone14,扫地机器人,衬衫,心相印纸抽,匡威"
+
+
+  #用户数据变化概率
+mock.user.update-rate: 20
+
+
+# 男女浏览品牌比重（11 品牌)
+mock.tm-weight.male: "3:2:5:5:5:1:1:1:1:1:1"
+mock.tm-weight.female: "1:5:1:1:2:2:2:5:5:5:5"
+
+
+# 外连类型比重（5 种）
+mock.refer-weight: "10:2:3:4:5"
+
+# 线程池相关配置
+mock.pool.core: 20
+mock.pool.max-core: 100

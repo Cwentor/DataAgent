@@ -68,6 +68,10 @@ Thumbs.db
 # --- 审计产物（JSONL 对象存储 + DuckDB 审计表） ---
 logs/
 
+# --- Gmall 参考资产（原版 jar 与反编译产物，仅本地参考不进仓库） ---
+imt/*.jar
+imt/decompiled/
+
 # --- 开发工具缓存（DSH vision router 产物） ---
 .dsh-vision-router/
 .zcode/
