@@ -69,8 +69,11 @@ ruff check .
 # Lint 自动修复
 ruff check --fix .
 
-# 重建本地数仓（幂等，用于生成 DuckDB 文件）
+# 重建本地数仓（幂等，Gmall 电商模型：业务表 + 埋点日志解析入仓）
 python -m mock.init_duckdb
+
+# 重建埋点日志解析链路的种子数据（仅种子变更时需要，需 imt/gmall.sql）
+python -m mock.gmall.seed_extract
 
 # 评测（oracle / agent 双模式）
 python -m eval.eval_runner
@@ -93,7 +96,9 @@ core/retrieval/ 追加（十九期）：sql_lift.py 提升闸门（LLM SQL -> DS
             视图受治理执行）；二者构成三层同心圆取数架构的 L2/L3 层
 
 eval/       Golden 评测骨架与用例（oracle / agent 双模式）+ 意图路由评测（intent_eval）
-mock/       确定性 mock 数仓（DuckDB）
+mock/       确定性 Gmall 电商 mock 数仓（DuckDB）：mock/init_duckdb.py 入口 +
+            mock/gmall/ 生成器（种子表提取 / 会话行为链模拟 / 埋点 JSON 日志 /
+            日志解析入仓；反向解析规格见 docs/plans/2026-10-06-gmall-mock-reverse-spec.md）
 present/    展示层（解释 + 可视化推荐）
 security/   权限控制（表级/列级/行级 RLS + 生成前作用域收窄 + views.py 会话级
             安全视图：禁列物理投影 / RLS 固化 / 连接加固）
@@ -149,11 +154,28 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas +
 
 - 所有新增逻辑字段必须登记在 `semantic/catalog.py` 的 `COLUMNS` 白名单，否则编译器拒绝；
 - DSL 模型一律 `extra="forbid"`，Agent 只能产出契约内字段；
-- 评测锚点 `AS_OF_DATE = 2024-06-30`、随机种子 42，保证确定性可复现；
+- 评测锚点 `AS_OF_DATE = 2025-12-31`（数据域 2021-01-01 ~ 2025-12-31）、随机种子 42，保证确定性可复现；
 - DSL 进阶语义：窗口指标 `WindowMetric`（cumsum/moving_avg，需时间维度）、日期补零 `fill_gaps`（需时间维度+明确时间窗口，支持 day/week/month/quarter）、分组 `TopN`（ROW_NUMBER 分区过滤）；编译器对 comparison / top_n / fill_gaps / window 的互斥组合显式抛 `CompileError`；
 - SQL 执行层（`exec/`）：statement_timeout 用线程看门狗 + `conn.interrupt()` 取消；扫描行数上限用 `EXPLAIN ANALYZE` 预检熔断；LIMIT 硬上限对返回行数做防御性熔断；执行前审计门（`exec/audit.py`）对编译产物做静态审计——笛卡尔积 / 只读结构违规 REJECTED 熔断（`GuardrailRejected`，拒绝原因可自愈）、无界输出 WARNING（真实边界由返回行数硬上限承担，勿升级为 REJECTED）；编译/引擎精确报错会喂回 LLM 重写 DSL 自愈（至少 1 次，`SQL_SELF_HEAL_MAX_RETRIES`），确定性兜底模式下透传原始报错；
 - 结果断言层（`core/retrieval/quality.py`）：执行后、导出前四类确定性质检（空结果 / NULL 率 / 非负指标负值 / 聚合维度组合唯一性），发现随 `ParquetRef.audit`（{guard, qa}）全链路可见（SSE 事件 / critic / 报告质检小节 / 分级日志），不自动否决执行；ratio/window 派生指标不做负值断言；
 - 重规划自愈上下文：编排链路失败回 plan 时，`planner_prompt` 必须注入 `error_context`（最近失败摘要）——严禁让 LLM 盲重试；`error_context=None` 时提示词与旧契约逐字一致；
+- 语义单一事实源（M-P2 语义去耦，2026-10）：**config/semantic.json 是唯一静态业务事实源**——
+  字段/标签/别名/连接规则/指标口径（metrics[]，含 DSL shape）/支付口径（paid_filter）/缺省窗口/
+  反思概念/枚举值标签/大区映射/维度成员种子等一律登记 json，semantic/catalog.py 为 import 时
+  json 直读（缺必要节快速失败），**严禁在手写代码（heuristic/nodes/glossary/prompts/labels）里
+  新增业务映射**；问法层词表（趋势/下钻/排他等触发词）统一放 agent/lexicon.py，不进 json。
+  改 json 后跑 python -m semantic.catalog_loader 校验；评价断言分契约层（DSL/SQL 形态，
+  --skip-snapshot）与快照层（结果集）两级。
+
+- Gmall mock 数仓与语义域（二十期，2026-10）：mock 数仓为 Gmall 电商模型（种子表取自
+  imt/gmall.sql 提取的 seed_data.json；用户/购物车/订单/支付/退款/评论由会话行为链模拟生成；
+  埋点 JSON 日志落 logs/gmall_applog/ 后经解析链路入仓 4 张行为事实表）。交易域锚点 =
+  order_detail 明细宽表（冗余品牌/类目链/用户/省份/订单状态），订单数口径 = count_distinct(order_id)；
+  流量域 fact_page_view/fact_action/fact_display/fact_start 为独立查询域（QUERY_DOMAINS 域锚点，
+  跨域查询 CompileError，流量域 time_field 用 page_view_time/action_time 等）。确定性三原则不变：
+  种子 42、锚点 AS_OF_DATE=2025-12-31（数据域 2021-01-01 ~ 2025-12-31）、单 rng 顺序消费——改生成器逻辑须先跑
+  行数/指纹对照并重固化 golden（eval/rebuild_golden.py）。
+
 - 提交前确保 `black --check .`、`ruff check .`、`python -m pytest -q` 全绿。
 
 - 能力边界与三层取数架构（十九期，2026-10）：能力边界 = 治理管道边界（只读 + RLS + 敏感数据保护 + 资源上限），不是 DSL 契约表达力；诚实 = 不虚构 + 假设透明（assumptions 契约字段，报告头部呈现），拒答降为最后手段——二轮歧义转"带假设作答"，严禁静默猜口径；三层同心圆：L1 确定性核（Planner 直产 DSL）/ L2 提升闸门（拒升精确清单喂回自愈 ≤2 次，拒升 ≠ 拒答）/ L3 探索层（第四类 interrupt 审批门 allow_once/allow_session/deny；L4 自动放行硬边界 = SQL 无主体禁列；deny = 诚实告知）；探索 SQL 永不原文执行（表名重写到 sec_* 安全视图 + 三护栏 + PII 脱敏）；沙箱 `connect/database` 调用永久封死（取数权只在执行层）；意图词表新增枚举/基数触发词时须同步 `intent_golden.json` 锚点；
