@@ -335,9 +335,9 @@ def build_gmall_tables(
 
     # 逐日逐会话演算：业务行随会话落 state，埋点日志按天写 JSONL
     if applog_dir is None:
-        applog_dir = settings.PROJECT_ROOT / config.APPLOG_DIR
+        applog_dir = Path(settings.APPLOG_DIR)
     if write_applog:
-        applog_dir.mkdir(parents=True, exist_ok=True)
+        applog_dir.mkdir(parents=True, exist_ok=True)  # 运行时自动创建日志目录
     total_events = 0
     for offset in range(domain_days):
         day = datetime.combine(start_day + timedelta(days=offset), time(0, 0, 0))

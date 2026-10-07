@@ -28,6 +28,10 @@ DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 # 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
 WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
 
+# 埋点 JSON 日志目录（mock 数仓生成时按天落盘 JSONL、解析链路读回入仓；
+# 生成侧写入时自动逐级创建，读取侧目录缺失视为空日志域）
+APPLOG_DIR: Path = PROJECT_ROOT / "logs" / "gmall_applog"
+
 # 数据与评测统一锚点日期（= mock 数仓数据域末日）
 AS_OF_DATE: date = date(2025, 12, 31)
 

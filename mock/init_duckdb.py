@@ -71,7 +71,7 @@ def main() -> None:
         for t, n in counts.items():
             print(f"  - {t}: {n} 行")
         print(f"[init_duckdb] 数据库文件: {db_path}")
-        print(f"[init_duckdb] 埋点日志目录: {settings.PROJECT_ROOT / 'logs' / 'gmall_applog'}")
+        print(f"[init_duckdb] 埋点日志目录: {settings.APPLOG_DIR}")
     finally:
         conn.close()
 

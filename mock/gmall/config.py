@@ -51,6 +51,3 @@ DETAIL_SOURCE_TYPE_RATE = "40:25:15:20"  # 查询/推广/推荐/促销
 APPRAISE_WEIGHT = "80:10:4:1"  # 1201 好评 / 1202 中评 / 1203 差评 / 1204 追评
 
 SEARCH_KEYWORDS = "轻薄本,拯救者,联想,小米,iPhone14,扫地机器人,衬衫,心相印纸抽,匡威".split(",")
-
-# 埋点 JSON 日志落盘目录（相对项目根）
-APPLOG_DIR = "logs/gmall_applog"
