@@ -133,7 +133,7 @@ def validate_semantics(query: str, dsl: QueryDSL, principal: str | None = None) 
         errors.append(f"排序缺失：期望包含 {sorted(expected_order - actual_order)}")
 
     # 过滤条件一致性（审计修复 T02）："成功/成交"等明确口径词被启发式识别为
-    # pay_status 过滤、区域/品类词被识别为维度过滤时，LLM DSL 必须包含同义过滤，
+    # order_status 过滤、区域/品类词被识别为维度过滤时，LLM DSL 必须包含同义过滤，
     # 否则口径漂移（如漏掉 SUCCESS 过滤导致去重用户数 123 != 139）。
     def _filter_sig(f) -> str:
         value = json.dumps(f.value, ensure_ascii=False, sort_keys=True)

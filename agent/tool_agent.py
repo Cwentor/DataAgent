@@ -34,7 +34,8 @@ from typing import Any
 from agent.agent import extract_json
 from agent.clarify import Clarification, detect_clarifications
 from agent.errors import PipelineError
-from agent.heuristic import REGIONS, dimension_members
+from agent.heuristic import dimension_members
+from agent.lexicon import TREND_KEYWORDS as _TREND_KEYWORDS
 from agent.llm import resolve_default_client
 from agent.router import (
     BLOCKED_DESTRUCTIVE_REPLY,
@@ -44,6 +45,7 @@ from agent.router import (
 from audit.logging import get_logger
 from config import settings
 from providers import chat_text
+from semantic import catalog
 from semantic.dsl_schema import QueryDSL
 from tools.base import ToolContext, ToolResult
 from tools.registry import ToolRegistry, default_registry
@@ -56,7 +58,9 @@ CHITCHAT_REPLY = "抱歉，我是数据分析助手，只能回答与业务数�
 NO_DATA_REPLY = "未查询到符合条件的数据。可能原因：{reason}"
 
 # 数仓数据域上界（与评测锚点一致的元数据；空结果时间归因用它判断超界）
-_DATA_DOMAIN_TIP = "所选时间范围可能超出当前数仓数据域（数据基准日期 2024-06-30）"
+_DATA_DOMAIN_TIP = (
+    f"所选时间范围可能超出当前数仓数据域（数据基准日期 {settings.DATA_DOMAIN_END.isoformat()}）"
+)
 
 # 确定性规划关键词
 _EXPORT_KEYWORDS = (
@@ -70,26 +74,6 @@ _EXPORT_KEYWORDS = (
     "excel",
     "markdown",
     "转储",
-)
-_TREND_KEYWORDS = (
-    "环比",
-    "同比",
-    "趋势",
-    "走势",
-    "累计",
-    "移动平均",
-    "滑动平均",
-    "补零",
-    "每日",
-    "每周",
-    "每月",
-    "按天",
-    "按月",
-    "按周",
-    "连续",
-    "yoy",
-    "mom",
-    "变化",
 )
 
 # --------------------------------------------------------------------------- #
@@ -120,7 +104,11 @@ def _is_comparative_question(query: str) -> bool:
 
 def _comparative_entities(query: str) -> list[str]:
     """按出现位置提取查询中的可对比实体（大区/省份/品类，值域全部来自语义目录）。"""
-    pools = [REGIONS.keys(), dimension_members("province"), dimension_members("category")]
+    pools = [
+        catalog.REGION_PROVINCE_MAPPING.keys(),
+        dimension_members("province"),
+        dimension_members("category1_name"),
+    ]
     seen: dict[str, int] = {}
     for pool in pools:
         for entity in pool:
@@ -169,13 +157,13 @@ def _comparison_label(data: dict[str, Any]) -> str:
             if field_name == "province":
                 if isinstance(value, list) and value:
                     province = str(value[0])
-                    for region, provinces in REGIONS.items():
+                    for region, provinces in catalog.REGION_PROVINCE_MAPPING.items():
                         if province in provinces:
                             return region
                     return province
                 if isinstance(value, str):
                     return value
-            if field_name == "category" and isinstance(value, str):
+            if field_name == "category1_name" and isinstance(value, str):
                 return value
     explanation = data.get("explanation")
     return str(explanation)[:12] if explanation else "对比项"
@@ -189,9 +177,9 @@ def _metric_label(outputs: list[ToolResult]) -> str:
         if columns:
             col = str(columns[0])
             try:
-                from present.labels import FIELD_LABELS
+                from present.labels import field_label
 
-                return str(FIELD_LABELS.get(col, col))
+                return str(field_label(col))
             except ImportError:  # pragma: no cover - 依赖缺失时回退原始列名
                 return col
     return "指标"
@@ -766,7 +754,7 @@ def build_data_context(columns: list[str] | None, rows: list[list[Any]] | None) 
 def empty_result_reason(dsl: Any) -> str | None:
     """空结果的确定性归因（审计修复 D3：空集必须解释可能原因，绝不谎报成功）。
 
-    - 时间窗口超出数仓数据域（相对时间锚定 AS_OF_DATE=2024-06-30 后仍超界，
+    - 时间窗口超出数仓数据域（相对时间锚定数据域上界后仍超界，
       或绝对窗口整体晚于数据域上界）-> 时间超界假设；
     - 其余空集 -> 过滤条件无匹配假设。
     """

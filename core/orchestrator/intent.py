@@ -213,8 +213,9 @@ def enumeration_dsl(query: str) -> dict | None:
 def capability_catalog_lines() -> list[str]:
     """拒答报告的能力清单（诚实告知系统边界，含中文 label）。
 
-    unit_price 单价非金额聚合语义，独立"其他"分组（二期 M4）。
+    price 标价非金额聚合语义，独立"其他"分组（对齐原 unit_price 设计）。
     """
+    from semantic import catalog
     from semantic.catalog import COLUMNS, DRILLDOWN_DIM_FIELDS
 
     dim_fields = sorted(set(DRILLDOWN_DIM_FIELDS) | set(_build_dimension_terms().values()))
@@ -222,16 +223,27 @@ def capability_catalog_lines() -> list[str]:
     metrics = "、".join(
         f"{name}（{meta.label or name}）"
         for name, meta in COLUMNS.items()
-        if meta.dtype == "float" and name != "unit_price"
+        if meta.dtype == "float" and name != "price"
     )
     others = "、".join(
-        f"{name}（{meta.label or name}）" for name, meta in COLUMNS.items() if name == "unit_price"
+        f"{name}（{meta.label or name}）" for name, meta in COLUMNS.items() if name == "price"
+    )
+    # 计数指标从 semantic.json metrics[] 派生（M-P1：能力清单严禁硬编码指标名）
+    count_metrics = "、".join(
+        f"{m.get('title', m['key'])}（{m['key']}）"
+        for m in catalog.METRICS
+        if any(
+            isinstance(part, dict)
+            and part.get("kind") == "aggregate"
+            and part.get("agg") in ("count", "count_distinct")
+            for part in (m.get("shape") if isinstance(m.get("shape"), list) else [m.get("shape")])
+        )
     )
     lines = [
         f"- 分析维度：{dims}；支持基数探查（如「有多少个省份」）"
         "与取值枚举（如「列出全部品牌」）",
         f"- 金额指标：{metrics}",
-        "- 计数指标：订单量（order_id）、买家数（user_id）",
+        f"- 计数指标：{count_metrics}",
     ]
     if others:
         lines.append(f"- 其他：{others}")

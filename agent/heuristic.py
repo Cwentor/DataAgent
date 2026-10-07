@@ -32,12 +32,6 @@ from security.scope import scoped_fields
 from semantic import catalog
 from semantic.dsl_schema import Comparison, Granularity, QueryDSL
 
-# 大区 -> 省份映射单一事实来源已迁至 semantic.catalog.REGION_PROVINCE_MAPPING
-# （审计修复 M1：区域词展开的口径归口语义目录）。此别名保持既有导入路径兼容。
-REGIONS: dict[str, list[str]] = {
-    region: list(provinces) for region, provinces in catalog.REGION_PROVINCE_MAPPING.items()
-}
-
 
 def dimension_members(field: str) -> tuple[str, ...]:
     """维度成员词汇表：语义目录数据驱动，catalog_loader 启动时从数仓 distinct 重建。
@@ -50,9 +44,13 @@ def dimension_members(field: str) -> tuple[str, ...]:
 
 
 def region_provinces(region: str) -> list[str]:
-    """大区 -> 数仓实际存在的省份列表（行政区划映射 ∩ 成员词汇表）。"""
+    """大区 -> 数仓实际存在的省份列表（行政区划映射 ∩ 成员词汇表）。
+
+    大区映射单一事实来源 = semantic.catalog.REGION_PROVINCE_MAPPING
+    （M-P1：删除 heuristic.REGIONS 兼容别名，消费方直读 catalog）。
+    """
     members = set(dimension_members("province"))
-    return [p for p in REGIONS.get(region, ()) if p in members]
+    return [p for p in catalog.REGION_PROVINCE_MAPPING.get(region, ()) if p in members]
 
 
 def _quarter_start(d: date) -> date:
@@ -215,14 +213,6 @@ class DeterministicNL2DSL:
         "小于": "lt",
         "不足": "lt",
     }
-    _HAVING_FIELD_ALIAS: ClassVar = {
-        "GMV": "gmv",
-        "销售额": "gmv",
-        "订单量": "order_count",
-        "订单数": "order_count",
-        "买家数": "buyers",
-        "退款金额": "refund_amount",
-    }
 
     def _having(self, q: str, metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """HAVING 阈值解析（十九期 M3）："只要GMV超过1000" -> gmv > 1000。
@@ -233,7 +223,7 @@ class DeterministicNL2DSL:
         m = self._HAVING_THRESHOLD_RE.search(q)
         if not m:
             return []
-        alias = self._HAVING_FIELD_ALIAS.get(m.group(1))
+        alias = self._having_field_alias_map().get(m.group(1).lower())
         if alias is None or not any(x.get("alias") == alias for x in metrics):
             return []
         raw = m.group(3).replace(",", "").replace("，", "")
@@ -251,99 +241,65 @@ class DeterministicNL2DSL:
             }
         ]
 
-    def _metrics(self, q: str) -> list[dict[str, Any]]:
-        ql = q.lower()
+    @classmethod
+    def _having_field_alias_map(cls) -> dict[str, str]:
+        """HAVING 阈值字段映射（问法别名 -> 聚合产物别名），从 catalog.METRICS 派生。
 
+        每个 metric 形状中首个 aggregate 条目的 alias 即聚合产物别名，其全部
+        aliases 均映射到它（如"销售额"->gmv、"订单量"->order_count）；
+        键统一小写，匹配时对问句捕获词取小写（"GMV"/"gmv" 等价）。
+        """
+        mapping: dict[str, str] = {}
+        for metric in catalog.METRICS:
+            shape = metric.get("shape")
+            entries = shape if isinstance(shape, list) else [shape] if shape else []
+            aggregate_alias: str | None = None
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("kind") == "aggregate":
+                    aggregate_alias = entry.get("alias")
+                    break
+            if aggregate_alias is None:
+                continue
+            for alias_word in metric.get("aliases", ()):
+                mapping[alias_word.lower()] = aggregate_alias
+        return mapping
+
+    def _metrics(self, q: str) -> list[dict[str, Any]]:
+        """关键词 -> 指标形态的表驱动解析（数据源 = catalog.METRICS = semantic.json metrics[]）。
+
+        问法层逻辑保持不变：
+        - 窗口指标（累计/移动平均）优先；
+        - 流量域（PV/UV/点击）次之且整条早退；
+        - 退款率比率早退（独占，与"退款金额"互斥）；
+        - 其余指标按 json 顺序追加，shape 直译为 DSL 条目；
+        - 组合问句按顶层 alias 去重（如"GMV和客单价"不再重复 gmv）。
+        """
         # 窗口指标（累计/移动平均）优先
         wm = self._window_metric(q)
         if wm is not None:
             return [wm]
 
-        metrics: list[dict[str, Any]] = []
+        # 流量域指标（页面浏览 / 独立访客 / 点击行为）
+        traffic_metrics = self._traffic_metrics(q)
+        if traffic_metrics:
+            return traffic_metrics
 
-        # 比率指标：退款率（早退，独占）
-        if "退款率" in q or "退款金额/订单金额" in q:
-            return [
-                {
-                    "kind": "ratio",
-                    "numerator": {
-                        "kind": "aggregate",
-                        "field": "refund_amount",
-                        "agg": "sum",
-                        "alias": "refund_amount",
-                    },
-                    "denominator": {
-                        "kind": "aggregate",
-                        "field": "order_amount",
-                        "agg": "sum",
-                        "alias": "gmv",
-                    },
-                    "alias": "refund_rate",
-                }
-            ]
-        if "退款金额" in q or "退款总额" in q:
-            metrics.append(
-                {
-                    "kind": "aggregate",
-                    "field": "refund_amount",
-                    "agg": "sum",
-                    "alias": "refund_amount",
-                }
-            )
-        if "arpu" in ql or "人均消费" in q:
-            metrics.append(
-                {
-                    "kind": "ratio",
-                    "numerator": {
-                        "kind": "aggregate",
-                        "field": "order_amount",
-                        "agg": "sum",
-                        "alias": "gmv",
-                    },
-                    "denominator": {
-                        "kind": "aggregate",
-                        "field": "user_id",
-                        "agg": "count_distinct",
-                        "alias": "active_users",
-                    },
-                    "alias": "arpu",
-                }
-            )
-        if any(k in ql for k in ("gmv", "销售额", "销售总额", "成交额", "成交金额", "总销售")):
-            metrics.append(
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
-            )
-        if any(k in q for k in ("去重用户", "活跃用户")):
-            metrics.append(
-                {
-                    "kind": "aggregate",
-                    "field": "user_id",
-                    "agg": "count_distinct",
-                    "alias": "active_users",
-                }
-            )
-        if any(k in q for k in ("订单总数", "订单数", "订单量")):
-            metrics.append(
-                {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "order_count"}
-            )
-        if "客单价" in q and not any(m.get("alias") == "aov" for m in metrics):
-            # 十九期 M3：客单价 = GMV / 订单数（表达式指标形态，除零由编译器
-            # NULLIF 防护）——口径与 golden Q27 对齐，取代 avg 近似
-            if not any(m.get("alias") == "gmv" for m in metrics):
-                metrics.append(
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
-                )
-            if not any(m.get("alias") == "orders" for m in metrics):
-                metrics.append(
-                    {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"}
-                )
-            metrics.append(
-                {
-                    "kind": "expression",
-                    "alias": "aov",
-                    "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "orders"}]},
-                }
-            )
+        # 比率指标：退款率（早退，独占，与"退款金额"互斥）
+        for metric in catalog.METRICS:
+            if metric.get("key") == "refund_rate" and self._metric_aliases_hit(q, metric):
+                return [self._metric_from_shape(metric.get("shape"))]
+
+        metrics: list[dict[str, Any]] = []
+        for metric in catalog.METRICS:
+            if metric.get("key") == "refund_rate":
+                continue  # 已在上方早退处理
+            if not self._metric_aliases_hit(q, metric):
+                continue
+            for entry in metric.get("shape") or []:
+                alias = entry.get("alias")
+                if alias is not None and any(m.get("alias") == alias for m in metrics):
+                    continue  # 组合问句去重（客单价 = gmv/orders/aov 的零件不重复）
+                metrics.append(entry)
 
         if not metrics:
             # 明细/清单类问题（如"未履约订单明细"）：退化为订单计数 + 明细维度
@@ -352,7 +308,7 @@ class DeterministicNL2DSL:
                     {
                         "kind": "aggregate",
                         "field": "order_id",
-                        "agg": "count",
+                        "agg": "count_distinct",
                         "alias": "order_count",
                     }
                 )
@@ -369,40 +325,97 @@ class DeterministicNL2DSL:
                     raise PipelineError("无法识别指标（需要 GMV/订单数/去重用户/ARPU/客单价 之一）")
         return metrics
 
+    @staticmethod
+    def _metric_aliases_hit(q: str, metric: dict[str, Any]) -> bool:
+        """问句是否命中 metric 的任一别名（ascii 别名大小写不敏感）。"""
+        ql = q.lower()
+        return any(alias.lower() in ql for alias in metric.get("aliases", ()))
+
+    @staticmethod
+    def _metric_from_shape(shape: Any) -> dict[str, Any]:
+        """metrics[].shape -> DSL 指标条目（aggregate/ratio 直译；多条目组合见主循环）。"""
+        if isinstance(shape, list):
+            return shape[0]
+        return shape
+
+    _TRAFFIC_PV_KEYWORDS: tuple[str, ...] = (
+        "浏览量",
+        "浏览次数",
+        "pv",
+        "页面浏览",
+    )
+    _TRAFFIC_UV_KEYWORDS: tuple[str, ...] = ("独立访客", "访客数", "uv", "设备数")
+    _TRAFFIC_ACTION_KEYWORDS: tuple[str, ...] = (
+        "点击量",
+        "点击次数",
+        "点击行为",
+        "行为分布",
+        "加购次数",
+        "收藏次数",
+        "领券次数",
+    )
+
+    def _traffic_metrics(self, q: str) -> list[dict[str, Any]] | None:
+        """流量域指标：页面浏览（PV）/ 独立访客（UV）/ 点击行为次数。
+
+        命中流量域关键词时整条查询锚定到行为事实表（fact_page_view /
+        fact_action），与交易域字段互斥（编译器域锚点解析强制单域）。
+        """
+        ql = q.lower()
+        metrics: list[dict[str, Any]] = []
+        is_action = any(k in q for k in self._TRAFFIC_ACTION_KEYWORDS)
+        if is_action:
+            metrics.append(
+                {
+                    "kind": "aggregate",
+                    "field": "action_id",
+                    "agg": "count",
+                    "alias": "action_count",
+                }
+            )
+            return metrics
+        is_pv = any(k in ql for k in self._TRAFFIC_PV_KEYWORDS) or ("浏览" in q and "页面" in q)
+        is_uv = any(k in ql for k in self._TRAFFIC_UV_KEYWORDS)
+        if is_pv:
+            metrics.append({"kind": "aggregate", "field": "page_id", "agg": "count", "alias": "pv"})
+        if is_uv:
+            metrics.append(
+                {
+                    "kind": "aggregate",
+                    "field": "mid",
+                    "agg": "count_distinct",
+                    "alias": "uv",
+                }
+            )
+        return metrics or None
+
     def _count_entity_metric(self, q: str) -> dict[str, Any] | None:
-        """'数量提问 -> COUNT/COUNT_DISTINCT' 度量映射。
+        """'数量提问 -> COUNT/COUNT_DISTINCT' 度量映射（数据源 = catalog.COUNT_ENTITIES）。
 
         当问句命中"多少/几个 [订单|单|笔]"、"多少 [用户/客户/人]"、"多少 [商品/产品]"等
-        数量式提问时，返回对应主键的计数度量：订单 -> COUNT(order_id)，
-        用户/客户 -> COUNT(DISTINCT user_id)，商品/产品 -> COUNT(DISTINCT product_id)。
+        数量式提问时，返回 count_entities[] 声明的对应计数度量（订单 ->
+        COUNT(DISTINCT order_id)，用户/客户 -> COUNT(DISTINCT user_id)，
+        商品/产品 -> COUNT(DISTINCT sku_id)）。
 
         语义定位：这类问法代表**全新计数指标**而非对上一轮指标的微调继承，故与
         memory._has_metric_term 同源——命中即把多轮判定推向 topic_switch（RESET），
-        从根源上阻断"仅凭时间词就沿用上轮 SUM(order_amount)/gmv"的贪婪判定。
+        从根源上阻断"仅凭时间词就沿用上轮 SUM(split_total_amount)/gmv"的贪婪判定。
         """
         # 触发数量语气词（不取裸"几"，避免误伤）
         if not any(w in q for w in ("多少", "几个", "多少个", "几笔", "几单")):
             return None
-        if any(k in q for k in ("订单", "单子", "笔", "单")):
+        for entry in catalog.COUNT_ENTITIES:
+            shape = entry.get("shape") or {}
+            field = shape.get("field")
+            if field is None or field not in catalog.COLUMNS:
+                continue  # 目录未登记的字段不计数（fail-closed）
+            if not any(tw in q for tw in entry.get("trigger_words", ())):
+                continue
             return {
-                "kind": "aggregate",
-                "field": "order_id",
-                "agg": "count",
-                "alias": "order_count",
-            }
-        if any(k in q for k in ("用户", "客户", "人")) and "user_id" in catalog.COLUMNS:
-            return {
-                "kind": "aggregate",
-                "field": "user_id",
-                "agg": "count_distinct",
-                "alias": "active_users",
-            }
-        if any(k in q for k in ("商品", "产品")) and "product_id" in catalog.COLUMNS:
-            return {
-                "kind": "aggregate",
-                "field": "product_id",
-                "agg": "count_distinct",
-                "alias": "product_count",
+                "kind": shape.get("kind", "aggregate"),
+                "field": field,
+                "agg": shape.get("agg", "count_distinct"),
+                "alias": shape.get("alias", f"{field}_count"),
             }
         return None
 
@@ -413,7 +426,7 @@ class DeterministicNL2DSL:
         自动生成针对该维度的 count_distinct 指标，无需强制用户指定业务度量。
         alias 必须符合 DSL 契约的英文字母数字标识符白名单（IDENTIFIER_PATTERN）。
         """
-        for keywords, field, alias in self._DIM_KEYWORDS:
+        for keywords, field, alias in self._dim_keyword_table():
             if any(k in q for k in keywords):
                 # 确认字段在语义目录中注册
                 if field in catalog.COLUMNS:
@@ -426,15 +439,44 @@ class DeterministicNL2DSL:
                 return None
         return None
 
-    # 维度基数/枚举探查：关键词组 -> (field, alias, 维度中文名)
-    _DIM_KEYWORDS: tuple[tuple[tuple[str, ...], str, str], ...] = (
-        (("地区", "省份", "省"), "province", "region_count"),
-        (("品牌",), "brand", "brand_count"),
-        (("品类", "类别"), "category", "category_count"),
-        (("用户",), "user_id", "user_count"),
-        (("性别",), "gender", "gender_count"),
-        (("支付状态", "支付方式"), "pay_status", "pay_status_count"),
-    )
+    # 维度基数计数别名映射：field -> 启发式输出别名
+    # （计数命名是启发式输出约定，非业务事实，不进 semantic.json）
+    _DIM_COUNT_ALIASES: ClassVar = {
+        "province": "region_count",
+        "tm_name": "brand_count",
+        "category1_name": "category_count",
+        "user_id": "user_count",
+        "gender": "gender_count",
+        "order_status": "order_status_count",
+        "page_id": "page_count",
+        "channel": "channel_count",
+    }
+    # 目录别名未覆盖的问法方言词（关键词主体来自 catalog FieldMeta.aliases 单一事实源）
+    _DIM_KEYWORD_SUPPLEMENTS: ClassVar = {
+        "category1_name": ("类别",),
+        "user_id": ("用户",),
+        "order_status": ("支付状态", "支付方式"),
+    }
+
+    @classmethod
+    def _dim_keyword_table(cls) -> tuple[tuple[tuple[str, ...], str, str], ...]:
+        """维度基数/枚举探查表：关键词组 -> (field, 计数别名)。
+
+        关键词取自语义目录字段别名（单一事实源 = catalog.COLUMNS[field].aliases），
+        剔除成员值（广东/苹果等只是取值不是问法词：排除它们避免"广东有多少种品类"
+        被误判为省份基数）；另补目录别名未覆盖的问法方言词
+        （见 _DIM_KEYWORD_SUPPLEMENTS）；每次动态读取，目录刷新即时生效。
+        """
+        table: list[tuple[tuple[str, ...], str, str]] = []
+        for field, count_alias in cls._DIM_COUNT_ALIASES.items():
+            meta = catalog.COLUMNS.get(field)
+            if meta is None:
+                continue  # 目录未登记的维度不参与探查（fail-closed）
+            members = set(dimension_members(field))
+            keywords = tuple(a for a in meta.aliases if a not in members)
+            keywords += cls._DIM_KEYWORD_SUPPLEMENTS.get(field, ())
+            table.append((keywords, field, count_alias))
+        return tuple(table)
 
     def _enum_dimension_field(self, q: str) -> str | None:
         """维度枚举探查：识别"有哪些 [维度]""[所有/全部] [维度]"返回维度字段。
@@ -442,7 +484,7 @@ class DeterministicNL2DSL:
         枚举查询（纯维度列表）除 count_distinct 指标外，还需把维度字段加入
         dimensions 用于成员去重枚举。命中多个关键词时取首个注册字段。
         """
-        for keywords, field, _alias in self._DIM_KEYWORDS:
+        for keywords, field, _alias in self._dim_keyword_table():
             if any(k in q for k in keywords):
                 if field in catalog.COLUMNS:
                     return field
@@ -467,12 +509,17 @@ class DeterministicNL2DSL:
             base = {
                 "kind": "aggregate",
                 "field": "order_id",
-                "agg": "count",
+                "agg": "count_distinct",
                 "alias": "order_count",
             }
             stem = "order_count"
         else:
-            base = {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+            base = {
+                "kind": "aggregate",
+                "field": "split_total_amount",
+                "agg": "sum",
+                "alias": "gmv",
+            }
             stem = "gmv"
 
         if is_ma:
@@ -494,8 +541,10 @@ class DeterministicNL2DSL:
     def _time_dim_field(q: str) -> str:
         """时间主轴字段推断（解除 order_time 硬编码）。
 
-        规则：仅当问句是**退款时间序列**（含时间维度词 + 退款金额/退款总额）时才
-        切换到 refund_time；"退款率"是比率指标，时间维度保持 order_time。
+        规则：
+        - 流量域：点击行为问句 -> action_time；页面浏览/UV 问句 -> page_view_time；
+        - 退款时间序列（含时间维度词 + 退款金额/退款总额）-> refund_time；
+        - 其余默认 order_time。
         """
         is_refund_amount = any(k in q for k in ("退款金额", "退款总额"))
         is_time_series = any(
@@ -514,6 +563,10 @@ class DeterministicNL2DSL:
         )
         if is_refund_amount and is_time_series:
             return "refund_time"
+        if any(k in q for k in DeterministicNL2DSL._TRAFFIC_ACTION_KEYWORDS):
+            return "action_time"
+        if any(k in q for k in ("浏览", "pv", "访客", "uv", "页面")):
+            return "page_view_time"
         return "order_time"
 
     def _dimensions(self, q: str) -> list[dict[str, str]]:
@@ -541,23 +594,29 @@ class DeterministicNL2DSL:
         ):
             add(self._time_dim_field(q))  # 时间主轴：退款场景用 refund_time
         if any(k in q for k in ("各品类", "按品类", "分品类", "品类分布", "每品类", "品类")):
-            add("category")
+            add("category1_name")
         if "品牌" in q:
-            add("brand")
-        # 商品/店铺实体 -> 维度名称字段（"问什么就出什么维度"，仅当字段已在目录登记）
+            add("tm_name")
+        # 商品实体 -> 维度名称字段（"问什么就出什么维度"，仅当字段已在目录登记）
         if any(k in q for k in ("产品", "商品")):
-            if "product_name" in catalog.COLUMNS:
-                add("product_name")
-        if any(k in q for k in ("店铺", "门店")):
-            if "shop_name" in catalog.COLUMNS:
-                add("shop_name")
+            if "sku_name" in catalog.COLUMNS:
+                add("sku_name")
         if any(k in q for k in ("各省", "按省份", "分省", "省份分布", "每省")):
             add("province")
         # "地区"分组语境（区别于 count 型"有几个地区"，后者不分组）
         if any(k in q for k in ("各地区", "每个地区", "按地区", "分地区", "每地区", "地区分布")):
             add("province")
-        if "支付状态" in q:
-            add("pay_status")
+        if any(k in q for k in ("订单状态", "支付状态", "支付方式")):
+            add("order_status")
+        # 流量域分组维度
+        if any(k in q for k in ("各页面", "按页面", "分页面", "页面分布", "每页面")) or (
+            "页面" in q and any(k in q for k in self._TRAFFIC_PV_KEYWORDS)
+        ):
+            add("page_id")
+        if any(k in q for k in ("行为分布", "点击类型", "行为类型", "各行为")) or (
+            "点击" in q and any(k in q for k in ("分布", "各", "按"))
+        ):
+            add("action_id")
         # 明细/清单：逐订单下钻
         if any(k in q for k in ("明细", "清单")):
             add("order_id")
@@ -570,13 +629,14 @@ class DeterministicNL2DSL:
     def _filters(self, q: str) -> list[dict[str, Any]]:
         filters: list[dict[str, Any]] = []
 
-        # 支付口径：成功/成交
-        if any(k in q for k in ("成功", "成交")):
-            filters.append({"field": "pay_status", "operator": "eq", "value": "SUCCESS"})
-
-        # 未履约/未完成订单：支付状态非成功（数据集中为 CANCELLED）
-        if any(k in q for k in ("未履约", "未完成", "未支付")):
-            filters.append({"field": "pay_status", "operator": "ne", "value": "SUCCESS"})
+        # 支付口径（单一事实源 = semantic.json paid_filter）
+        pf = catalog.PAID_FILTER
+        if any(k in q for k in pf.get("question_words", ())):
+            filters.append({"field": pf["field"], "operator": "eq", "value": pf["value"]})
+        if any(k in q for k in ("未履约", "未完成")) or any(
+            k in q for k in pf.get("anti_question_words", ())
+        ):
+            filters.append({"field": pf["field"], "operator": "ne", "value": pf["value"]})
 
         # 省份（单个或多个 -> in）
         provinces = [p for p in dimension_members("province") if p in q]
@@ -588,24 +648,24 @@ class DeterministicNL2DSL:
 
         # 大区（华东/华南等）-> 省份 in 过滤（与省份过滤互斥，先命中大区）
         if not provinces:
-            for region, region_list in REGIONS.items():
+            for region, region_list in catalog.REGION_PROVINCE_MAPPING.items():
                 if region in q:
                     in_region = [p for p in region_list if p in dimension_members("province")]
                     if in_region:
                         filters.append({"field": "province", "operator": "in", "value": in_region})
                         break
 
-        # 类目
-        cats = [c for c in dimension_members("category") if c in q]
+        # 类目（一级类目成员）
+        cats = [c for c in dimension_members("category1_name") if c in q]
         if cats:
-            filters.append({"field": "category", "operator": "eq", "value": cats[0]})
+            filters.append({"field": "category1_name", "operator": "eq", "value": cats[0]})
 
         # 数值区间：金额A到B元
         m = re.search(r"金额?\s*(\d+)\s*到\s*(\d+)\s*元", q)
         if m:
             filters.append(
                 {
-                    "field": "order_amount",
+                    "field": "split_total_amount",
                     "operator": "between",
                     "value": [int(m.group(1)), int(m.group(2))],
                 }
@@ -794,9 +854,9 @@ class DeterministicNL2DSL:
         if any(k in q for k in ("每省", "各省", "按省")):
             partition.append("province")
         elif any(k in q for k in ("每品牌", "各品牌")):
-            partition.append("brand")
+            partition.append("tm_name")
         elif any(k in q for k in ("每品类", "各品类")):
-            partition.append("category")
+            partition.append("category1_name")
         if not partition:
             return None
         return {
@@ -850,7 +910,7 @@ class DeterministicNL2DSL:
 
     def _primary_alias(self, q: str) -> str:
         m = self._metrics(q)
-        if len(m) == 1 and isinstance(m[0], dict):
+        if m and isinstance(m[0], dict):
             return m[0]["alias"]  # 聚合 / 比率 / 窗口指标均携带 alias
         return "gmv"
 

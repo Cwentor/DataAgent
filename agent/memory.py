@@ -35,14 +35,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from agent.errors import PipelineError
 from agent.glossary import METRIC_TERMS
 from agent.heuristic import (
-    REGIONS,
     DeterministicNL2DSL,
     dimension_members,
     region_provinces,
 )
+from agent.lexicon import TREND_KEYWORDS as _TREND_KEYWORDS
 from config import settings
 from persistence.kvstore import SqliteKVStore
 from security.policy import POLICIES, PRINCIPAL_ATTRS
+from semantic import catalog
 from semantic.dsl_schema import Dimension, Filter, FilterOperator, QueryDSL, TimeFilter
 
 logger = logging.getLogger(__name__)
@@ -54,26 +55,6 @@ _ANONYMOUS = "anonymous"
 _h = DeterministicNL2DSL()
 
 # 触发"趋势 / 下钻"语义的关键词（命中即按上轮 DSL 展开，交由 trend 工具规范化）
-_TREND_KEYWORDS: tuple[str, ...] = (
-    "按天",
-    "每天",
-    "每日",
-    "逐日",
-    "按周",
-    "每周",
-    "按月",
-    "每月",
-    "逐月",
-    "趋势",
-    "走势",
-    "累计",
-    "移动平均",
-    "滑动平均",
-    "环比",
-    "同比",
-    "补零",
-    "补齐",
-)
 _ADD_DIM_KEYWORDS: tuple[str, ...] = ("下钻", "展开", "细分")
 
 # 排他/覆盖引导词：命中即判定为"重开新指标"（RESET），严禁继承上一轮 metrics/dimensions。
@@ -359,11 +340,11 @@ def _collect_deltas(query: str) -> _Deltas:
     if provinces:
         d.provinces = provinces
     else:
-        for region in REGIONS:
+        for region in catalog.REGION_PROVINCE_MAPPING:
             if region in query:
                 d.region = region
                 break
-    cats = [c for c in dimension_members("category") if c in query]
+    cats = [c for c in dimension_members("category1_name") if c in query]
     if cats:
         d.category = cats[0]
     time_dict = _h._time_filter(query)
@@ -476,49 +457,42 @@ def _expand_dimension(query: str) -> str | None:
 
     # (中文关键词 -> 逻辑字段) 维度映射：以 labels 中文标签为底，补充常用问法同义词
     try:
-        from present.labels import FIELD_LABELS
+        from present.labels import field_label
         from semantic import catalog
-    except ImportError:  # pragma: no cover - 依赖缺失时走硬编码回退
-        return _expand_dimension_fallback(query)
+    except ImportError:  # pragma: no cover - 依赖缺失时无法构建映射
+        return None
 
     dim_keywords: dict[str, str] = {}
     for col in catalog.COLUMNS:
-        label = FIELD_LABELS.get(col, col)
+        label = field_label(col)
         # 只登记"看起来像维度"的字段：非主事实表聚合数值列（用 dtype 粗筛）
         meta = catalog.COLUMNS[col]
-        if meta.table == "fact_orders" and col in ("order_id", "product_id", "user_id"):
+        if meta.table == "order_detail" and col in ("order_id", "sku_id", "user_id"):
             continue  # 明细键/事实键不做下钻维度
         if meta.dtype in ("int", "float") and col != "order_id":
             continue  # 数值列不做维度
         dim_keywords[label] = col
-        # 为中文标签补充"按X展开"最常用问法同义词（与启发式解析器同源）
-        for alias_word in _DIMENSION_SYNONYMS.get(col, ()):
+        # 为中文标签补充"按X展开"最常用问法同义词（单一事实源 = aliases）
+        for alias_word in _dimension_synonyms(col):
             dim_keywords[alias_word] = col
 
     for keyword, target_field in dim_keywords.items():
         if keyword in query:
             return target_field
-    return _expand_dimension_fallback(query)
-
-
-# 维度字段 -> 常用中文问法同义词（与 heuristic._dimensions 的问法对齐）
-_DIMENSION_SYNONYMS: dict[str, tuple[str, ...]] = {
-    "category": ("品类", "类别", "类目"),
-    "brand": ("品牌",),
-    "province": ("省份", "省", "地区"),
-    "pay_status": ("支付状态", "支付方式"),
-    "gender": ("性别",),
-    "refund_status": ("退款状态",),
-}
-
-
-def _expand_dimension_fallback(query: str) -> str | None:
-    """硬编码回退（依赖缺失 / 未命中映射时保持向后兼容）。"""
-    if "品类" in query or "类别" in query:
-        return "category"
-    if "品牌" in query:
-        return "brand"
     return None
+
+
+def _dimension_synonyms(field: str) -> tuple[str, ...]:
+    """维度字段的中文问法同义词（M-P1 单一事实源 = FieldMeta.aliases）。
+
+    剔除维度成员值（如省份名）：成员值是"取值"不是"问法"，混入会让
+    「按广东展开」这类表述被误判为下钻维度词。
+    """
+    meta = catalog.COLUMNS.get(field)
+    if meta is None:
+        return ()
+    members = set(catalog.DIMENSION_MEMBERS.get(field, ()))
+    return tuple(a for a in meta.aliases if a not in members)
 
 
 def _resolve_row_filter(rf: dict, principal: str) -> dict:
@@ -577,8 +551,10 @@ def _apply_deltas(base: QueryDSL, deltas: _Deltas) -> QueryDSL:
                 Filter(field="province", operator=FilterOperator.IN, value=deltas.provinces)
             )
     if deltas.category is not None:
-        filters = [f for f in filters if f.field != "category"]
-        filters.append(Filter(field="category", operator=FilterOperator.EQ, value=deltas.category))
+        filters = [f for f in filters if f.field != "category1_name"]
+        filters.append(
+            Filter(field="category1_name", operator=FilterOperator.EQ, value=deltas.category)
+        )
     # 去重拦截层：同一字段仅保留一条逻辑等价的过滤（EQ 命中值等价 IN 时折叠为 EQ），
     # 杜绝编译产物出现 `province='广东' AND province IN ('广东')` 类冗余谓词。
     filters = normalize_filters(filters)
@@ -602,9 +578,9 @@ def _compose_summary(deltas: _Deltas, *, expand: str | None = None, trend: bool 
     if expand is not None:
         # 维度中文标签与 present.labels 同源（"按省份展开" 显示为 追加省份维度）
         try:
-            from present.labels import FIELD_LABELS
+            from present.labels import field_label
 
-            label = FIELD_LABELS.get(expand, expand)
+            label = field_label(expand)
         except ImportError:
             label = expand
         parts.append(f"追加{label}维度")

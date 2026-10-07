@@ -40,11 +40,12 @@ from typing import Any
 from agent.agent import extract_json
 from agent.clarify import detect_clarifications
 from agent.glossary import METRIC_TERMS
-from agent.heuristic import REGIONS, DeterministicNL2DSL, dimension_members
+from agent.heuristic import DeterministicNL2DSL, dimension_members
 from agent.llm import LLMError, resolve_default_client
 from audit.logging import get_logger
 from config import settings
 from providers import ProviderError, chat_text
+from semantic import catalog
 
 logger = get_logger("agent.router.intent")
 
@@ -377,9 +378,9 @@ def extract_entities(query: str) -> dict[str, Any]:
     entities["metrics"] = metrics
 
     # 地区 / 品类
-    regions = [r for r in REGIONS if r in query]
+    regions = [r for r in catalog.REGION_PROVINCE_MAPPING if r in query]
     provinces = [p for p in dimension_members("province") if p in query]
-    categories = [c for c in dimension_members("category") if c in query]
+    categories = [c for c in dimension_members("category1_name") if c in query]
     if regions:
         entities["region"] = regions[0]
     if provinces:

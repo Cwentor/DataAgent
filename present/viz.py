@@ -149,9 +149,9 @@ def viz_config(
 def _field_label(field: str) -> str:
     """字段中文标签（与 present.labels 同源，避免循环导入）。"""
     try:
-        from present.labels import FIELD_LABELS
+        from present.labels import field_label
 
-        return FIELD_LABELS.get(field, field)
+        return field_label(field)
     except ImportError:  # pragma: no cover - 依赖缺失时回退原始字段名
         return field
 
