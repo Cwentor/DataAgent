@@ -30,8 +30,26 @@ class Policy:
             raise ValueError("allowed_tables 不能为空（默认拒绝）")
 
 
-# 全表集合
-ALL_TABLES = frozenset({"fact_orders", "fact_refunds", "dim_user", "dim_product", "dim_shop"})
+# 全表集合（Gmall 数仓：交易域 + 流量域行为表）
+ALL_TABLES = frozenset(
+    {
+        "order_detail",
+        "order_info",
+        "order_refund_info",
+        "payment_info",
+        "sku_info",
+        "user_info",
+        "base_province",
+        "cart_info",
+        "favor_info",
+        "coupon_use",
+        "comment_info",
+        "fact_page_view",
+        "fact_action",
+        "fact_display",
+        "fact_start",
+    }
+)
 
 # 主体属性表（P0-3）：供参数化 RLS 谓词引用（{"field": ..., "operator": ..., "param": "principal.provinces"}）。
 # 生产环境由 security.policy_loader.refresh_policies() 从 config/policies.json 重建，
@@ -54,11 +72,13 @@ POLICIES: dict[str, Policy] = {
         allowed_tables=ALL_TABLES,
         row_filters=({"field": "province", "operator": "in", "param": "principal.provinces"},),
     ),
-    # 受限运营：不能看退款表，不能看优惠金额/退款金额，只能看广东
+    # 受限运营：不能看退款/支付表，不能看优惠金额/退款金额，只能看广东
     "restricted": Policy(
         name="restricted",
-        allowed_tables=frozenset({"fact_orders", "dim_user", "dim_product"}),
-        forbidden_columns=frozenset({"discount_amount", "refund_amount"}),
+        allowed_tables=frozenset(
+            {"order_detail", "order_info", "sku_info", "user_info", "base_province"}
+        ),
+        forbidden_columns=frozenset({"split_coupon_amount", "refund_amount"}),
         row_filters=({"field": "province", "operator": "in", "param": "principal.provinces"},),
     ),
 }

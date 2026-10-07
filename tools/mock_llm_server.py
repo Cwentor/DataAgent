@@ -18,14 +18,14 @@ _access_logger = get_logger("mock_llm.access")
 
 EXPECTED_DSL = {
     "metrics": [
-        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+        {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"},
     ],
     "time_filter": {
         "granularity": "day",
         "range_type": "absolute",
         "absolute": {"start": "2024-06-01", "end": "2024-07-01"},
     },
-    "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+    "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
 }
 
 

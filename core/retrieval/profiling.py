@@ -2,11 +2,11 @@
 
 对齐 pi-agent-harness 的 SchemaAgent 角色（schema inspection with dynamic
 profiling）：静态 schema_digest 只给 Planner 字段名/类型清单，LLM 生成过滤
-条件时仍可能臆造取值（如 "华东" 大区词、错误的 pay_status 字面值）。本模块
+条件时仍可能臆造取值（如 "华东" 大区词、错误的 order_status 字面值）。本模块
 对**低基数枚举字段**做确定性探查，把数仓实际取值注入规划上下文：
 
 1. 遍历语义目录 dtype=="str" 的字段，逐字段 ``SELECT DISTINCT`` 探查；
-2. 基数 <= max_distinct 才收录（高基数字段如 product_name 不注入，
+2. 基数 <= max_distinct 才收录（高基数字段如 sku_name 不注入，
    防提示词膨胀）；
 3. 进程级缓存（mock 数仓静态，同 exec.guards._SCAN_CACHE 先例）；
 4. 失败降级：库不可用/表缺失时静默跳过该字段，返回空/部分结果——
@@ -22,8 +22,10 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-# 低基数字段收录阈值：基数超过该值的字符串字段不注入枚举值
-DEFAULT_MAX_DISTINCT = 30
+# 低基数字段收录阈值：基数超过该值的字符串字段不注入枚举值。
+# 取 40：Gmall 数仓省份维度 34 个（必须整体注入，否则离线兜底对省份问句
+# 触发澄清门，可用性退化）；更高基数（sku_name/mid 等千级）仍被拒之门外。
+DEFAULT_MAX_DISTINCT = 40
 
 # 进程级缓存（数仓静态；容量上限防御，超限清空防膨胀）
 _ENUM_CACHE: dict[str, list[str]] | None = None
