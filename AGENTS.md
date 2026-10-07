@@ -108,7 +108,9 @@ persistence/ 可选 SQLite KV 状态外置（Session / 澄清槽位 / 限流共�
 core/       Data Agent 核心（企业级升级层，见下方四包说明）
 providers/  多模型供应商网关（四协议适配 / API Key 加密存储 / 连通性探测）
 config/     全局配置（settings.py + semantic.json + policies.json + providers.json）
-tests/      单元测试
+tests/      测试（子目录与源码包一一对应：tests/core、tests/compiler 等；
+            跨层回归用例与共享 fixture 留在 tests/ 根：test_remediation_fixes、
+            conftest、fixture_keys）
 tools/      生产工具包（工具注册中心、内置工具等）
 web/        Web 服务与工作台（FastAPI 服务 + service 编排链路 + static 前端）
 ```

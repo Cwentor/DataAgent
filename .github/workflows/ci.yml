@@ -66,5 +66,5 @@ jobs:
       - name: Boundary eval (能力边界三指标 + 红线矩阵)
         run: python -m eval.boundary_eval
       - name: RLS adversarial matrix (restricted x sensitive)
-        run: python -m pytest -q tests/test_security.py tests/test_scope.py -k "rls or scope or adversarial or sensitive"
+        run: python -m pytest -q tests/security/test_security.py tests/security/test_scope.py -k "rls or scope or adversarial or sensitive"
 
