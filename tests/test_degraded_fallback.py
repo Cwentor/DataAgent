@@ -35,7 +35,7 @@ def test_compound_query_with_enum_hit_yields_plan():
     assert s1.kind == "query" and s1.dsl is not None
     assert s2.kind == "synthesize" and s2.depends_on == ["s1"]
     dsl = s1.dsl
-    assert dsl["metrics"][0]["field"] == "order_amount"
+    assert dsl["metrics"][0]["field"] == "split_total_amount"
     assert {"field": "province", "operator": "eq", "value": "海南"} in dsl["filters"]
     assert dsl["dimensions"] == []  # 筛选形态，非分组
 
@@ -108,7 +108,7 @@ def test_metric_only_unknown_gets_scalar_dsl():
     mode, payload, _assumed = _degraded_parse(query, profile, ENUMS)
     assert mode == "plan"
     dsl = payload[0].dsl
-    assert dsl["metrics"][0]["field"] == "order_amount"
+    assert dsl["metrics"][0]["field"] == "split_total_amount"
     assert dsl["dimensions"] == []
 
 
@@ -126,13 +126,13 @@ def test_explicit_time_window_wins_over_default():
     assert window["start"] == "2024-03-01" and window["end"].startswith("2024-04-01")
 
 
-def test_default_window_and_pay_status_scope():
-    """无显式时间 => 缺省 2024-05 锚；fact_orders 锚带 pay_status 口径。"""
+def test_default_window_and_order_status_scope():
+    """无显式时间 => 缺省 2024-05 锚；order_detail 锚带 order_status 口径。"""
     mode, payload, _assumed = _degraded_parse("海南省的GMV", classify_intent("海南省的GMV"), ENUMS)
     assert mode == "plan"
     dsl = payload[0].dsl
     assert dsl["time_filter"]["absolute"]["start"] == "2024-05-01"
-    assert {"field": "pay_status", "operator": "eq", "value": "SUCCESS"} in dsl["filters"]
+    assert {"field": "order_status", "operator": "eq", "value": "1002"} in dsl["filters"]
 
 
 # --------------------------------------------------------------------------- #
@@ -191,7 +191,8 @@ def test_planner_unknown_without_anchor_blocks(monkeypatch, tmp_path):
 def test_planner_clarify_first_round_emits_options(monkeypatch, tmp_path):
     """首轮多候选 => clarification + options（交 _plan_gate 挂起）。
 
-    措辞同 Task 3："西藏省的GMV"（枚举未命中）触发留白澄清。
+    planner 集成路径使用真实数仓 profiling 枚举（34 省全量，"西藏"已命中），
+    改用"北京和上海的GMV"（真实枚举双命中）触发多候选澄清，断言意图不变。
     """
     from config import settings
     from core.orchestrator import nodes as orch
@@ -199,11 +200,13 @@ def test_planner_clarify_first_round_emits_options(monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(orch, "_resolve_llm", lambda: None)
-    state = AgentState(session_id="dg4", turn_id="t1", trace_id="tr1", user_query="西藏省的GMV")
+    state = AgentState(session_id="dg4", turn_id="t1", trace_id="tr1", user_query="北京和上海的GMV")
     out = orch.planner_node(state)
     assert out.phase == "clarify"
     assert out.clarification
     assert out.clarification_options
+    assert any("北京" in o for o in out.clarification_options)
+    assert any("上海" in o for o in out.clarification_options)
     assert out.clarification_rounds == 1
 
 
@@ -322,14 +325,15 @@ def test_e2e_degraded_compound_query_with_approval(monkeypatch, tmp_path):
 
 
 def test_e2e_degraded_clarify_then_resume_yields_plan(monkeypatch, tmp_path):
-    """双通道闭环："海南省的GMV"（LLM 不可用）→ 留白澄清 → 用户补充"查北京的"
+    """双通道闭环："琼崖省的GMV"（LLM 不可用）→ 留白澄清 → 用户补充"查北京的"
     → 二次 planner 产出降级计划。
 
     合并语义逐字对齐 _plan_gate clarify 分支（langgraph_engine）：user_query
     追加"（用户补充：…）"、human_reply/clarification 清空、轮次 +1、
-    plan_steps 置空回 plan。真实枚举无"海南"故首轮留白澄清（严禁猜测条件）；
-    补充后"北京"唯一命中枚举 => plan 分支先于二轮轮次检查，产出降级计划
-    而非拒答（防循环护栏只拦截"澄清后仍歧义"的场景）。
+    plan_steps 置空回 plan。planner 集成路径用真实 profiling 枚举（34 省
+    全量，"海南"已命中），改用数仓不存在的"琼崖省"触发首轮留白澄清
+    （严禁猜测条件）；补充后"北京"唯一命中枚举 => plan 分支先于二轮轮次
+    检查，产出降级计划而非拒答（防循环护栏只拦截"澄清后仍歧义"的场景）。
     """
     from config import settings
     from core.orchestrator import nodes as orch
@@ -344,7 +348,7 @@ def test_e2e_degraded_clarify_then_resume_yields_plan(monkeypatch, tmp_path):
             session_id="e2e2",
             turn_id="t1",
             trace_id="tr1",
-            user_query="海南省的GMV",
+            user_query="琼崖省的GMV",
             autonomy_level="L2",
         )
     )

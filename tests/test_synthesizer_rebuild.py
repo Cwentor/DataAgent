@@ -127,10 +127,12 @@ def test_inherit_overview_scope_inherits_filters_and_window():
     from core.orchestrator.nodes import _inherit_overview_scope
 
     overview = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
         "filters": [
-            {"field": "pay_status", "operator": "eq", "value": "SUCCESS"},
-            {"field": "order_amount", "operator": "gte", "value": 10},
+            {"field": "order_status", "operator": "eq", "value": "1002"},
+            {"field": "split_total_amount", "operator": "gte", "value": 10},
         ],
         "time_filter": {
             "range_type": "absolute",
@@ -141,9 +143,9 @@ def test_inherit_overview_scope_inherits_filters_and_window():
     aligned, notes = _inherit_overview_scope(split, [overview])
     # 状态类 eq 条件被继承；范围类 gte 条件不盲继承
     fields = [f["field"] for f in aligned["filters"]]
-    assert "pay_status" in fields and "order_amount" not in fields
+    assert "order_status" in fields and "split_total_amount" not in fields
     assert aligned["time_filter"] == overview["time_filter"]
-    assert any("pay_status" in n for n in notes) and any("时间窗口" in n for n in notes)
+    assert any("order_status" in n for n in notes) and any("时间窗口" in n for n in notes)
 
 
 def test_inherit_overview_scope_keeps_declared_window():
@@ -151,7 +153,7 @@ def test_inherit_overview_scope_keeps_declared_window():
     from core.orchestrator.nodes import _inherit_overview_scope
 
     overview = {
-        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+        "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
         "time_filter": {
             "range_type": "absolute",
             "absolute": {"start": "2024-05-01", "end": "2024-05-08"},
@@ -174,7 +176,7 @@ def test_diagnostic_dsl_pair_honors_explicit_dimension():
 
     base, curr = _diagnostic_dsl_pair("分析 5 月第一周比第二周 GMV 下滑原因，按品类定位")
     for dsl in (base, curr):
-        assert [d["field"] for d in dsl["dimensions"]] == ["category"]
+        assert [d["field"] for d in dsl["dimensions"]] == ["category1_name"]
 
 
 def test_diagnostic_e2e_report_contains_dimension_attribution(tmp_path, monkeypatch):
@@ -266,8 +268,8 @@ def test_explicit_dimensions_normalizes_dimension_terms():
     from core.orchestrator.nodes import _explicit_dimensions
 
     assert _explicit_dimensions("按地区定位下滑主因") == ["province"]
-    assert _explicit_dimensions("看看品类结构") == ["category"]
-    assert _explicit_dimensions("按品牌拆一下") == ["brand"]
+    assert _explicit_dimensions("看看品类结构") == ["category1_name"]
+    assert _explicit_dimensions("按品牌拆一下") == ["tm_name"]
     # 泛化表述不锚定具体维度 => 交由信息增益自动择优
     assert _explicit_dimensions("分析下滑原因") == []
 
@@ -276,8 +278,8 @@ def test_diagnostic_dimension_pool_explicit_beats_pool():
     """显式维度优先于候选池：点名品类时不得再夹带省份。"""
     from core.orchestrator.nodes import _diagnostic_dimension_pool
 
-    assert _diagnostic_dimension_pool("按品类看下滑原因") == ["category"]
-    assert _diagnostic_dimension_pool("为什么下滑") == ["province", "brand", "category"]
+    assert _diagnostic_dimension_pool("按品类看下滑原因") == ["category1_name"]
+    assert _diagnostic_dimension_pool("为什么下滑") == ["province", "tm_name", "category1_name"]
 
 
 def test_heuristic_plan_layers_factor_before_dimension():
@@ -347,10 +349,17 @@ def test_e2e_explicit_category_dimension_only_drills_category(tmp_path, monkeypa
     assert trace.phase == "done"
     summaries = [a["payload"]["summary"] for a in trace.artifacts if a["kind"] == "summary"]
     drill = next(s for s in summaries if s["title"] == "维度信息增益归因")
-    assert (drill["extra"] or {}).get("primary_dimension") == "category"
-    assert drill["table"]["columns"][0] == "category"
+    assert (drill["extra"] or {}).get("primary_dimension") == "category1_name"
+    assert drill["table"]["columns"][0] == "category1_name"
     charts = [a for a in trace.artifacts if a["kind"] == "echarts"]
-    assert charts and "品类" in charts[0]["payload"]["title"]["text"]
+    # 图表标题用语义目录中文 label（M-P1 标签单一事实源 = semantic.json）
+    from semantic import catalog as _catalog
+
+    assert (
+        charts
+        and (_catalog.COLUMNS["category1_name"].label or "category1_name")
+        in charts[0]["payload"]["title"]["text"]
+    )
 
 
 def test_planner_prompt_states_dimension_discipline():
@@ -379,7 +388,7 @@ def test_align_time_granularity_fixes_llm_default_day():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "time_filter": {
                 "granularity": "day",
@@ -400,7 +409,7 @@ def test_align_time_granularity_keeps_genuine_daily_intent():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "time_filter": {
                 "granularity": "day",
@@ -421,7 +430,7 @@ def test_align_time_granularity_ignores_different_windows():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "time_filter": {
                 "granularity": "day",

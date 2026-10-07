@@ -14,8 +14,10 @@ from semantic.dsl_schema import QueryDSL
 
 DSL = QueryDSL.model_validate(
     {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
+        "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
     }
 )
 
@@ -72,13 +74,13 @@ def test_negative_ratio_not_flagged():
                     "kind": "ratio",
                     "numerator": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "num",
                     },
                     "denominator": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "den",
                     },
@@ -96,7 +98,7 @@ def test_dimension_uniqueness_duplicate_combo_error():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [{"field": "province"}],
         }

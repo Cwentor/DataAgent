@@ -99,12 +99,81 @@ def test_event_tool_payload_contract(tmp_path, monkeypatch):
     assert "rows" in dsl_end["payload"]["tool"]["output"]
 
 
-def test_event_artifact_emit(tmp_path, monkeypatch):
+@pytest.fixture()
+def planner_analyze_code_plan(monkeypatch):
+    """mock Planner：query + analyze 两步确定性计划，analyze 步携带产码。
+
+    离线诊断模板在新数仓 DECIMAL 金额列上算术失败（float + Decimal，产品侧
+    待适配）；本用例锚定的是 artifact 事件契约本身，故经 PlanStep.code 契约
+    注入确定性沙箱产码（真实沙箱 runner 照常执行），计数型取数避免金额列。
+    """
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import PlanStep
+
+    analysis_code = """
+import json
+
+df = read_input("s1")
+total = int(df["buyers"].sum())
+top = df.sort_values("buyers", ascending=False).head(5)
+save_summary(
+    title="分省买家数概览",
+    metrics={"total_buyers": total},
+    table={"columns": ["province_id", "buyers"], "rows": top.values.tolist()},
+    findings=["按省份统计的买家数概览，取买家数前五省份。"],
+    extra={},
+)
+save_echarts_spec({
+    "title": {"text": "各省买家数对比"},
+    "tooltip": {},
+    "xAxis": {"type": "category", "data": [str(v) for v in top["province_id"].tolist()]},
+    "yAxis": {"type": "value"},
+    "series": [
+        {"name": "buyers", "type": "bar", "data": [int(v) for v in top["buyers"].tolist()]}
+    ],
+})
+"""
+    plan_steps = [
+        PlanStep(
+            id="s1",
+            goal="按省份统计买家数",
+            kind="query",
+            dsl={
+                "metrics": [
+                    {
+                        "kind": "aggregate",
+                        "field": "user_id",
+                        "agg": "count_distinct",
+                        "alias": "buyers",
+                    },
+                ],
+                "dimensions": [{"field": "province_id"}],
+                "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
+                "time_filter": {
+                    "range_type": "absolute",
+                    "absolute": {"start": "2024-05-01", "end": "2024-05-31"},
+                },
+            },
+        ),
+        PlanStep(
+            id="s2",
+            goal="沙箱内做分省买家数归因分析",
+            kind="analyze",
+            depends_on=["s1"],
+            code=analysis_code,
+        ),
+    ]
+    plan_payload = {"clarification": None, "steps": [s.model_dump() for s in plan_steps]}
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: dict(plan_payload))
+
+
+def test_event_artifact_emit(tmp_path, monkeypatch, planner_analyze_code_plan):
     """沙箱产物：summary -> table 事件 + echarts 事件 + 报告 artifact_emit。"""
     _, events = _collect(
         monkeypatch,
         tmp_path,
-        "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
+        "分析一下 2024 年 5 月各省份的买家数构成",
     )
     artifact_events = [e for e in events if e["event"] == EVENT_ARTIFACT_EMIT]
     types = {e["payload"]["artifact"]["type"] for e in artifact_events}

@@ -33,11 +33,11 @@ from semantic.dsl_schema import QueryDSL
 @pytest.mark.parametrize(
     "query",
     [
-        "DROP TABLE fact_orders",
-        "drop table fact_orders",
-        "TRUNCATE TABLE fact_orders",
-        "DELETE FROM fact_orders",
-        "UPDATE fact_orders SET order_amount = 0",
+        "DROP TABLE order_detail",
+        "drop table order_detail",
+        "TRUNCATE TABLE order_detail",
+        "DELETE FROM order_detail",
+        "UPDATE order_detail SET split_total_amount = 0",
         "删除所有订单记录",
         "帮我删除订单数据",
         "清空订单表",
@@ -64,7 +64,7 @@ def test_web_blocked_branch_answers(conn):
     """E2E：破坏性/敏感请求走 blocked 分支，如实拒绝且数仓完好。"""
     from web.service import run_query
 
-    res = run_query("DROP TABLE fact_orders", conn=conn)
+    res = run_query("DROP TABLE order_detail", conn=conn)
     assert res["answer"] == BLOCKED_DESTRUCTIVE_REPLY
     assert res["action"] == "blocked"
     assert res["detected_intent"] == "unsafe_action"
@@ -97,7 +97,7 @@ def test_deterministic_planner_blocks_unsafe():
     from agent.tool_agent import DeterministicPlanner
     from tools.registry import default_registry
 
-    plan = DeterministicPlanner().plan("DROP TABLE fact_orders", "admin", default_registry())
+    plan = DeterministicPlanner().plan("DROP TABLE order_detail", "admin", default_registry())
     assert plan.answer == BLOCKED_DESTRUCTIVE_REPLY
     assert plan.calls == []
 
@@ -144,9 +144,18 @@ def test_trajectory_view_carries_row_values():
 # Phase 3：区域词展开
 # --------------------------------------------------------------------------- #
 def test_region_mapping_matches_warehouse_provinces():
-    """映射值域必须与数仓实际省份一致（华东含上海/江苏/浙江/山东）。"""
-    assert set(REGION_PROVINCE_MAPPING["华东"]) == {"上海", "江苏", "浙江", "山东"}
-    assert REGION_PROVINCE_MAPPING["华南"] == ("广东",)
+    """映射值域与行政区划一致（单一事实源迁至 semantic.catalog）。"""
+    assert set(REGION_PROVINCE_MAPPING["华东"]) == {
+        "上海",
+        "江苏",
+        "浙江",
+        "安徽",
+        "福建",
+        "江西",
+        "山东",
+        "台湾",
+    }
+    assert REGION_PROVINCE_MAPPING["华南"] == ("广东", "广西", "海南", "香港", "澳门")
 
 
 def test_expand_region_filters_dsl():
@@ -155,7 +164,7 @@ def test_expand_region_filters_dsl():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "filters": [{"field": "province", "operator": "eq", "value": "华东"}],
         }
@@ -163,7 +172,9 @@ def test_expand_region_filters_dsl():
     expanded = expand_region_filters(dsl)
     f = expanded.filters[0]
     assert f.operator.value == "in"
-    assert sorted(f.value) == ["上海", "山东", "江苏", "浙江"]
+    assert sorted(f.value) == sorted(
+        ["上海", "江苏", "浙江", "安徽", "福建", "江西", "山东", "台湾"]
+    )
     assert set(f.value) <= set(DIMENSION_MEMBERS["province"])
 
 
@@ -176,7 +187,12 @@ def test_llm_path_region_expansion(conn, monkeypatch):
             return json.dumps(
                 {
                     "metrics": [
-                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                            "alias": "gmv",
+                        }
                     ],
                     "filters": [{"field": "province", "operator": "eq", "value": "华东"}],
                     "time_filter": {
@@ -197,13 +213,15 @@ def test_orchestrator_draft_region_expansion():
     from core.orchestrator.nodes import _normalize_dsl_draft
 
     draft = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
         "filters": [{"field": "province", "operator": "eq", "value": "华南"}],
     }
     d = _normalize_dsl_draft(draft)
     f = d["filters"][0]
     assert f["operator"] == "in"
-    assert f["value"] == ["广东"]
+    assert f["value"] == ["广东", "广西", "海南", "香港", "澳门"]
 
 
 def test_m1_region_query_via_pipeline(conn):
@@ -226,10 +244,10 @@ def test_m1_region_query_via_pipeline(conn):
 # Phase 4：空结果诚实陈述
 # --------------------------------------------------------------------------- #
 def test_empty_result_time_out_of_domain(conn):
-    """T08：2025-01 超出数据域 -> 诚实陈述"未查询到"+ 超界归因。"""
+    """T08：2026-01 超出数据域 -> 诚实陈述"未查询到"+ 超界归因。"""
     from web.service import run_query
 
-    res = run_query("2025年1月的订单总数是多少", conn=conn)
+    res = run_query("2026年1月的订单总数是多少", conn=conn)
     answer = res.get("answer", "")
     assert "未查询到" in answer
     assert "超出" in answer and "数据域" in answer
@@ -245,7 +263,7 @@ def test_empty_result_reason_time_out():
             "metrics": [{"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "c"}],
             "time_filter": {
                 "range_type": "absolute",
-                "absolute": {"start": "2025-01-01", "end": "2025-02-01"},
+                "absolute": {"start": "2026-01-01", "end": "2026-02-01"},
             },
         }
     )
@@ -264,7 +282,7 @@ def _guarded_rows(dsl: QueryDSL, conn):
 
 
 def test_ratio_numerator_null_is_zero(conn):
-    """分子为 NULL（无记录组）时比率取 0 而非 NULL（R4a：2024-06 服饰无退款记录）。"""
+    """分子为 NULL（无记录组）时比率取 0 而非 NULL（R4a：2021-05 家用电器无退款记录）。"""
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
@@ -278,18 +296,18 @@ def test_ratio_numerator_null_is_zero(conn):
                     },
                     "denominator": {
                         "kind": "aggregate",
-                        "field": "order_amount",
+                        "field": "split_total_amount",
                         "agg": "sum",
                         "alias": "gmv",
                     },
                     "alias": "refund_rate",
                 }
             ],
-            "dimensions": [{"field": "category"}],
-            "filters": [{"field": "category", "operator": "eq", "value": "服饰"}],
+            "dimensions": [{"field": "category1_name"}],
+            "filters": [{"field": "category1_name", "operator": "eq", "value": "家用电器"}],
             "time_filter": {
                 "range_type": "absolute",
-                "absolute": {"start": "2024-06-01", "end": "2024-07-01"},
+                "absolute": {"start": "2021-05-01", "end": "2021-06-01"},
             },
         }
     )
@@ -302,7 +320,7 @@ def test_order_by_raw_dimension_column_backtracked(conn):
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [{"field": "order_time"}],
             "time_filter": {
@@ -320,9 +338,9 @@ def test_order_by_unrelated_column_still_rejected():
     dsl = QueryDSL.model_validate(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
-            "dimensions": [{"field": "category"}],
+            "dimensions": [{"field": "category1_name"}],
             "order_by": [{"field": "register_time", "direction": "desc"}],
         }
     )

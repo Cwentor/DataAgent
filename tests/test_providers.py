@@ -489,8 +489,10 @@ def test_llm_pipeline_via_adapter_produces_valid_dsl(monkeypatch, tmp_path):
     from semantic.dsl_schema import QueryDSL
 
     dsl_payload = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
+        "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
     }
     # 供应商响应（带围栏 + 杂文本，验证 JSON 兜底清洗在真实链路生效）
     raw = "好的：```json\n" + json.dumps(dsl_payload) + "\n``` 以上。"

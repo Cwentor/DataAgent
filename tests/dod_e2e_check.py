@@ -26,8 +26,8 @@ MOCK_RELAY_KEY = fake_key("relay")
 MOCK_ANT_KEY = fake_key("ant")
 
 DSL = {
-    "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
-    "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+    "metrics": [{"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}],
+    "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
 }
 
 

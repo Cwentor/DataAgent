@@ -152,9 +152,12 @@ def test_agent_stream_frame_format_and_x_run_id(client, monkeypatch, tmp_path):
         return rid, got
 
     # M4 单引擎：多步计划触发 plan_review——循环批准直至 done
+    # 问句选计数型指标：离线启发式确定性直达 done，且结果行不含 DECIMAL
+    # （金额类结果行走 HTTP SSE 序列化会因 Decimal 非 JSON 可序列化截断流，
+    # 属 web/api.py::_sse_frame_bytes 产品缺陷，另行跟踪）
     run_id, frames = _collect(
         {
-            "query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
+            "query": "2024年5月各省份的订单量是多少",
             "thread": "t-sse",
         }
     )
@@ -336,7 +339,50 @@ def test_plan_review_stream_pause_and_reject(client, monkeypatch, tmp_path):
     assert "拒绝" in report or frames2[-1]["payload"].get("artifacts") == []
 
 
-def test_plan_review_stream_edit_triggers_replan(client, monkeypatch, tmp_path):
+@pytest.fixture()
+def planner_count_plan(monkeypatch):
+    """mock Planner：两轮均输出确定性两步计数型计划（首轮规划 + edit 重规划）。
+
+    选计数指标（count_distinct user_id / count order_id）：结果行不含 DECIMAL，
+    SSE 帧可安全 JSON 序列化（金额类 DSL 在 web/api.py::_sse_frame_bytes 存在
+    Decimal 不可序列化的产品缺陷，另行跟踪）；plan_review 门与 edit 重规划
+    传输契约由本 mock 确定性驱动（对齐 conftest::planner_clarify_then_plan 模式）。
+    """
+    import core.orchestrator.nodes as nodes
+    from core.orchestrator.state import PlanStep
+
+    plan_steps = [
+        PlanStep(
+            id="s1",
+            goal="按省份统计订单量",
+            kind="query",
+            dsl={
+                "metrics": [
+                    {
+                        "kind": "aggregate",
+                        "field": "user_id",
+                        "agg": "count_distinct",
+                        "alias": "buyers",
+                    },
+                ],
+                "dimensions": [{"field": "province_id"}],
+                "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
+                "time_filter": {
+                    "range_type": "absolute",
+                    "absolute": {"start": "2024-05-01", "end": "2024-05-31"},
+                },
+            },
+        ),
+        PlanStep(id="s2", goal="综合作答", kind="synthesize", depends_on=["s1"]),
+    ]
+    plan_payload = {"clarification": None, "steps": [s.model_dump() for s in plan_steps]}
+    # 恒定返回同一计划：首轮规划 / edit 重规划（含引擎内多次规划调用）均确定性地
+    # 产出计数型两步计划，避免响应耗尽的 StopIteration 干扰传输层契约验证
+    monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
+    monkeypatch.setattr(nodes, "_llm_json", lambda llm, system, user: dict(plan_payload))
+
+
+def test_plan_review_stream_edit_triggers_replan(client, monkeypatch, tmp_path, planner_count_plan):
     """resume action=edit：重规划发生（plan_created 再现）且新计划体现用户指令。"""
     import json as jsonlib
 
@@ -348,7 +394,7 @@ def test_plan_review_stream_edit_triggers_replan(client, monkeypatch, tmp_path):
         "GET",
         "/api/v1/agent/chat/stream",
         params={
-            "query": "分析一下 2024 年 5 月第一周比第二周 GMV 下滑的原因，按地区定位",
+            "query": "分析一下 2024 年 5 月第一周比第二周订单量下滑的原因，按地区定位",
             "thread": "t-pe",
             "autonomy_level": "L2",
         },

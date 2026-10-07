@@ -565,17 +565,17 @@ def test_schema_summary_groups_by_table():
         tables = body["tables"]
         assert isinstance(tables, list) and tables
         names = [t["table"] for t in tables]
-        assert "fact_orders" in names
-        orders = next(t for t in tables if t["table"] == "fact_orders")
-        assert orders["label"] == "订单事实表"
+        assert "order_detail" in names
+        orders = next(t for t in tables if t["table"] == "order_detail")
+        assert orders["label"] == "订单明细事实表（交易域锚点）"
         fields = {f["field"] for f in orders["fields"]}
-        assert "order_amount" in fields
-        gmv_meta = next(f for f in orders["fields"] if f["field"] == "order_amount")
+        assert "split_total_amount" in fields
+        gmv_meta = next(f for f in orders["fields"] if f["field"] == "split_total_amount")
         assert gmv_meta == {
-            "field": "order_amount",
-            "column": "order_amount",
+            "field": "split_total_amount",
+            "column": "split_total_amount",
             "dtype": "float",
-            "label": "订单金额",
+            "label": "实付金额",
         }
     finally:
         server.shutdown()

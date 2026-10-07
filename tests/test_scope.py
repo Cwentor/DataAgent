@@ -26,7 +26,7 @@ from security.scope import (
 )
 from semantic.catalog import COLUMNS
 
-_SENSITIVE = {"refund_amount", "refund_id", "refund_status", "refund_time", "discount_amount"}
+_SENSITIVE = {"refund_amount", "refund_id", "refund_status", "refund_time", "split_coupon_amount"}
 
 
 # --------------------------------------------------------------------------- #
@@ -43,11 +43,14 @@ def test_scoped_fields_admin_full():
 def test_scoped_fields_restricted_excludes_sensitive():
     allowed = scoped_fields("restricted")
     assert allowed & _SENSITIVE == frozenset()
-    assert {"order_amount", "category", "province", "user_id"} <= allowed
+    assert {"split_total_amount", "category1_name", "province", "user_id"} <= allowed
 
 
 def test_scoped_tables_restricted():
-    assert scoped_tables("restricted") == frozenset({"fact_orders", "dim_user", "dim_product"})
+    """Gmall 模型：restricted 允许表 = 明细锚点 + 订单头 + 商品/用户/省份维度。"""
+    assert scoped_tables("restricted") == frozenset(
+        {"order_detail", "order_info", "sku_info", "user_info", "base_province"}
+    )
 
 
 def test_scoped_catalog_subset():
@@ -59,7 +62,7 @@ def test_scoped_catalog_subset():
 def test_is_field_allowed():
     assert is_field_allowed("admin", "refund_amount")
     assert not is_field_allowed("restricted", "refund_amount")
-    assert is_field_allowed("restricted", "order_amount")
+    assert is_field_allowed("restricted", "split_total_amount")
 
 
 def test_unknown_principal_raises():
@@ -70,7 +73,7 @@ def test_unknown_principal_raises():
 def test_scoped_field_listing_deterministic():
     listing = scoped_field_listing("restricted")
     assert "refund_amount" not in listing
-    assert "discount_amount" not in listing
+    assert "split_coupon_amount" not in listing
     assert listing == ", ".join(sorted(scoped_fields("restricted")))
 
 
@@ -100,7 +103,7 @@ def test_retrieve_unscoped_includes_refund():
 def test_prompt_whitelist_is_scoped_for_restricted():
     prompt = build_system_prompt("restricted")
     assert "refund_amount" not in prompt
-    assert "discount_amount" not in prompt
+    assert "split_coupon_amount" not in prompt
     # 越权口径约定也不应被注入（不"教"模型用越权字段）
     assert "退款率" not in prompt
 
@@ -108,14 +111,14 @@ def test_prompt_whitelist_is_scoped_for_restricted():
 def test_prompt_whitelist_full_for_admin():
     prompt = build_system_prompt("admin")
     assert "refund_amount" in prompt
-    assert "discount_amount" in prompt
+    assert "split_coupon_amount" in prompt
 
 
 def test_build_messages_scoped_system_prompt():
     messages = build_messages("2024年6月GMV", principal="restricted")
     assert messages[0]["role"] == "system"
     assert "refund_amount" not in messages[0]["content"]
-    assert "order_amount" in messages[0]["content"]
+    assert "split_total_amount" in messages[0]["content"]
 
 
 # --------------------------------------------------------------------------- #

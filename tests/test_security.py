@@ -12,7 +12,9 @@ from semantic.dsl_schema import QueryDSL
 
 def _dsl(**over):
     base = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
     }
     base.update(over)
     return QueryDSL.model_validate(base)
@@ -48,7 +50,7 @@ def test_admin_allows_refund_table():
 def test_restricted_denies_discount_column():
     dsl = _dsl(
         metrics=[
-            {"kind": "aggregate", "field": "discount_amount", "agg": "sum", "alias": "discount"}
+            {"kind": "aggregate", "field": "split_coupon_amount", "agg": "sum", "alias": "discount"}
         ],
     )
     with pytest.raises(SecurityError):
@@ -58,7 +60,7 @@ def test_restricted_denies_discount_column():
 def test_analyst_allows_discount_column():
     dsl = _dsl(
         metrics=[
-            {"kind": "aggregate", "field": "discount_amount", "agg": "sum", "alias": "discount"}
+            {"kind": "aggregate", "field": "split_coupon_amount", "agg": "sum", "alias": "discount"}
         ],
     )
     out = apply_policy(dsl, "analyst")
@@ -79,7 +81,8 @@ def test_rls_injects_province_filter(conn):
     assert guarded.filters[0].value == ["广东"]
 
     sql = compile_sql(guarded)
-    assert "u.province IN ('广东')" in sql
+    # Gmall 模型：province 挂在 base_province（别名 pr），RLS 过滤注入维度表列
+    assert "pr.province_name IN ('广东')" in sql
     rows = conn.execute(sql).fetchall()
     assert all(r[0] == "广东" for r in rows)
 
@@ -101,7 +104,9 @@ def test_rls_adversarial_matrix_restricted():
     from security.scope import scoped_fields
 
     allowed = scoped_fields("restricted")
-    sensitive = ["refund_amount", "refund_id", "refund_status", "refund_time", "discount_amount"]
+    # Gmall 模型：order_refund_info 无 refund_status 字段，敏感清单取
+    # 退款事实表上真实存在的列（refund_type 与 refund_id/refund_time 同属越权表）
+    sensitive = ["refund_amount", "refund_id", "refund_type", "refund_time", "split_coupon_amount"]
     # 敏感字段根本不在作用域内（守卫前移：不进模型视野）
     for field in sensitive:
         assert field not in allowed, field
@@ -117,7 +122,7 @@ def test_rls_adversarial_matrix_restricted():
 
 def test_rls_adversarial_matrix_admin_allows():
     """同一批敏感字段对 admin 全部放行（对照基线）。"""
-    for field in ["refund_amount", "discount_amount"]:
+    for field in ["refund_amount", "split_coupon_amount"]:
         dsl = _dsl(
             metrics=[{"kind": "aggregate", "field": field, "agg": "sum", "alias": "sneaky"}],
         )
@@ -129,11 +134,11 @@ def test_rls_row_filter_always_injected_even_with_user_filter(conn):
     """用户自带其他过滤（如类目）时，RLS（广东）必须始终强制注入，不可被绕过。"""
     dsl = _dsl(
         dimensions=[{"field": "province"}],
-        filters=[{"field": "category", "operator": "eq", "value": "数码"}],
+        filters=[{"field": "category1_name", "operator": "eq", "value": "手机"}],
     )
     guarded = apply_policy(dsl, "restricted")
     sql = compile_sql(guarded)
-    assert "u.province IN ('广东')" in sql
+    assert "pr.province_name IN ('广东')" in sql
     rows = conn.execute(sql).fetchall()
     assert rows, "RLS 合并后仍应有广东数据"
     assert all(r[0] == "广东" for r in rows)
@@ -176,8 +181,8 @@ def test_run_pipeline_accepts_principal():
 def test_expression_metric_guard_collects_underlying_fields():
     """十九期 M2：表达式指标的权限检查回溯到被引用聚合指标的字段——
 
-    restricted 主体（禁 discount_amount/refund_amount）通过表达式引用
-    discount_amount 聚合时必须被拒（Review Focus：禁列不得借表达式绕过）。
+    restricted 主体（禁 split_coupon_amount/refund_amount）通过表达式引用
+    split_coupon_amount 聚合时必须被拒（Review Focus：禁列不得借表达式绕过）。
     """
     with pytest.raises(SecurityError):
         apply_policy(
@@ -186,7 +191,7 @@ def test_expression_metric_guard_collects_underlying_fields():
                     "metrics": [
                         {
                             "kind": "aggregate",
-                            "field": "discount_amount",
+                            "field": "split_coupon_amount",
                             "agg": "sum",
                             "alias": "discount",
                         },
@@ -214,7 +219,12 @@ def test_expression_metric_guard_allows_authorized_fields():
         QueryDSL.model_validate(
             {
                 "metrics": [
-                    {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+                    {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "gmv",
+                    },
                     {
                         "kind": "expression",
                         "alias": "aov",

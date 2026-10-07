@@ -20,7 +20,7 @@ def test_metric_anchor_longest_match_first():
 def test_diagnostic_intent():
     profile = classify_intent("为什么GMV下滑")
     assert profile.intent == IntentType.DIAGNOSTIC
-    assert "order_amount" in profile.anchor_fields
+    assert "split_total_amount" in profile.anchor_fields
 
 
 def test_cardinality_intent_and_filters_with_metric_word():
@@ -64,8 +64,8 @@ def test_unknown_intent_for_rate_and_vague_queries():
 def test_capability_catalog_lines():
     lines = capability_catalog_lines()
     assert any("province" in line and "省份" in line for line in lines)
-    assert any("order_amount" in line for line in lines)
-    assert any("shop_name" in line for line in lines)  # 店铺维度不遗漏
+    assert any("split_total_amount" in line for line in lines)
+    assert any("sku_name" in line for line in lines)  # 商品维度不遗漏
 
 
 def test_dimension_scoped_metric_query_is_unknown():
@@ -86,20 +86,20 @@ def test_dimension_scoped_metric_query_is_unknown():
     assert classify_intent("5月GMV是多少").intent == IntentType.METRIC_SCALAR
 
 
-def test_capability_catalog_groups_unit_price_separately():
-    """unit_price 单价不属于金额指标（终审 M4）。"""
+def test_capability_catalog_groups_price_separately():
+    """price 标价不属于金额指标（对齐原 unit_price 独立分组设计）。"""
     lines = capability_catalog_lines()
     money_line = next(line for line in lines if line.startswith("- 金额指标"))
-    assert "unit_price" not in money_line
-    assert any("unit_price" in line for line in lines)  # 仍在清单中（其他分组）
+    assert "price（商品标价）" not in money_line  # order_price 成交单价除外，标价单列
+    assert any("price（商品标价）" in line for line in lines)  # 仍在清单中（其他分组）
 
 
 def test_terms_built_from_catalog_aliases():
     """意图词表从语义目录 FieldMeta.aliases 动态构建（单一事实源）。"""
     from semantic.catalog import COLUMNS
 
-    assert COLUMNS["order_amount"].aliases  # 内置默认已登记
-    assert "gmv" in COLUMNS["order_amount"].aliases
+    assert COLUMNS["split_total_amount"].aliases  # 内置默认已登记
+    assert "gmv" in COLUMNS["split_total_amount"].aliases
     assert COLUMNS["province"].aliases  # 维度字段已登记
     # 长词优先仍成立
     profile = classify_intent("5月退款金额是多少")
@@ -110,7 +110,7 @@ def test_enumeration_intent_classification():
     """十九期 M1：枚举意图判定（问法词表 + 单维度锚 + 无指标锚）。"""
     profile = classify_intent("把全部品牌名列举给我")
     assert profile.intent == IntentType.ENUMERATION
-    assert profile.anchor_fields == ("brand",)
+    assert profile.anchor_fields == ("tm_name",)
     assert profile.confidence == "hard"
 
     assert classify_intent("有哪些品类").intent == IntentType.ENUMERATION
@@ -131,9 +131,9 @@ def test_enumeration_dsl_shape_and_filter_clue():
     dsl = enumeration_dsl("把全部品牌名列举给我")
     assert dsl is not None
     assert dsl["metrics"] == []
-    assert dsl["dimensions"] == [{"field": "brand"}]
+    assert dsl["dimensions"] == [{"field": "tm_name"}]
     assert dsl["filters"] == []
-    assert dsl["order_by"] == [{"field": "brand", "direction": "asc"}]
+    assert dsl["order_by"] == [{"field": "tm_name", "direction": "asc"}]
 
     # Review Focus #3：过滤线索（"退款"）=> 兜底拒绝构造，留 LLM 规划
     assert enumeration_dsl("列出有退款的品牌") is None
@@ -149,7 +149,7 @@ def test_enumeration_multi_dim_opens_in_m2():
     """十九期 M2：多维枚举放开——两维锚点投影，字段序 = 提取序。"""
     profile = classify_intent("列出所有省份和品牌")
     assert profile.intent == IntentType.ENUMERATION
-    assert set(profile.anchor_fields) == {"province", "brand"}
+    assert set(profile.anchor_fields) == {"province", "tm_name"}
 
     dsl = enumeration_dsl("列出所有省份和品牌")
     assert dsl is not None

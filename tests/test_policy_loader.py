@@ -17,7 +17,7 @@ from security.policy_loader import (
 from semantic.dsl_schema import AggFunc, AggregateMetric, QueryDSL
 
 
-def _dsl(field: str = "order_amount") -> QueryDSL:
+def _dsl(field: str = "split_total_amount") -> QueryDSL:
     return QueryDSL(metrics=[AggregateMetric(field=field, agg=AggFunc.SUM, alias="gmv")])
 
 
@@ -38,7 +38,7 @@ def test_resolve_row_filter_param():
     assert resolved["value"] == ["广东", "浙江", "江苏", "北京", "上海"]
     assert "param" not in resolved
     # 无 param 的普通谓词原样返回
-    plain = {"field": "pay_status", "operator": "eq", "value": "SUCCESS"}
+    plain = {"field": "order_status", "operator": "eq", "value": "1002"}
     assert _resolve_row_filter(plain, "analyst") is plain
 
 
@@ -55,8 +55,8 @@ def test_build_policies_from_config(tmp_path):
         "principal_attrs": {"ops": {"provinces": ["上海"]}},
         "policies": {
             "ops": {
-                "allowed_tables": ["fact_orders", "dim_user"],
-                "forbidden_columns": ["discount_amount"],
+                "allowed_tables": ["order_detail", "user_info"],
+                "forbidden_columns": ["split_coupon_amount"],
                 "row_filters": [
                     {"field": "province", "operator": "in", "param": "principal.provinces"}
                 ],

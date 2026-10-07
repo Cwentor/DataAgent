@@ -12,7 +12,7 @@ def test_run_query_number(conn):
     assert result["columns"] == ["gmv"]
     assert len(result["rows"]) == 1
     assert result["viz"]["chart"] == "number"
-    assert "求和订单金额" in result["explanation"]
+    assert "求和实付金额" in result["explanation"]
     assert "SELECT" in result["sql"]
 
 
@@ -20,9 +20,9 @@ def test_run_query_dimension_pie(conn):
     """单维度分组 -> pie/bar 图表 + 多行结果。"""
     result = run_query("各品类成功订单的GMV分布？", conn=conn)
     assert "error" not in result
-    assert result["columns"] == ["category", "gmv"]
+    assert result["columns"] == ["category1_name", "gmv"]
     assert result["viz"]["chart"] in ("pie", "bar")
-    assert result["viz"]["x"] == "category"
+    assert result["viz"]["x"] == "category1_name"
     assert result["viz"]["y"] == "gmv"
     assert len(result["rows"]) > 0
 

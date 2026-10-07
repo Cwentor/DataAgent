@@ -75,7 +75,7 @@ def test_run_guarded_query_uses_result_cache(conn, monkeypatch):
     from semantic.dsl_schema import AggFunc, AggregateMetric, QueryDSL
 
     dsl = QueryDSL(
-        metrics=[AggregateMetric(field="order_amount", agg=AggFunc.SUM, alias="gmv")],
+        metrics=[AggregateMetric(field="split_total_amount", agg=AggFunc.SUM, alias="gmv")],
     )
     first = run_guarded_query(
         "6月GMV是多少", principal="admin", conn=conn, executor=counting_executor, dsl=dsl

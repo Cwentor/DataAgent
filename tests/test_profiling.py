@@ -40,12 +40,12 @@ def mem_conn() -> duckdb.DuckDBPyConnection:
 
 
 def test_profile_enum_values_collects_low_cardinality(mem_conn):
-    """低基数字符串字段（province 等）收录实际取值。"""
+    """低基数字符串字段（gender 等）收录实际取值。"""
     result = profile_enum_values(conn=mem_conn)
-    assert "province" in result
-    assert result["province"], "province 应有非空取值清单"
-    assert "pay_status" in result
-    assert "SUCCESS" in result["pay_status"]
+    assert "gender" in result
+    assert result["gender"], "gender 应有非空取值清单"
+    assert "order_status" in result
+    assert "1002" in result["order_status"]
 
 
 def test_profile_enum_values_excludes_high_cardinality(mem_conn):
@@ -54,7 +54,7 @@ def test_profile_enum_values_excludes_high_cardinality(mem_conn):
     for name, values in result.items():
         assert len(values) <= DEFAULT_MAX_DISTINCT, f"{name} 不应超过基数阈值"
     # 非字符串字段（数值/时间）一律不出现
-    assert "order_amount" not in result
+    assert "split_total_amount" not in result
     assert "order_time" not in result
 
 
@@ -63,7 +63,7 @@ def test_profile_enum_values_deterministic_order(mem_conn):
     first = profile_enum_values(conn=mem_conn)
     second = profile_enum_values(conn=mem_conn, use_cache=False)
     assert first == second
-    assert first["province"] == sorted(first["province"])
+    assert first["gender"] == sorted(first["gender"])
 
 
 def test_profile_enum_values_failure_degrades_gracefully():
@@ -96,7 +96,7 @@ def test_schema_digest_without_enum_values_unchanged():
     digest = schema_digest()
     assert "可取值" not in digest
     assert digest.startswith("- ")
-    assert "- order_amount: 订单金额 (fact_orders.order_amount, float)" in digest
+    assert "- split_total_amount: 实付金额 (order_detail.split_total_amount, float)" in digest
 
 
 def test_schema_digest_label_none_keeps_legacy_format():
@@ -108,10 +108,10 @@ def test_schema_digest_label_none_keeps_legacy_format():
         import semantic.catalog as catalog_mod
 
         catalog_mod.COLUMNS["legacy_field"] = FieldMeta(
-            "fact_orders", "legacy_col", "float", label=None
+            "order_detail", "legacy_col", "float", label=None
         )
         digest = schema_digest()
-        assert "- legacy_field (fact_orders.legacy_col, float)" in digest
+        assert "- legacy_field (order_detail.legacy_col, float)" in digest
     finally:
         reset_defaults()
 
@@ -124,7 +124,7 @@ def test_planner_prompt_carries_enum_values(monkeypatch):
     monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
     monkeypatch.setattr(
         "core.retrieval.profiling.profile_enum_values",
-        lambda *a, **k: {"pay_status": ["SUCCESS", "FAILED"]},
+        lambda *a, **k: {"order_status": ["1002", "1003"]},
     )
 
     def fake_llm_json(llm, system, user):
@@ -135,4 +135,4 @@ def test_planner_prompt_carries_enum_values(monkeypatch):
     from core.orchestrator.state import AgentState
 
     nodes.planner_node(AgentState(user_query="查 GMV"))
-    assert "可取值: SUCCESS|FAILED" in captured["user"]
+    assert "可取值: 1002|1003" in captured["user"]

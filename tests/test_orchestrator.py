@@ -15,6 +15,29 @@ from pydantic import ValidationError
 from core.orchestrator.agent import run_agent
 from core.orchestrator.nodes import MAX_RETRIES
 from core.orchestrator.state import AgentState, ToolRecord
+from semantic import catalog
+
+
+def _real_window_gmv_wan() -> str:
+    """窗口 [2024-05-01, 2024-05-15) order_status=1002 的真实 GMV（万元，2 位小数）。
+
+    数据 pin 清理（M-P0）：grounding 桩值改由测试查库取真值注入 stub 报告，
+    防夹具数值随数仓漂移。
+    """
+    import duckdb
+
+    from config import settings
+
+    conn = duckdb.connect(str(settings.DB_PATH), read_only=True)
+    try:
+        value = conn.execute(
+            "SELECT SUM(split_total_amount) FROM order_detail "
+            "WHERE order_status = '1002' AND order_time >= '2024-05-01' "
+            "AND order_time < '2024-05-15'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return f"{value / 10000:.2f}"
 
 
 def test_agent_state_forbids_extra_fields():
@@ -95,9 +118,14 @@ def test_run_agent_hitl_flow(tmp_path, monkeypatch):
                 "depends_on": [],
                 "dsl": {
                     "metrics": [
-                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                            "alias": "gmv",
+                        }
                     ],
-                    "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                    "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
                     "time_filter": {
                         "range_type": "absolute",
                         "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
@@ -143,16 +171,17 @@ def test_clarify_pending_then_new_question_routes_fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
 
-    paused = run_agent("海南省的GMV是多少", session_id="hijack-seq", autonomy_level="L4")
+    # Gmall 数仓无"琼崖省"，枚举未命中 => 澄清挂起
+    paused = run_agent("琼崖省的GMV是多少", session_id="hijack-seq", autonomy_level="L4")
     assert paused.phase == "clarify"
 
     trace = run_agent("有多少个省份", session_id="hijack-seq", autonomy_level="L4")
     assert trace.phase == "done"
-    assert "查询答案：8" in trace.report
+    assert f"查询答案：{len(catalog.DIMENSION_MEMBERS['province'])}" in trace.report
     assert "用户补充" not in trace.report
 
     final = run_agent(
-        "海南省的GMV是多少",
+        "琼崖省的GMV是多少",
         session_id="hijack-seq",
         autonomy_level="L4",
         resume_state=paused.apply(human_reply="广东省"),
@@ -174,13 +203,14 @@ def test_sequential_pending_clarifies_resume_independently(tmp_path, monkeypatch
     monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(nodes, "_resolve_llm", lambda: None)
 
-    paused_first = run_agent("海南省的GMV是多少", session_id="dual-clarify", autonomy_level="L4")
+    # Gmall 数仓无"琼崖省/岭南省"，两轮均为枚举未命中 => 各自澄清挂起
+    paused_first = run_agent("琼崖省的GMV是多少", session_id="dual-clarify", autonomy_level="L4")
     assert paused_first.phase == "clarify"
-    paused_second = run_agent("河北省的GMV是多少", session_id="dual-clarify", autonomy_level="L4")
+    paused_second = run_agent("岭南省的GMV是多少", session_id="dual-clarify", autonomy_level="L4")
     assert paused_second.phase == "clarify"
 
     final_first = run_agent(
-        "海南省的GMV是多少",
+        "琼崖省的GMV是多少",
         session_id="dual-clarify",
         autonomy_level="L4",
         resume_state=paused_first.apply(human_reply="广东"),
@@ -190,7 +220,7 @@ def test_sequential_pending_clarifies_resume_independently(tmp_path, monkeypatch
     assert "河北" not in final_first.report
 
     final_second = run_agent(
-        "河北省的GMV是多少",
+        "岭南省的GMV是多少",
         session_id="dual-clarify",
         autonomy_level="L4",
         resume_state=paused_second.apply(human_reply="四川"),
@@ -264,7 +294,7 @@ def test_normalize_dsl_draft_repairs_common_llm_typos():
     d = _normalize_dsl_draft(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": ["province", {"field": "category"}],
             "time_range": {
@@ -272,8 +302,8 @@ def test_normalize_dsl_draft_repairs_common_llm_typos():
                 "absolute": {"start": "2024-05-01", "end": "2024-05-08"},
             },
             "filters": [
-                {"field": "pay_status", "operator": "eq", "value": "SUCCESS"},
-                {"field": "order_amount", "operator": "ge", "value": 10},
+                {"field": "order_status", "operator": "eq", "value": "1002"},
+                {"field": "split_total_amount", "operator": "ge", "value": 10},
             ],
         }
     )
@@ -290,7 +320,7 @@ def test_normalize_dsl_draft_passes_valid_payload_unchanged():
     d = _normalize_dsl_draft(
         {
             "metrics": [
-                {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
             ],
             "dimensions": [{"field": "province"}],
             "time_filter": {
@@ -325,7 +355,9 @@ def test_planner_prompt_injects_error_context():
     from core.orchestrator.prompts import planner_prompt
 
     prompt = planner_prompt(
-        "查 GMV", "- gmv (fact_orders.order_amount)", error_context="CompileError: 字段不存在"
+        "查 GMV",
+        "- gmv (order_detail.split_total_amount)",
+        error_context="CompileError: 字段不存在",
     )
     assert "上次失败记录" in prompt
     assert "CompileError: 字段不存在" in prompt
@@ -336,7 +368,7 @@ def test_planner_prompt_without_error_context_unchanged():
     """planner_prompt 不带 error_context：不出现失败记录小节（首轮规划不变）。"""
     from core.orchestrator.prompts import planner_prompt
 
-    prompt = planner_prompt("查 GMV", "- gmv (fact_orders.order_amount)")
+    prompt = planner_prompt("查 GMV", "- gmv (order_detail.split_total_amount)")
     assert "上次失败记录" not in prompt
 
 
@@ -403,7 +435,7 @@ def test_count_dimension_dsl_matches_factoid_questions():
             "alias": "province_count",
         }
     ]
-    assert count_dimension_dsl("多少家店铺") is not None
+    assert count_dimension_dsl("多少个品牌") is not None  # dim_shop 删除，店铺维度退役
     assert count_dimension_dsl("有几个品类") is not None
     # 指标问句 / 多维度 / 无量词：不兜底（LLM 在场时由 Planner 裁决）
     assert count_dimension_dsl("各省GMV多少") is None
@@ -428,7 +460,7 @@ def test_run_agent_count_factoid_survives_planner_llm_failure(tmp_path, monkeypa
       在场即放行，全程无 clarify 中断；
     - 兜底直答：Planner LLM 失败（_llm_json 返回 None）走启发式兜底，此前
       一律 _scalar_dsl 取 sum(gmv)，产出"问省份数、答 115.69 万元 GMV"的
-      离谱报告；mock 数仓 8 个省份应计数直答且严禁金额化；
+      离谱报告；Gmall 数仓 34 个省份应计数直答且严禁金额化；
     - 降级水印：兜底接管时报告顶部必须显著标注（降级不可静默）。
     """
     import core.orchestrator.nodes as nodes
@@ -440,8 +472,8 @@ def test_run_agent_count_factoid_survives_planner_llm_failure(tmp_path, monkeypa
     trace = run_agent("有多少个省份", session_id="countq")
     assert trace.phase == "done"
     assert trace.clarification is None  # LLM 在场即放行：无澄清挂起
-    # mock 数仓 8 个省份：计数直答，且严禁金额化（"0.00 万元"式离谱答案）
-    assert "查询答案：8" in trace.report
+    # Gmall 数仓 34 个省份：计数直答，且严禁金额化（"0.00 万元"式离谱答案）
+    assert f"查询答案：{len(catalog.DIMENSION_MEMBERS['province'])}" in trace.report
     assert "万元" not in trace.report
     assert "离线兜底引擎" in trace.report  # 降级水印显著标注
 
@@ -455,7 +487,7 @@ def test_planner_prompt_injects_session_history():
 
     prompt = planner_prompt(
         "那上海呢",
-        "- gmv (fact_orders.order_amount)",
+        "- gmv (order_detail.split_total_amount)",
         history_context="用户: 2024年5月北京的GMV是多少\n助手: 北京GMV为1.2亿元",
     )
     assert "会话历史" in prompt
@@ -471,9 +503,12 @@ def test_planner_prompt_without_history_unchanged():
     """
     from core.orchestrator.prompts import planner_prompt
 
-    legacy = planner_prompt("查 GMV", "- gmv (fact_orders.order_amount)")
+    legacy = planner_prompt("查 GMV", "- gmv (order_detail.split_total_amount)")
     explicit_none = planner_prompt(
-        "查 GMV", "- gmv (fact_orders.order_amount)", error_context=None, history_context=None
+        "查 GMV",
+        "- gmv (order_detail.split_total_amount)",
+        error_context=None,
+        history_context=None,
     )
     assert legacy == explicit_none  # 逐字一致
     assert "会话历史" not in legacy
@@ -602,8 +637,8 @@ def test_diagnostic_dsl_pair_carries_driver_factor_metrics():
         aliases = {m["alias"] for m in dsl["metrics"]}
         assert {"gmv", "orders", "buyers"} <= aliases
         # 候选池覆盖省份/品牌/品类：由分析层按信息增益裁决主因维度
-        assert [d["field"] for d in dsl["dimensions"]] == ["province", "brand", "category"]
-        assert {"field": "pay_status", "operator": "eq", "value": "SUCCESS"} in dsl["filters"]
+        assert [d["field"] for d in dsl["dimensions"]] == ["province", "tm_name", "category1_name"]
+        assert {"field": "order_status", "operator": "eq", "value": "1002"} in dsl["filters"]
     assert base["time_filter"]["absolute"]["end"] == curr["time_filter"]["absolute"]["start"]
 
 
@@ -635,7 +670,7 @@ def test_reflector_scope_lists_available_fields():
 
     scope = _reflector_available_scope()
     assert "数仓可用字段清单" in scope
-    assert "order_amount" in scope and "province" in scope
+    assert "split_total_amount" in scope and "province" in scope
     assert "流量" in scope  # 明示清单外概念不得作为重规划理由
 
 
@@ -767,7 +802,7 @@ def test_diagnostic_dsl_pair_respects_explicit_time():
     assert baseline["time_filter"]["absolute"]["end"] == current["time_filter"]["absolute"]["start"]
 
     # 十八期：_scalar_dsl 锚点化（anchors + query 两参），显式时间语义不变
-    scalar = _scalar_dsl(("order_amount",), "2030 年 5 月的 GMV 总额是多少？")
+    scalar = _scalar_dsl(("split_total_amount",), "2030 年 5 月的 GMV 总额是多少？")
     assert scalar is not None
     assert scalar["time_filter"]["absolute"] == {"start": "2030-05-01", "end": "2030-06-01"}
 
@@ -799,7 +834,7 @@ def test_run_agent_fabricated_year_reports_no_data(tmp_path, monkeypatch):
     assert query_steps and all(not s["ok"] for s in query_steps)
     # 报告如实说明超界与数据域边界，且不出现编造结论话术
     assert "无任何数据" in trace.report
-    assert "2024-06-30" in trace.report
+    assert settings.DATA_DOMAIN_END.isoformat() in trace.report
     assert "驱动因子分解" not in trace.report
     assert "归因矩阵" not in trace.report
 
@@ -864,6 +899,7 @@ def test_analysis_template_guards_empty_inputs():
 def test_synthesize_no_data_skips_llm(monkeypatch):
     """无数据时 synthesize 跳过 LLM 综合，输出确定性数据说明（严禁编故事）。"""
     import core.orchestrator.nodes as nodes
+    from config import settings
     from core.orchestrator.state import AgentState
 
     calls: list[str] = []
@@ -876,7 +912,7 @@ def test_synthesize_no_data_skips_llm(monkeypatch):
     assert out.phase == "done"
     assert not calls
     assert "无法进行" in out.report
-    assert "2024-06-30" in out.report
+    assert settings.DATA_DOMAIN_END.isoformat() in out.report
     assert "不会以其他时段的数据代替作答" in out.report
 
 
@@ -887,16 +923,21 @@ def test_scalar_dsl_by_anchors():
     """标量兜底按锚点取数：金额 sum、计数 count、别名带语义（Review Focus 4）。"""
     from core.orchestrator.nodes import _scalar_dsl
 
-    dsl = _scalar_dsl(("order_amount", "order_id"), "2024年5月GMV和订单量各多少")
+    dsl = _scalar_dsl(("split_total_amount", "order_id"), "2024年5月GMV和订单量各多少")
     assert dsl is not None
     assert dsl["metrics"] == [
-        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "order_amount"},
+        {
+            "kind": "aggregate",
+            "field": "split_total_amount",
+            "agg": "sum",
+            "alias": "split_total_amount",
+        },
         {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "order_id_count"},
     ]
-    assert dsl["filters"] == [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}]
+    assert dsl["filters"] == [{"field": "order_status", "operator": "eq", "value": "1002"}]
     # 跨表混合锚：兜底拒答（口径混乱风险，LLM 在场时由 Planner 规划）
-    assert _scalar_dsl(("order_amount", "refund_amount"), "GMV和退款金额各多少") is None
-    # 纯退款单锚：不带 pay_status 过滤（fact_refunds 无该字段语义）
+    assert _scalar_dsl(("split_total_amount", "refund_amount"), "GMV和退款金额各多少") is None
+    # 纯退款单锚：不带 order_status 过滤（order_refund_info 无该字段语义）
     refund = _scalar_dsl(("refund_amount",), "2024年5月退款金额是多少")
     assert refund is not None and refund["filters"] == []
 
@@ -984,7 +1025,9 @@ def test_intent_dsl_guard_unit():
     from core.orchestrator.nodes import _intent_dsl_mismatch
 
     bad = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
         "filters": [],
     }
     assert _intent_dsl_mismatch("有多少个省份", bad) is not None
@@ -1034,12 +1077,12 @@ def test_run_agent_guard_blocks_llm_misaligned_dsl(tmp_path, monkeypatch):
                         "metrics": [
                             {
                                 "kind": "aggregate",
-                                "field": "order_amount",
+                                "field": "split_total_amount",
                                 "agg": "sum",
                                 "alias": "gmv",
                             }
                         ],
-                        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                        "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
                         "time_filter": {
                             "range_type": "absolute",
                             "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
@@ -1073,7 +1116,7 @@ def test_planner_llm_intent_echoed_to_state(monkeypatch):
         nodes,
         "_llm_json",
         lambda llm, system, user: {
-            "intent": {"type": "metric_scalar", "anchors": ["order_amount"]},
+            "intent": {"type": "metric_scalar", "anchors": ["split_total_amount"]},
             "clarification": None,
             "steps": [
                 {
@@ -1085,12 +1128,12 @@ def test_planner_llm_intent_echoed_to_state(monkeypatch):
                         "metrics": [
                             {
                                 "kind": "aggregate",
-                                "field": "order_amount",
+                                "field": "split_total_amount",
                                 "agg": "sum",
                                 "alias": "gmv",
                             }
                         ],
-                        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                        "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
                         "time_filter": {
                             "range_type": "absolute",
                             "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
@@ -1110,7 +1153,7 @@ def test_planner_llm_intent_echoed_to_state(monkeypatch):
     )
     state = nodes.planner_node(AgentState(user_query="5月GMV是多少"))
     assert state.intent_type == "metric_scalar"
-    assert state.intent_anchors == ["order_amount"]
+    assert state.intent_anchors == ["split_total_amount"]
     assert state.phase == "query"
 
     # 无 intent 字段：宽容不阻塞
@@ -1152,7 +1195,7 @@ def test_scalar_answer_includes_default_scope_note(tmp_path, monkeypatch):
     trace = run_agent("GMV呢？", session_id="scopeq")
     assert trace.phase == "done"
     assert "2024-05-01" in trace.report
-    assert "成功支付" in trace.report or "SUCCESS" in trace.report
+    assert "成功支付" in trace.report or "1002" in trace.report
 
 
 # --------------------------------------------------------------------------- #
@@ -1180,12 +1223,12 @@ def test_guard_intercept_full_audit(tmp_path, monkeypatch):
                         "metrics": [
                             {
                                 "kind": "aggregate",
-                                "field": "order_amount",
+                                "field": "split_total_amount",
                                 "agg": "sum",
                                 "alias": "gmv",
                             }
                         ],
-                        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                        "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
                         "time_filter": {
                             "range_type": "absolute",
                             "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
@@ -1244,12 +1287,12 @@ def test_code_exec_skipped_when_blocked(tmp_path, monkeypatch):
                         "metrics": [
                             {
                                 "kind": "aggregate",
-                                "field": "order_amount",
+                                "field": "split_total_amount",
                                 "agg": "sum",
                                 "alias": "gmv",
                             }
                         ],
-                        "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                        "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
                         "time_filter": {
                             "range_type": "absolute",
                             "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
@@ -1308,9 +1351,14 @@ def _grounding_retry_plan_payload():
                 "depends_on": [],
                 "dsl": {
                     "metrics": [
-                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                            "alias": "gmv",
+                        }
                     ],
-                    "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+                    "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
                     "time_filter": {
                         "range_type": "absolute",
                         "absolute": {"start": "2024-05-01", "end": "2024-05-15"},
@@ -1338,7 +1386,10 @@ def test_grounding_retry_success_keeps_llm_report(tmp_path, monkeypatch):
     monkeypatch.setattr(nodes, "_resolve_llm", lambda: object())
     plan_seen = iter([_grounding_retry_plan_payload()])
     synth_reports = iter(
-        ["编造报告：转化率高达 42.5%、留存 88.6%、复购 77.3%、曝光 99.2%。", "GMV 为 115.69 万元。"]
+        [
+            "编造报告：转化率高达 42.5%、留存 88.6%、复购 77.3%、曝光 99.2%。",
+            f"GMV 为 {_real_window_gmv_wan()} 万元。",
+        ]
     )
 
     def _fake_llm_json(llm, system, user):
@@ -1355,7 +1406,8 @@ def test_grounding_retry_success_keeps_llm_report(tmp_path, monkeypatch):
     monkeypatch.setattr(nodes, "_synthesize_with_llm", _fake_synth)
     trace = run_agent("2024年5月GMV是多少", session_id="retryq")
     assert trace.phase == "done"
-    assert "115.69" in trace.report
+    # 桩值去 pin：窗口真值查库注入 stub，断言对齐动态真值（order_status=1002，半开窗口 [05-01, 05-15)）
+    assert _real_window_gmv_wan() in trace.report
     assert "42.5" not in trace.report
     assert "数据溯源提示" not in trace.report  # 重写后 grounded，不标注
     # 重写轮必须携带修正指令（首轮 None、第二轮非 None）
@@ -1462,7 +1514,7 @@ def test_grounding_retry_residual_still_flagged(tmp_path, monkeypatch):
     synth_reports = iter(
         [
             "编造报告：转化率高达 42.5%、留存 88.6%、复购 77.3%、曝光 99.2%。",
-            "GMV 为 115.69 万元，测算转化率 42.5%。",
+            f"GMV 为 {_real_window_gmv_wan()} 万元，测算转化率 42.5%。",
         ]
     )
 
@@ -1477,7 +1529,7 @@ def test_grounding_retry_residual_still_flagged(tmp_path, monkeypatch):
     monkeypatch.setattr(nodes, "_synthesize_with_llm", _fake_synth)
     trace = run_agent("2024年5月GMV是多少", session_id="retryres")
     assert trace.phase == "done"
-    assert "115.69" in trace.report
+    assert _real_window_gmv_wan() in trace.report
     assert "数据溯源提示" in trace.report  # 重试残留必须标注
     assert "42.5" in trace.report  # 残留数值仍呈现但已警示
 
@@ -1504,7 +1556,7 @@ def test_heuristic_plan_enumeration():
     s1 = steps[0]
     assert s1.kind == "query" and s1.dsl is not None
     assert s1.dsl["metrics"] == []
-    assert s1.dsl["dimensions"] == [{"field": "brand"}]
+    assert s1.dsl["dimensions"] == [{"field": "tm_name"}]
     assert steps[1].kind == "synthesize"
 
 
@@ -1533,7 +1585,9 @@ def test_intent_dsl_mismatch_rejects_metrics_on_enumeration():
     ok_payload = {"metrics": [], "dimensions": [{"field": "brand"}], "filters": []}
     assert _orch_nodes._intent_dsl_mismatch(query, ok_payload) is None
     bad_payload = {
-        "metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}],
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
         "dimensions": [{"field": "brand"}],
         "filters": [],
     }
@@ -1571,7 +1625,12 @@ def test_planner_node_consumes_assumptions(monkeypatch):
                 "kind": "query",
                 "dsl": {
                     "metrics": [
-                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                            "alias": "gmv",
+                        }
                     ],
                     "dimensions": [],
                     "filters": [],
@@ -1600,7 +1659,12 @@ def test_planner_node_tolerates_invalid_assumptions(monkeypatch):
                 "kind": "query",
                 "dsl": {
                     "metrics": [
-                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                            "alias": "gmv",
+                        }
                     ],
                     "dimensions": [],
                     "filters": [],
@@ -1626,10 +1690,11 @@ def test_degraded_second_round_ambiguity_answers_with_assumptions(monkeypatch):
     from core.orchestrator.nodes import planner_node
 
     monkeypatch.setattr(_orch_nodes, "_resolve_llm", lambda: None)
-    # "海南省的GMV" 式问法一轮已澄清（rounds=1）仍多候选/未命中 => 带假设作答
+    # "琼崖省的GMV" 式问法（取值未命中枚举）一轮已澄清（rounds=1）仍歧义
+    # => 带假设作答（Gmall 数仓省份枚举已含"海南"，不再构成歧义）
     state = planner_node(
         AgentState(
-            user_query="海南省的GMV是多少",
+            user_query="琼崖省的GMV是多少",
             clarification_rounds=1,
             autonomy_level="L4",
         )
@@ -1655,7 +1720,12 @@ def test_synthesize_report_prepends_assumptions(monkeypatch):
                 "kind": "query",
                 "dsl": {
                     "metrics": [
-                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                            "alias": "gmv",
+                        }
                     ],
                     "dimensions": [],
                     "filters": [],
@@ -1697,10 +1767,10 @@ def test_ambiguity_routing_state_machine(monkeypatch):
     assert first.phase == "clarify" and first.clarification_options
 
     # 二轮（用户答复后仍歧义）=> LLM 再反问被硬拦截，转带假设作答
-    # （"海南省的GMV"：维度锚在但取值多候选/未命中，走 assume 分支；
+    # （"琼崖省的GMV"：维度锚在但取值未命中枚举，走 assume 分支；
     #   "华南的表现"无任何锚点属 not_exist 诚实拒答，不经此路径）
     second = planner_node(
-        AgentState(user_query="海南省的GMV是多少", clarification_rounds=1, autonomy_level="L4")
+        AgentState(user_query="琼崖省的GMV是多少", clarification_rounds=1, autonomy_level="L4")
     )
     assert second.phase != "clarify"
     assert second.plan_steps and second.assumptions, "二轮必须带假设作答"
@@ -1715,7 +1785,12 @@ def test_ambiguity_routing_state_machine(monkeypatch):
                 "kind": "query",
                 "dsl": {
                     "metrics": [
-                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                            "alias": "gmv",
+                        }
                     ],
                     "dimensions": [{"field": "province"}],
                     "filters": [],
@@ -1741,8 +1816,8 @@ def test_planner_sql_step_lifted_to_dsl(monkeypatch):
                 "id": "s1",
                 "goal": "取GMV",
                 "kind": "query",
-                "sql": "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
-                "WHERE f.pay_status = 'SUCCESS'",
+                "sql": "SELECT SUM(f.split_total_amount) AS gmv FROM order_detail f "
+                "WHERE f.order_status = '1002'",
             },
         ],
     }
@@ -1751,7 +1826,7 @@ def test_planner_sql_step_lifted_to_dsl(monkeypatch):
     state = planner_node(AgentState(user_query="5月GMV是多少"))
     assert state.phase == "query"
     assert state.plan_steps[0].dsl is not None
-    assert state.plan_steps[0].dsl["metrics"][0]["field"] == "order_amount"
+    assert state.plan_steps[0].dsl["metrics"][0]["field"] == "split_total_amount"
     assert state.plan_steps[0].sql is None, "提升后 sql 必须置空（永不持久化）"
     assert any("sql-lifted" in s for s in state.scratchpad)
 
@@ -1768,8 +1843,8 @@ def test_planner_sql_lift_retry_with_rejection_list(monkeypatch):
                 "id": "s1",
                 "goal": "取GMV",
                 "kind": "query",
-                "sql": "SELECT CASE WHEN f.pay_status = 'SUCCESS' THEN f.order_amount ELSE 0 END AS gmv "
-                "FROM fact_orders f",
+                "sql": "SELECT CASE WHEN f.order_status = '1002' THEN f.split_total_amount ELSE 0 END AS gmv "
+                "FROM order_detail f",
             },
         ],
     }
@@ -1780,8 +1855,8 @@ def test_planner_sql_lift_retry_with_rejection_list(monkeypatch):
                 "id": "s1",
                 "goal": "取GMV",
                 "kind": "query",
-                "sql": "SELECT SUM(f.order_amount) AS gmv FROM fact_orders f "
-                "WHERE f.pay_status = 'SUCCESS'",
+                "sql": "SELECT SUM(f.split_total_amount) AS gmv FROM order_detail f "
+                "WHERE f.order_status = '1002'",
             },
         ],
     }
@@ -1815,8 +1890,8 @@ def test_planner_sql_lift_exhausted_falls_back_to_heuristic(monkeypatch):
                 "id": "s1",
                 "goal": "取GMV",
                 "kind": "query",
-                "sql": "SELECT CASE WHEN f.pay_status = 'SUCCESS' THEN f.order_amount ELSE 0 END AS gmv "
-                "FROM fact_orders f",
+                "sql": "SELECT CASE WHEN f.order_status = '1002' THEN f.split_total_amount ELSE 0 END AS gmv "
+                "FROM order_detail f",
             },
         ],
     }
@@ -1844,12 +1919,17 @@ def test_planner_dsl_takes_precedence_over_sql(monkeypatch):
                 "kind": "query",
                 "dsl": {
                     "metrics": [
-                        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"}
+                        {
+                            "kind": "aggregate",
+                            "field": "split_total_amount",
+                            "agg": "sum",
+                            "alias": "gmv",
+                        }
                     ],
                     "dimensions": [],
                     "filters": [],
                 },
-                "sql": "SELECT COUNT(*) AS x FROM fact_orders f",
+                "sql": "SELECT COUNT(*) AS x FROM order_detail f",
             },
         ],
     }
@@ -1895,8 +1975,8 @@ def test_exploration_step_executes_on_l4_auto(monkeypatch, tmp_path):
         _orch_nodes,
         "_llm_json",
         lambda *a, **k: _make_sql_step_payload(
-            "WITH t AS (SELECT product_id, SUM(1) AS c FROM fact_orders GROUP BY product_id) "
-            "SELECT SUM(t.product_id) AS x FROM t"
+            "WITH t AS (SELECT sku_id, SUM(1) AS c FROM order_detail GROUP BY sku_id) "
+            "SELECT SUM(t.sku_id) AS x FROM t"
         ),
     )
     monkeypatch.setattr("core.retrieval.exploration.execute_exploration_query", fake_execute)
@@ -1925,7 +2005,7 @@ def test_exploration_l4_with_sensitive_column_interrupts(monkeypatch, tmp_path):
         _orch_nodes,
         "_llm_json",
         lambda *a, **k: _make_sql_step_payload(
-            "WITH t AS (SELECT * FROM fact_orders) SELECT discount_amount FROM t"
+            "WITH t AS (SELECT * FROM order_detail) SELECT split_coupon_amount FROM t"
         ),
     )
     state = _orch_nodes.planner_node(
@@ -1994,7 +2074,7 @@ def test_exploration_allow_once_resume_executes(monkeypatch, tmp_path):
         id="s1",
         goal="复杂分析",
         kind="query",
-        sql="SELECT SUM(order_amount) AS gmv FROM fact_orders",
+        sql="SELECT SUM(split_total_amount) AS gmv FROM order_detail",
     )
     state, record = _orch_nodes._execute_exploration_step(state, step, tmp_path)
     assert captured and captured[0]["kind"] == "exploration", "L2 默认档必须真中断挂起"
@@ -2026,13 +2106,16 @@ def test_exploration_allow_session_resume_sets_round_flag(monkeypatch, tmp_path)
         id="s1",
         goal="复杂分析",
         kind="query",
-        sql="SELECT SUM(order_amount) AS gmv FROM fact_orders",
+        sql="SELECT SUM(split_total_amount) AS gmv FROM order_detail",
     )
     state, record1 = _orch_nodes._execute_exploration_step(state, step1, tmp_path)
     assert record1.ok
     assert state.exploration_allowed is True, "allow_session 必须置轮级允许标记"
     step2 = PlanStep(
-        id="s2", goal="再取一次", kind="query", sql="SELECT COUNT(order_id) AS cnt FROM fact_orders"
+        id="s2",
+        goal="再取一次",
+        kind="query",
+        sql="SELECT COUNT(order_id) AS cnt FROM order_detail",
     )
     state, record2 = _orch_nodes._execute_exploration_step(state, step2, tmp_path)
     assert len(captured) == 1, "同轮后续 sql 步骤不得再次挂起询问"
@@ -2058,8 +2141,8 @@ def test_exploration_audit_event_trio_emitted(monkeypatch, tmp_path):
         # 仅 Planner 系统提示词返回 SQL 计划；reflector 等返回 None 走确定性判定
         return (
             _make_sql_step_payload(
-                "WITH t AS (SELECT product_id, SUM(1) AS c FROM fact_orders GROUP BY product_id) "
-                "SELECT SUM(t.product_id) AS x FROM t"
+                "WITH t AS (SELECT sku_id, SUM(1) AS c FROM order_detail GROUP BY sku_id) "
+                "SELECT SUM(t.sku_id) AS x FROM t"
             )
             if system == PLANNER_SYSTEM
             else None
@@ -2112,8 +2195,8 @@ def test_exploration_approval_graph_e2e_pause_and_resume(monkeypatch, tmp_path):
     from core.orchestrator.state import AgentState
 
     sql_payload = _make_sql_step_payload(
-        "WITH t AS (SELECT product_id, SUM(1) AS c FROM fact_orders GROUP BY product_id) "
-        "SELECT SUM(t.product_id) AS x FROM t"
+        "WITH t AS (SELECT sku_id, SUM(1) AS c FROM order_detail GROUP BY sku_id) "
+        "SELECT SUM(t.sku_id) AS x FROM t"
     )
 
     def fake_llm_json(llm, system, user):
@@ -2142,7 +2225,7 @@ def test_exploration_approval_graph_e2e_pause_and_resume(monkeypatch, tmp_path):
             pending and pending.get("kind") == "exploration"
         ), "探索审批门必须真挂起（GraphInterrupt 被吞即在此失败）"
         assert pending.get("sensitive") is False
-        assert "fact_orders" in (pending.get("tables") or [])
+        assert "order_detail" in (pending.get("tables") or [])
         assert not executed, "审批前 SQL 严禁执行（不泄露）"
         return final, pending, app
 
