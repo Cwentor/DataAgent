@@ -28,8 +28,8 @@ DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 # 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
 WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
 
-# 数据与评测统一锚点日期
-AS_OF_DATE: date = date(2024, 6, 30)
+# 数据与评测统一锚点日期（= mock 数仓数据域末日）
+AS_OF_DATE: date = date(2025, 12, 31)
 
 # 数仓数据域上界（含当天）：mock 订单最晚日期与 AS_OF_DATE 对齐。
 # 时间窗口整体晚于该日 = 必然空集（确定性可证）——编排链路与单轮 chat
