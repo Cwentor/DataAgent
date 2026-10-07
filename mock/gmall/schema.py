@@ -1,7 +1,7 @@
 """Gmall 测试数仓 DDL（DuckDB）。
 
 表清单与字段对照 docs/plans/2026-10-06-gmall-mock-reverse-spec.md §3：
-- 种子表 7 类（直接取自 imt/gmall.sql 的教学库数据）；
+- 种子表 7 类（直接取自 upstream/gmall.sql 的教学库数据）；
 - 生成表 11 张（用户/购物车/收藏/领券/订单/明细/支付/退款/退款支付/评论/状态日志）；
 - 行为事实表 4 张（由埋点 JSON 日志解析入仓，非直接生成）；
 - 元数据表 2 张（_field_metadata / _table_metadata）。

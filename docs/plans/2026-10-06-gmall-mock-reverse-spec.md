@@ -1,7 +1,7 @@
 # 设计规格｜Gmall Mock 数据生成器反向解析（2026-10）
 
-> 蓝本：`imt/gmall-remake-mock-2023-05-15-3.jar`（尚硅谷 Gmall 数仓 2023 remake 业务+埋点 mock 生成器）。
-> 反编译产物：`imt/decompiled/`（CFR 0.152，仅本地参考，不入库）。
+> 蓝本：尚硅谷 Gmall 数仓 2023 remake 业务+埋点 mock 生成器 jar（`gmall-remake-mock-2023-05-15-3.jar`，反向解析完成后已清理）。
+> 反编译产物：CFR 0.152 反编译结果（仅解析期本地参考，已完成使命后清理）。
 > 辅助蓝本：[PyRSA/gmall2022-mock](https://github.com/PyRSA/gmall2022-mock)（逻辑等价的 2022 重写版）。
 > 目标：Python 重实现（`mock/gmall/`），全量替换现有 5 表 mock 数仓，产出 DuckDB 测试数仓 + 埋点 JSON 日志。
 
@@ -18,13 +18,14 @@
 └─ "test" 参数 → TestMockTask.mock(N, dt)：只造 N 组启动+good_detail 日志（不写业务库）
 ```
 
-**种子数据全部来自预载的 MySQL gmall 库（即 `imt/gmall.sql`）**，jar 只生成：
+**种子数据全部来自预载的 MySQL gmall 库（现归档于 `mock/gmall/upstream/gmall.sql`）**，jar 只生成：
 用户、加购、收藏、领券/用券、订单头/明细、支付、退款/退款支付、评论、订单状态日志、埋点日志。
 
 ### 1.1 path.json 加权路径抽样
 
 `[{"path":[页面序列], "rate":权重}]`，按 rate 加权抽一条路径；页面名 `lower_underscore` → Stage 类名
-（如 `good_detail` → `GoodDetailStage`）。`imt/path.json` 共 12 条路径（含 `activity1111` 双11活动页）。
+（如 `good_detail` → `GoodDetailStage`）。原 jar 的 path.json 共 12 条路径（含 `activity1111` 双11活动页），
+现归档为 `mock/gmall/path.json`。
 
 ### 1.2 24 小时分布
 
@@ -92,7 +93,7 @@ ts:     毫秒时间戳
 
 ## 3. 业务数据线（DuckDB 入仓模型）
 
-### 3.1 种子表（直接从 `imt/gmall.sql` 提取 INSERT 行，确定性不依赖 rng）
+### 3.1 种子表（直接从 `mock/gmall/upstream/gmall.sql` 提取 INSERT 行，确定性不依赖 rng）
 
 | 表 | 行数 | 说明 |
 |---|---|---|

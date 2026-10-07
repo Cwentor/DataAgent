@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from mock.gmall import business, config, names
 
-# 种子表列序（与 seed_data.json 行值一一对应，来源 imt/gmall.sql 的 CREATE TABLE）
+# 种子表列序（与 seed_data.json 行值一一对应，来源 upstream/gmall.sql 的 CREATE TABLE）
 SEED_COLUMNS = {
     "base_province": [
         "province_id",

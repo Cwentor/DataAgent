@@ -72,7 +72,7 @@ ruff check --fix .
 # 重建本地数仓（幂等，Gmall 电商模型：业务表 + 埋点日志解析入仓）
 python -m mock.init_duckdb
 
-# 重建埋点日志解析链路的种子数据（仅种子变更时需要，需 imt/gmall.sql）
+# 重建埋点日志解析链路的种子数据（仅种子变更时需要，需 mock/gmall/upstream/gmall.sql）
 python -m mock.gmall.seed_extract
 
 # 评测（oracle / agent 双模式）
@@ -168,7 +168,7 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas +
   --skip-snapshot）与快照层（结果集）两级。
 
 - Gmall mock 数仓与语义域（二十期，2026-10）：mock 数仓为 Gmall 电商模型（种子表取自
-  imt/gmall.sql 提取的 seed_data.json；用户/购物车/订单/支付/退款/评论由会话行为链模拟生成；
+  mock/gmall/upstream/gmall.sql 提取的 seed_data.json；用户/购物车/订单/支付/退款/评论由会话行为链模拟生成；
   埋点 JSON 日志落 logs/gmall_applog/ 后经解析链路入仓 4 张行为事实表）。交易域锚点 =
   order_detail 明细宽表（冗余品牌/类目链/用户/省份/订单状态），订单数口径 = count_distinct(order_id)；
   流量域 fact_page_view/fact_action/fact_display/fact_start 为独立查询域（QUERY_DOMAINS 域锚点，
