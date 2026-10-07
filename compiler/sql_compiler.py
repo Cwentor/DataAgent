@@ -389,7 +389,7 @@ def _time_dimension_expr(dsl: QueryDSL, granularity: Granularity) -> tuple[str, 
     """找出 DSL 中的唯一时间维度，返回 (表达式, 别名)；无/多时间维度则报错。"""
     time_dims = [d for d in dsl.dimensions if d.field in TIME_FIELDS]
     if not time_dims:
-        raise CompileError("窗口/补零查询需要时间维度（order_time/refund_time/register_time）")
+        raise CompileError("窗口/补零查询需要时间维度（TIME_FIELDS 白名单中的逻辑字段）")
     if len(time_dims) > 1:
         raise CompileError("一次查询最多一个时间维度")
     return _dimension_expr(time_dims[0], granularity)
@@ -411,34 +411,90 @@ def _collect_tables(dsl: QueryDSL) -> set[str]:
     return tables
 
 
-def _join_sql(table: str, rule: JoinRule) -> str:
+def _join_sql(table: str, rule: JoinRule, fact_alias: str) -> str:
     """把受控连接声明渲染为 SQL（P0-2：目录只声明 join type + 字段对，不再裸拼 SQL）。
 
     on 的每个字段对是 (joined_table_col, fact_table_col)，
     渲染为 `{joined_alias}.{joined_col} = {fact_alias}.{fact_col}`。
     """
     alias = catalog.ALIASES.get(table, table)
-    fact_alias = catalog.ALIASES.get(catalog.FACT_TABLE, catalog.FACT_TABLE)
     conditions = " AND ".join(f"{alias}.{jcol} = {fact_alias}.{fcol}" for jcol, fcol in rule.on)
     keyword = "LEFT JOIN" if rule.join_type == "left" else "JOIN"
     return f"{keyword} {table} {alias} ON {conditions}"
 
 
-def _from_clause(dsl: QueryDSL) -> str:
+def _from_clause(dsl: QueryDSL, anchor: str | None = None) -> str:
+    """渲染 FROM/JOIN 子句。
+
+    anchor 为查询域锚点表（None 时解析为交易域主事实表）。维度表连接规则
+    按锚点所属域取用：交易域用 JOIN_RULES/FACT_JOIN_RULES，流量域用
+    QUERY_DOMAINS[anchor] 声明的维度连接。
+    """
+    if anchor is None:
+        anchor = _resolve_anchor(dsl)
+    _validate_time_field_domain(dsl, anchor)
     tables = _collect_tables(dsl)
-    sql = f"FROM {catalog.FACT_TABLE} f"
+    fact_alias = catalog.ALIASES.get(anchor, anchor)
+    sql = f"FROM {anchor} {fact_alias}"
     joins: list[str] = []
-    # 维度表受控连接
-    for dim, rule in catalog.JOIN_RULES.items():
-        if dim in tables:
-            joins.append(_join_sql(dim, rule))
-    # 第二事实表受控连接（1:1 LEFT JOIN，无扇出放大）
-    for fact, rule in catalog.FACT_JOIN_RULES.items():
-        if fact in tables:
-            joins.append(_join_sql(fact, rule))
+    if anchor == catalog.FACT_TABLE:
+        # 交易域：维度表受控连接
+        for dim, rule in catalog.JOIN_RULES.items():
+            if dim in tables:
+                joins.append(_join_sql(dim, rule, fact_alias))
+        # 第二事实表受控连接（sku 级退款 1:1 LEFT JOIN，无扇出放大）
+        for fact, rule in catalog.FACT_JOIN_RULES.items():
+            if fact in tables:
+                joins.append(_join_sql(fact, rule, fact_alias))
+    else:
+        # 流量域：QUERY_DOMAINS 声明的维度连接
+        for dim, rule in catalog.QUERY_DOMAINS.get(anchor, {}).items():
+            if dim in tables:
+                joins.append(_join_sql(dim, rule, fact_alias))
     if joins:
         sql += "\n" + "\n".join(joins)
     return sql
+
+
+def _resolve_anchor(dsl: QueryDSL) -> str:
+    """按 DSL 引用字段解析查询域锚点。
+
+    - 全部引用字段落在交易域（主事实表 + JOIN_RULES/FACT_JOIN_RULES 涉及表）
+      -> 返回 FACT_TABLE；
+    - 全部引用字段落在某个流量域锚点 + 该域维度 -> 返回该锚点；
+    - 跨域引用（如同时引用订单明细与页面浏览）显式报错，禁止隐式笛卡尔连接。
+    """
+    tables = _collect_tables(dsl)
+    trade_domain = {catalog.FACT_TABLE} | set(catalog.JOIN_RULES) | set(catalog.FACT_JOIN_RULES)
+    if tables <= trade_domain:
+        return catalog.FACT_TABLE
+    for anchor, dims in catalog.QUERY_DOMAINS.items():
+        if tables <= {anchor} | set(dims):
+            return anchor
+    raise CompileError(
+        "DSL 引用字段跨查询域（交易域与流量域行为表无受控连接），" "请拆分为多次查询"
+    )
+
+
+def _validate_time_field_domain(dsl: QueryDSL, anchor: str) -> None:
+    """时间主轴必须属于当前查询域（锚点表 / 域内维度 / 域内事实连接）。
+
+    TimeFilter.time_field 的 DSL 层默认值为 order_time（交易域）；流量域查询
+    必须显式声明对应时间字段（page_view_time 等），此处提供确定性 CompileError
+    而非引擎 Binder 报错。
+    """
+    tf = dsl.time_filter
+    if tf is None:
+        return
+    if anchor == catalog.FACT_TABLE:
+        allowed = {catalog.FACT_TABLE} | set(catalog.JOIN_RULES) | set(catalog.FACT_JOIN_RULES)
+    else:
+        allowed = {anchor} | set(catalog.QUERY_DOMAINS.get(anchor, {}))
+    if _table_for_field(tf.time_field) not in allowed:
+        raise CompileError(
+            f"time_field={tf.time_field!r} 不属于当前查询域（锚点 {anchor}），"
+            "请改用该域注册的时间字段"
+        )
 
 
 # --------------------------------------------------------------------------- #
