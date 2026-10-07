@@ -3031,6 +3031,11 @@ def _degradation_banner(state: AgentState, synth_llm_used: bool = False) -> str:
             "> ⚠️ **本次报告由降级模式生成**（AI 规划暂不可用）：查询条件为规则推断，"
             "当前为全自动审批模式、未经人工确认，请谨慎采信。\n\n"
         )
+    if state.answered_by == "enumeration":
+        # 枚举预路由直答（P2）：LLM 根本没被调用，非故障降级，中性文案
+        return (
+            "> ℹ️ **枚举类问题按确定性路径直答**，未调用 LLM 规划；" "以下为维度取值全量清单。\n\n"
+        )
     if state.answered_by != "heuristic":
         return ""
     # 失败原因透出（诚实铁律）：让用户能区分供应商故障（超时/限流/解析失败）
