@@ -40,11 +40,14 @@ _AUDIT_COLUMN_TYPES: dict[str, str] = {
     "detected_intent": "VARCHAR",
     "routing_latency_ms": "DOUBLE",
     "routing_reason": "VARCHAR",
+    # 编排特有字段（P3）：裁决方与 LLM 规划失败原因
+    "answered_by": "VARCHAR",
+    "planner_llm_error": "VARCHAR",
     "created_at": "VARCHAR",
 }
 
 # DDL 全字面量（无运行期拼接）；列清单必须与 _AUDIT_COLUMN_TYPES 保持一致
-# （由 tests/test_audit.py 的一致性断言守护），迁移逻辑以 information_schema 对比兜底。
+# （由 tests/audit/test_audit.py 的一致性断言守护），迁移逻辑以 information_schema 对比兜底。
 _AUDIT_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (
     request_id         VARCHAR,
@@ -63,6 +66,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detected_intent    VARCHAR,
     routing_latency_ms DOUBLE,
     routing_reason     VARCHAR,
+    answered_by        VARCHAR,
+    planner_llm_error  VARCHAR,
     created_at         VARCHAR
 )
 """
@@ -72,8 +77,9 @@ _INSERT_SQL = """
 INSERT INTO audit_log
     (request_id, session_id, user_name, principal, prompt, retrieval_context,
      dsl, sql, latency_ms, row_count, scan_rows, rewrites, error,
-     detected_intent, routing_latency_ms, routing_reason, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     detected_intent, routing_latency_ms, routing_reason,
+     answered_by, planner_llm_error, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -212,6 +218,8 @@ class AuditStore:
                         detected_intent    VARCHAR,
                         routing_latency_ms DOUBLE,
                         routing_reason     VARCHAR,
+                        answered_by        VARCHAR,
+                        planner_llm_error  VARCHAR,
                         created_at         VARCHAR
                     )
                     """,
@@ -241,6 +249,8 @@ class AuditStore:
                         record.detected_intent,
                         record.routing_latency_ms,
                         record.routing_reason,
+                        record.answered_by,
+                        record.planner_llm_error,
                         record.created_at,
                     ],
                 )
