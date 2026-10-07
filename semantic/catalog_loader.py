@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +37,32 @@ _DEFAULT_FACT_TABLE = catalog.FACT_TABLE
 _DEFAULT_FACT_TABLES = tuple(catalog.FACT_TABLES)
 _DEFAULT_JOIN_RULES = dict(catalog.JOIN_RULES)
 _DEFAULT_FACT_JOIN_RULES = dict(catalog.FACT_JOIN_RULES)
+_DEFAULT_QUERY_DOMAINS = {anchor: dict(rules) for anchor, rules in catalog.QUERY_DOMAINS.items()}
 _DEFAULT_DIMENSION_MEMBERS = dict(catalog.DIMENSION_MEMBERS)
+_DEFAULT_DIMENSION_MEMBER_FIELDS = tuple(catalog.DIMENSION_MEMBER_FIELDS)
+_DEFAULT_TABLE_LABELS = dict(catalog.TABLE_LABELS)
+_DEFAULT_DRILLDOWN_DIM_FIELDS = tuple(catalog.DRILLDOWN_DIM_FIELDS)
+_DEFAULT_REGION_PROVINCE_MAPPING = dict(catalog.REGION_PROVINCE_MAPPING)
+_DEFAULT_METRICS = tuple(catalog.METRICS)
+_DEFAULT_COUNT_ENTITIES = tuple(catalog.COUNT_ENTITIES)
+_DEFAULT_PAID_FILTER = dict(catalog.PAID_FILTER)
+_DEFAULT_DEFAULT_WINDOW = dict(catalog.DEFAULT_WINDOW)
+_DEFAULT_REFLECTOR_CONCEPTS = dict(catalog.REFLECTOR_CONCEPTS)
+_DEFAULT_OUT_OF_SCOPE_CONCEPTS = tuple(catalog.OUT_OF_SCOPE_CONCEPTS)
+_DEFAULT_UNDEFINED_METRICS = tuple(catalog.UNDEFINED_METRICS)
+_DEFAULT_VALUE_LABELS = dict(catalog.VALUE_LABELS)
+_DEFAULT_METRIC_ALIASES = dict(catalog.METRIC_ALIASES)
+_DEFAULT_DIMENSION_MEMBERS_SEED = dict(catalog.DIMENSION_MEMBERS_SEED)
+
+# 业务事实节（v2）必要节：任一缺失即报错（SSOT 严格校验，严禁静默回退）
+_REQUIRED_BUSINESS_SECTIONS: tuple[str, ...] = (
+    "metrics",
+    "paid_filter",
+    "default_window",
+    "reflector_concepts",
+    "out_of_scope_concepts",
+    "undefined_metrics",
+)
 
 # 维度成员词汇表：dim 表 str 字段 distinct 值加载上限（高基数异常表防御截断）
 _DIMENSION_MEMBER_CAP = 512
@@ -82,13 +107,31 @@ class Catalog:
     join_rules: dict[str, JoinRule]
     fact_join_rules: dict[str, JoinRule]
     dimension_members: dict[str, tuple[str, ...]]
+    query_domains: dict[str, dict[str, JoinRule]] | None = None
+    dimension_member_fields: tuple[str, ...] = ()
+    # v2 业务事实节（semantic.json 唯一静态业务事实源，M-P1 收编）
+    metrics: tuple[dict[str, Any], ...] = ()
+    count_entities: tuple[dict[str, Any], ...] = ()
+    paid_filter: dict[str, Any] | None = None
+    default_window: dict[str, Any] | None = None
+    reflector_concepts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    out_of_scope_concepts: tuple[str, ...] = ()
+    undefined_metrics: tuple[dict[str, str], ...] = ()
+    value_labels: dict[str, dict[str, str]] = field(default_factory=dict)
+    drilldown_dim_fields: tuple[str, ...] = ()
+    region_province_mapping: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    dimension_members_seed: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    metric_aliases: dict[str, str] = field(default_factory=dict)
+    table_labels: dict[str, str] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
 # 物理元数据
 # --------------------------------------------------------------------------- #
 def _map_dtype(duckdb_type: str) -> str:
-    mapped = _DTYPE_MAP.get(str(duckdb_type).upper().strip())
+    # 带精度/刻度的类型（DECIMAL(16,2) 等）取括号前的基类型映射
+    base = str(duckdb_type).upper().strip().split("(")[0].strip()
+    mapped = _DTYPE_MAP.get(base)
     if mapped is None:
         raise ValueError(f"未支持的 DuckDB 类型: {duckdb_type!r}，请在 catalog_loader 中登记")
     return mapped
@@ -109,18 +152,18 @@ def _physical_columns(conn: duckdb.DuckDBPyConnection) -> dict[str, dict[str, st
 
 
 def _load_dimension_members(
-    conn: duckdb.DuckDBPyConnection, columns: dict[str, FieldMeta]
+    conn: duckdb.DuckDBPyConnection, columns: dict[str, FieldMeta], member_fields: tuple[str, ...]
 ) -> dict[str, tuple[str, ...]]:
-    """从数仓 dim 表读取 str 维度字段的 distinct 成员值（数据驱动词汇表）。
+    """从数仓读取配置白名单内 str 维度字段的 distinct 成员值（数据驱动词汇表）。
 
-    仅加载 dim_ 前缀维度表上的 str 字段（province/category/brand 等），
-    字段范围随目录声明自动扩展，新增维度字段无需改代码；表名/列名来自
-    目录白名单（非用户输入），每字段 distinct 值按 _DIMENSION_MEMBER_CAP
-    截断防御高基数异常表。
+    字段范围由 DIMENSION_MEMBER_FIELDS（或 overlay 的 dimension_member_fields）
+    声明，新增维度字段无需改代码；表名/列名来自目录白名单（非用户输入），
+    每字段 distinct 值按 _DIMENSION_MEMBER_CAP 截断防御高基数异常表。
     """
     members: dict[str, tuple[str, ...]] = {}
-    for name, meta in columns.items():
-        if not meta.table.startswith("dim_") or meta.dtype != "str":
+    for name in member_fields:
+        meta = columns.get(name)
+        if meta is None or meta.dtype != "str":
             continue
         rows = conn.execute(
             f'SELECT DISTINCT "{meta.column}" FROM "{meta.table}" '
@@ -153,6 +196,87 @@ def _read_overlay(path: Path | str | None) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise ValueError(f"覆写文件 {p} 顶层必须是 JSON/YAML 对象")
     return data
+
+
+def _parse_business_sections(overlay: dict[str, Any]) -> dict[str, Any]:
+    """解析 v2 业务事实节（semantic.json 唯一静态业务事实源，M-P1 收编）。
+
+    必要节（metrics/paid_filter/default_window/reflector_concepts/
+    out_of_scope_concepts/undefined_metrics）缺失即报错——业务事实源损坏时
+    严禁静默回退内置快照（M-P0 Review Focus 5）。其余节缺失回退内置默认。
+    """
+    missing = [name for name in _REQUIRED_BUSINESS_SECTIONS if name not in overlay]
+    if missing:
+        raise ValueError(
+            "semantic.json 缺少必要业务事实节: "
+            + "、".join(missing)
+            + "（业务映射严禁散落代码，一律登记 semantic.json）"
+        )
+
+    def _as_tuple(key: str) -> tuple[Any, ...]:
+        value = overlay[key]
+        if not isinstance(value, list):
+            raise ValueError(f"业务节 {key!r} 必须是数组")
+        return tuple(value)
+
+    metrics = _as_tuple("metrics")
+    count_entities = _as_tuple("count_entities") if "count_entities" in overlay else ()
+    out_of_scope = _as_tuple("out_of_scope_concepts")
+    undefined_metrics_raw = overlay["undefined_metrics"]
+    if not isinstance(undefined_metrics_raw, list):
+        raise ValueError("业务节 'undefined_metrics' 必须是数组")
+
+    reflector_raw = overlay["reflector_concepts"]
+    if not isinstance(reflector_raw, dict):
+        raise ValueError("业务节 'reflector_concepts' 必须是对象")
+
+    value_labels_raw = overlay.get("value_labels", _DEFAULT_VALUE_LABELS)
+    if not isinstance(value_labels_raw, dict):
+        raise ValueError("业务节 'value_labels' 必须是对象")
+
+    mapping_raw = overlay.get("region_province_mapping", _DEFAULT_REGION_PROVINCE_MAPPING)
+    if not isinstance(mapping_raw, dict):
+        raise ValueError("业务节 'region_province_mapping' 必须是对象")
+
+    table_labels_raw = overlay.get("table_labels", _DEFAULT_TABLE_LABELS)
+    if not isinstance(table_labels_raw, dict):
+        raise ValueError("业务节 'table_labels' 必须是对象")
+
+    seed_raw = overlay.get("dimension_members_seed", _DEFAULT_DIMENSION_MEMBERS_SEED)
+    if not isinstance(seed_raw, dict):
+        raise ValueError("业务节 'dimension_members_seed' 必须是对象")
+
+    paid_filter = overlay["paid_filter"]
+    if not isinstance(paid_filter, dict):
+        raise ValueError("业务节 'paid_filter' 必须是对象")
+
+    default_window = overlay["default_window"]
+    if not isinstance(default_window, dict):
+        raise ValueError("业务节 'default_window' 必须是对象")
+
+    metric_aliases_raw = overlay.get("metric_aliases", _DEFAULT_METRIC_ALIASES)
+    if not isinstance(metric_aliases_raw, dict):
+        raise ValueError("业务节 'metric_aliases' 必须是对象")
+
+    return {
+        "metrics": metrics,
+        "count_entities": count_entities,
+        "paid_filter": dict(paid_filter),
+        "default_window": dict(default_window),
+        "reflector_concepts": dict(reflector_raw),
+        "out_of_scope_concepts": out_of_scope,
+        "undefined_metrics": tuple(undefined_metrics_raw),
+        "value_labels": dict(value_labels_raw),
+        "drilldown_dim_fields": (
+            tuple(overlay["drilldown_dim_fields"])
+            if "drilldown_dim_fields" in overlay
+            else _DEFAULT_DRILLDOWN_DIM_FIELDS
+        ),
+        "region_province_mapping": {k: tuple(v) for k, v in mapping_raw.items()},
+        "dimension_members_seed": {k: tuple(v) for k, v in seed_raw.items()},
+        "metric_aliases": dict(metric_aliases_raw),
+        "table_labels": dict(table_labels_raw),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -215,6 +339,19 @@ def _build_from_overlay(
 
     join_rules = _rules(overlay.get("join_rules", {}))
     fact_join_rules = _rules(overlay.get("fact_join_rules", {}))
+    raw_domains = overlay.get("query_domains")
+    if raw_domains is not None:
+        # 两层结构：{锚点表: {维度表: {type, on}}}
+        query_domains = {anchor: _rules(rules) for anchor, rules in dict(raw_domains).items()}
+    else:
+        query_domains = {a: dict(r) for a, r in _DEFAULT_QUERY_DOMAINS.items()}
+    member_fields_raw = overlay.get("dimension_member_fields")
+    member_fields = (
+        tuple(str(f) for f in member_fields_raw)
+        if member_fields_raw is not None
+        else _DEFAULT_DIMENSION_MEMBER_FIELDS
+    )
+    business = _parse_business_sections(overlay)
     return Catalog(
         columns,
         aliases,
@@ -223,6 +360,21 @@ def _build_from_overlay(
         join_rules,
         fact_join_rules,
         dimension_members=dict(_DEFAULT_DIMENSION_MEMBERS),
+        query_domains=query_domains,
+        dimension_member_fields=member_fields,
+        metrics=business["metrics"],
+        count_entities=business["count_entities"],
+        paid_filter=business["paid_filter"],
+        default_window=business["default_window"],
+        reflector_concepts=business["reflector_concepts"],
+        out_of_scope_concepts=business["out_of_scope_concepts"],
+        undefined_metrics=business["undefined_metrics"],
+        value_labels=business["value_labels"],
+        drilldown_dim_fields=business["drilldown_dim_fields"],
+        region_province_mapping=business["region_province_mapping"],
+        dimension_members_seed=business["dimension_members_seed"],
+        metric_aliases=business["metric_aliases"],
+        table_labels=business["table_labels"],
     )
 
 
@@ -244,6 +396,21 @@ def _build_defaults(physical: dict[str, dict[str, str]] | None) -> Catalog:
         join_rules=dict(_DEFAULT_JOIN_RULES),
         fact_join_rules=dict(_DEFAULT_FACT_JOIN_RULES),
         dimension_members=dict(_DEFAULT_DIMENSION_MEMBERS),
+        query_domains={a: dict(r) for a, r in _DEFAULT_QUERY_DOMAINS.items()},
+        dimension_member_fields=_DEFAULT_DIMENSION_MEMBER_FIELDS,
+        metrics=_DEFAULT_METRICS,
+        count_entities=_DEFAULT_COUNT_ENTITIES,
+        paid_filter=dict(_DEFAULT_PAID_FILTER),
+        default_window=dict(_DEFAULT_DEFAULT_WINDOW),
+        reflector_concepts=dict(_DEFAULT_REFLECTOR_CONCEPTS),
+        out_of_scope_concepts=_DEFAULT_OUT_OF_SCOPE_CONCEPTS,
+        undefined_metrics=_DEFAULT_UNDEFINED_METRICS,
+        value_labels=dict(_DEFAULT_VALUE_LABELS),
+        drilldown_dim_fields=_DEFAULT_DRILLDOWN_DIM_FIELDS,
+        region_province_mapping=dict(_DEFAULT_REGION_PROVINCE_MAPPING),
+        dimension_members_seed=dict(_DEFAULT_DIMENSION_MEMBERS_SEED),
+        metric_aliases=dict(_DEFAULT_METRIC_ALIASES),
+        table_labels=dict(_DEFAULT_TABLE_LABELS),
     )
 
 
@@ -277,11 +444,12 @@ def build_catalog(
         else:
             cat = _build_defaults(physical)
 
-        # 维度成员词汇表：库可用时从 dim 表 distinct 值加载（数据驱动），
+        # 维度成员词汇表：库可用时按配置白名单从 distinct 值加载（数据驱动），
         # 不可用时保留内置默认回退（离线可运行）。
         member_conn = conn if conn is not None else own_conn
-        if member_conn is not None:
-            return replace(cat, dimension_members=_load_dimension_members(member_conn, cat.columns))
+        if member_conn is not None and cat.dimension_member_fields:
+            members = _load_dimension_members(member_conn, cat.columns, cat.dimension_member_fields)
+            return replace(cat, dimension_members=members)
         return cat
     finally:
         if own_conn is not None:
@@ -298,6 +466,10 @@ def refresh_catalog(
     对字典原地 clear+update（COLUMNS/ALIASES/JOIN_RULES/FACT_JOIN_RULES），
     对 FACT_TABLE/FACT_TABLES 重新绑定模块属性——compiler/guard 均通过
     `catalog.XXX` 动态读取，因此刷新即时生效，无需重启。
+
+    v2 业务节（metrics/paid_filter/.../table_labels/drilldown_dim_fields/
+    region_province_mapping/dimension_member_fields）同步覆写全局——
+    消费方一律 catalog.XXX 动态读取，refresh 后严禁 stale（M-P0 活缺陷 #3）。
     """
     cat = build_catalog(db_path, conn, overlay_path)
     catalog.COLUMNS.clear()
@@ -312,6 +484,30 @@ def refresh_catalog(
     catalog.FACT_TABLES = cat.fact_tables
     catalog.DIMENSION_MEMBERS.clear()
     catalog.DIMENSION_MEMBERS.update(cat.dimension_members)
+    catalog.QUERY_DOMAINS.clear()
+    catalog.QUERY_DOMAINS.update(cat.query_domains or {})
+    # 静态业务面（不随库重建）：从 json 覆写同步（无覆写时即内置默认）
+    catalog.TABLE_LABELS.clear()
+    catalog.TABLE_LABELS.update(cat.table_labels)
+    catalog.DRILLDOWN_DIM_FIELDS = cat.drilldown_dim_fields
+    catalog.REGION_PROVINCE_MAPPING.clear()
+    catalog.REGION_PROVINCE_MAPPING.update(cat.region_province_mapping)
+    catalog.DIMENSION_MEMBER_FIELDS = cat.dimension_member_fields
+    # v2 业务事实节
+    catalog.METRICS = cat.metrics
+    catalog.COUNT_ENTITIES = cat.count_entities
+    catalog.PAID_FILTER = cat.paid_filter
+    catalog.DEFAULT_WINDOW = cat.default_window
+    catalog.REFLECTOR_CONCEPTS.clear()
+    catalog.REFLECTOR_CONCEPTS.update(cat.reflector_concepts)
+    catalog.OUT_OF_SCOPE_CONCEPTS = cat.out_of_scope_concepts
+    catalog.UNDEFINED_METRICS = cat.undefined_metrics
+    catalog.VALUE_LABELS.clear()
+    catalog.VALUE_LABELS.update(cat.value_labels)
+    catalog.METRIC_ALIASES.clear()
+    catalog.METRIC_ALIASES.update(cat.metric_aliases)
+    catalog.DIMENSION_MEMBERS_SEED.clear()
+    catalog.DIMENSION_MEMBERS_SEED.update(cat.dimension_members_seed)
     return cat
 
 
@@ -329,6 +525,28 @@ def reset_defaults() -> None:
     catalog.FACT_TABLES = _DEFAULT_FACT_TABLES
     catalog.DIMENSION_MEMBERS.clear()
     catalog.DIMENSION_MEMBERS.update(_DEFAULT_DIMENSION_MEMBERS)
+    catalog.QUERY_DOMAINS.clear()
+    catalog.QUERY_DOMAINS.update({a: dict(r) for a, r in _DEFAULT_QUERY_DOMAINS.items()})
+    catalog.TABLE_LABELS.clear()
+    catalog.TABLE_LABELS.update(_DEFAULT_TABLE_LABELS)
+    catalog.DRILLDOWN_DIM_FIELDS = _DEFAULT_DRILLDOWN_DIM_FIELDS
+    catalog.REGION_PROVINCE_MAPPING.clear()
+    catalog.REGION_PROVINCE_MAPPING.update(_DEFAULT_REGION_PROVINCE_MAPPING)
+    catalog.DIMENSION_MEMBER_FIELDS = _DEFAULT_DIMENSION_MEMBER_FIELDS
+    catalog.METRICS = _DEFAULT_METRICS
+    catalog.COUNT_ENTITIES = _DEFAULT_COUNT_ENTITIES
+    catalog.PAID_FILTER = dict(_DEFAULT_PAID_FILTER)
+    catalog.DEFAULT_WINDOW = dict(_DEFAULT_DEFAULT_WINDOW)
+    catalog.REFLECTOR_CONCEPTS.clear()
+    catalog.REFLECTOR_CONCEPTS.update(_DEFAULT_REFLECTOR_CONCEPTS)
+    catalog.OUT_OF_SCOPE_CONCEPTS = _DEFAULT_OUT_OF_SCOPE_CONCEPTS
+    catalog.UNDEFINED_METRICS = _DEFAULT_UNDEFINED_METRICS
+    catalog.VALUE_LABELS.clear()
+    catalog.VALUE_LABELS.update(_DEFAULT_VALUE_LABELS)
+    catalog.METRIC_ALIASES.clear()
+    catalog.METRIC_ALIASES.update(_DEFAULT_METRIC_ALIASES)
+    catalog.DIMENSION_MEMBERS_SEED.clear()
+    catalog.DIMENSION_MEMBERS_SEED.update(_DEFAULT_DIMENSION_MEMBERS_SEED)
 
 
 def main() -> None:
