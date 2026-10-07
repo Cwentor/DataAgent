@@ -1,6 +1,6 @@
 """gmall.sql 种子数据提取器。
 
-从尚硅谷 Gmall 教学库 dump（imt/gmall.sql）中提取 mock 生成器依赖的
+从尚硅谷 Gmall 教学库 dump（mock/gmall/upstream/gmall.sql）中提取 mock 生成器依赖的
 种子表（省市区 / 类目 / 品牌 / SPU / SKU / 优惠券 / 活动）的 INSERT 行，
 落盘为 mock/gmall/seed_data.json，供数仓构建时确定性加载。
 
@@ -8,7 +8,7 @@
     python -m mock.gmall.seed_extract
 
 说明：
-- 只在更新种子数据时手工运行一次；运行期数仓构建不依赖 imt/ 目录；
+- 只在更新种子数据时手工运行一次；运行期数仓构建不依赖 upstream/ 原始 dump；
 - INSERT 行按原始 SQL 字面值解析（NULL / 数字 / 字符串 / 日期字符串），
   不做业务加工，保证与原教学库逐行一致。
 """
@@ -117,8 +117,7 @@ def parse_gmall_sql(sql_path: Path) -> dict[str, list[list]]:
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parents[2]
-    sql_path = root / "imt" / "gmall.sql"
+    sql_path = Path(__file__).resolve().parent / "upstream" / "gmall.sql"
     if not sql_path.exists():
         print(f"[seed_extract] 未找到 {sql_path}，无法提取种子数据")
         sys.exit(1)
