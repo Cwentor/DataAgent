@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import decimal
 import json
 import re
 import time
@@ -73,25 +74,21 @@ logger = get_logger("core.orchestrator")
 # --------------------------------------------------------------------------- #
 # 维度词 -> 语义字段映射收编至 semantic/catalog FieldMeta.aliases（二期，
 # 十八期：意图分类与兜底准入的唯一词源）。
-# 用户未显式指定维度时的候选维度池（有意收窄，与 DRILLDOWN_DIM_FIELDS 同源）：
+# 用户未显式指定维度时的候选维度池 = catalog.DRILLDOWN_DIM_FIELDS
+# （M-P1：不再 import 时值绑定，改函数内动态读，refresh_catalog 后即时生效）。
 # 联合明细同时覆盖 province 与 category，分析层按 info-gain 择优下钻，
-# 而非默认向用户呈现分省。高基数字段（shop_name/brand 明细膨胀）不入池，
+# 而非默认向用户呈现分省。高基数字段（sku_name/tm_name 明细膨胀）不入池，
 # 用户显式点名时才取。
-_DIAGNOSTIC_DIM_POOL: tuple[str, ...] = DRILLDOWN_DIM_FIELDS
-
-
-# 维度字段 -> 中文标签（图表标题与归因叙述的人读化；字段名仅保留在矩阵列头）
-_DIMENSION_LABELS: dict[str, str] = {
-    "province": "省份",
-    "category": "品类",
-    "brand": "品牌",
-    "shop_name": "店铺",
-}
 
 
 def _dimension_label(field: str) -> str:
-    """维度字段名 -> 中文标签（未知字段原样返回）。"""
-    return _DIMENSION_LABELS.get(field, field)
+    """维度字段名 -> 中文标签（未知字段原样返回）。
+
+    M-P1：标签单一事实源 = catalog.COLUMNS[field].label（semantic.json）；
+    refresh_catalog 后即时生效，不再 import 时值绑定。
+    """
+    meta = catalog.COLUMNS.get(field)
+    return meta.label if meta is not None and meta.label else field
 
 
 def _explicit_dimensions(query: str) -> list[str]:
@@ -100,7 +97,7 @@ def _explicit_dimensions(query: str) -> list[str]:
     - 泛化的"按维度拆分"（"按维度/分维度"）不锚定具体字段 => 返回空，
       交由分析层在候选池内按信息增益自动下钻；
     - "地区/省份/大区/城市"等词统一归一为 province；"品类/类目"-> category；
-      "品牌"-> brand；"店铺/门店"-> shop_name（词表见 semantic/catalog FieldMeta.aliases）。
+      "品牌"-> tm_name（词表见 semantic/catalog FieldMeta.aliases）。
     """
     found: list[str] = []
     lowered = query.lower()
@@ -119,7 +116,7 @@ def _diagnostic_dimension_pool(query: str) -> list[str]:
     由信息增益定位主因维度（信息增益胜出者才渲染主图）。
     """
     explicit = _explicit_dimensions(query)
-    return explicit if explicit else list(_DIAGNOSTIC_DIM_POOL)
+    return explicit if explicit else list(catalog.DRILLDOWN_DIM_FIELDS)
 
 
 # --------------------------------------------------------------------------- #
@@ -280,7 +277,7 @@ def _diagnostic_plan_steps(query: str) -> list[PlanStep]:
         dim_goal = f"按用户指定维度（{'/'.join(explicit)}）做信息增益下钻，输出归因矩阵"
     else:
         dim_goal = (
-            f"在候选维度池（{'/'.join(_DIAGNOSTIC_DIM_POOL)}）内做信息增益下钻，"
+            f"在候选维度池（{'/'.join(catalog.DRILLDOWN_DIM_FIELDS)}）内做信息增益下钻，"
             "择优定位主因维度，输出归因矩阵与入选依据"
         )
     return [
@@ -315,8 +312,14 @@ def _diagnostic_plan_steps(query: str) -> list[PlanStep]:
 # --------------------------------------------------------------------------- #
 # 分组提示词根："{词根}{维度别名}"形态（"各省份/按省份/每个省份"）判分组用法
 _GROUP_HINT_TOKENS: tuple[str, ...] = ("各", "按", "每个", "分", "所有")
-# 缺省查询窗口（与 _scalar_dsl 同锚；报告侧由 _default_scope_note 明示口径）
-_DEGRADE_DEFAULT_WINDOW = {"start": "2024-05-01", "end": "2024-05-15"}
+# 缺省查询窗口（M-P1：从 catalog.DEFAULT_WINDOW 派生，不再硬编码字面量；
+# refresh_catalog 后即时生效）
+
+
+def _degrade_default_window() -> dict[str, str]:
+    """缺省查询窗口（与 _scalar_dsl 同锚；报告侧由 _default_scope_note 明示口径）。"""
+    dw = catalog.DEFAULT_WINDOW
+    return {"start": dw["start"], "end": dw["end"]}
 
 
 def _wants_grouping(query: str, dim: str) -> bool:
@@ -400,7 +403,7 @@ def _degraded_parse(
                 [],
             )
         return ("not_exist", "无法从语义目录识别问题意图（未命中任何指标/维度锚点）", [])
-    tables = {_SCALAR_ANCHOR_TABLE[a] for a in metrics_anchors}
+    tables = {_scalar_anchor_table(a) for a in metrics_anchors}
     if len(tables) > 1:
         return (
             "not_exist",
@@ -454,11 +457,9 @@ def _degraded_parse(
         assume_notes.append(f"已按{label}分组统计、不筛选具体取值（筛选口径假设）")
 
     explicit = parse_explicit_time_window(query)
-    window = (
-        {"start": explicit[0], "end": explicit[1]} if explicit else dict(_DEGRADE_DEFAULT_WINDOW)
-    )
-    if tables == {"fact_orders"}:
-        filters.append({"field": "pay_status", "operator": "eq", "value": "SUCCESS"})
+    window = {"start": explicit[0], "end": explicit[1]} if explicit else _degrade_default_window()
+    if tables == {"order_detail"}:
+        filters.append(_paid_filter_entry())
     dsl: dict[str, Any] = {
         "metrics": [
             {
@@ -477,7 +478,7 @@ def _degraded_parse(
     if group_dims:
         scope_desc += f"（按{'、'.join(_dimension_label(d) for d in group_dims)}分组）"
     for f in filters:
-        if f["field"] != "pay_status":
+        if f["field"] != "order_status":
             scope_desc += f"（{_dimension_label(f['field'])}={f['value']}）"
     steps = [
         PlanStep(id="s1", goal=f"按确认条件查询{scope_desc}", kind="query", dsl=dsl),
@@ -975,7 +976,7 @@ def _diagnostic_dsl_pair(query: str) -> tuple[dict[str, Any], dict[str, Any]]:
         baseline_window = {"start": "2024-05-01", "end": "2024-05-08"}
         current_window = {"start": "2024-05-08", "end": "2024-05-15"}
     metrics = [
-        {"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+        {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"},
         {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
         {"kind": "aggregate", "field": "user_id", "agg": "count_distinct", "alias": "buyers"},
     ]
@@ -984,7 +985,7 @@ def _diagnostic_dsl_pair(query: str) -> tuple[dict[str, Any], dict[str, Any]]:
         {
             "metrics": [dict(m) for m in metrics],
             "dimensions": [dict(d) for d in dimensions],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [_paid_filter_entry()],
             "time_filter": {
                 "range_type": "absolute",
                 "absolute": dict(baseline_window),
@@ -993,7 +994,7 @@ def _diagnostic_dsl_pair(query: str) -> tuple[dict[str, Any], dict[str, Any]]:
         {
             "metrics": [dict(m) for m in metrics],
             "dimensions": [dict(d) for d in dimensions],
-            "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+            "filters": [_paid_filter_entry()],
             "time_filter": {
                 "range_type": "absolute",
                 "absolute": dict(current_window),
@@ -1003,29 +1004,38 @@ def _diagnostic_dsl_pair(query: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 # 标量兜底的聚合方式映射（金额 sum / 订单数 count / 买家数 count_distinct）。
+# 注意：order_id 在此用 count（标量兜底语义）而非 metrics 中的 count_distinct
+# （指标语义）——两者语义不同，不可直接从 metrics shape 派生。
 _SCALAR_FIELD_AGG: dict[str, str] = {
-    "order_amount": "sum",
-    "discount_amount": "sum",
+    "split_total_amount": "sum",
+    "split_coupon_amount": "sum",
     "refund_amount": "sum",
     "order_id": "count",
     "user_id": "count_distinct",
 }
-_SCALAR_ANCHOR_TABLE: dict[str, str] = {
-    "order_amount": "fact_orders",
-    "discount_amount": "fact_orders",
-    "order_id": "fact_orders",
-    "user_id": "fact_orders",
-    "refund_amount": "fact_refunds",
-}
+# M-P1：_SCALAR_ANCHOR_TABLE 删除——指标字段→物理表由 catalog.COLUMNS 解析，
+# 不再 import 时值绑定（refresh_catalog 后即时生效）。
+
+
+def _scalar_anchor_table(field: str) -> str | None:
+    """标量字段 -> 物理锚点表（从 catalog.COLUMNS 动态读取）。"""
+    meta = catalog.COLUMNS.get(field)
+    return meta.table if meta is not None else None
+
+
+def _paid_filter_entry() -> dict[str, Any]:
+    """成功支付口径过滤条目（从 catalog.PAID_FILTER 动态读取，不再硬编码 1002）。"""
+    pf = catalog.PAID_FILTER
+    return {"field": pf["field"], "operator": "eq", "value": pf["value"]}
 
 
 def _scalar_dsl(anchors: tuple[str, ...], query: str) -> dict[str, Any] | None:
     """标量指标问题的确定性 DSL（按锚点取数，多锚多度量）。
 
-    回归锚点（十八期）：此前固定 sum(order_amount)，"问退款、答 GMV"。
+    回归锚点（十八期）：此前固定 sum(split_total_amount)，"问退款、答 GMV"。
     - 聚合方式按字段语义映射；别名带聚合语义（sum 原名、计数带 _count 后缀，
       与 _fmt_scalar_answer 的计数列判定联动）；
-    - 过滤口径随锚点主表适配：fact_orders 锚点带 pay_status=SUCCESS；
+    - 过滤口径随锚点主表适配：order_detail 锚点带 order_status=1002（已支付）；
       纯 refund_amount 锚点不带（该过滤对退款语义无意义）；
     - 跨表混合锚（GMV+退款金额）单查询无法同口径构造 => None（兜底拒答，
       LLM 在场时由 Planner 规划）；
@@ -1034,20 +1044,12 @@ def _scalar_dsl(anchors: tuple[str, ...], query: str) -> dict[str, Any] | None:
     """
     if not anchors or any(a not in _SCALAR_FIELD_AGG for a in anchors):
         return None
-    tables = {_SCALAR_ANCHOR_TABLE[a] for a in anchors}
+    tables = {_scalar_anchor_table(a) for a in anchors}
     if len(tables) > 1:
         return None
     explicit = parse_explicit_time_window(query)
-    window = (
-        {"start": explicit[0], "end": explicit[1]}
-        if explicit
-        else {"start": "2024-05-01", "end": "2024-05-15"}
-    )
-    filters = (
-        [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}]
-        if tables == {"fact_orders"}
-        else []
-    )
+    window = {"start": explicit[0], "end": explicit[1]} if explicit else _degrade_default_window()
+    filters = [_paid_filter_entry()] if tables == {"order_detail"} else []
     return {
         "metrics": [
             {
@@ -1154,6 +1156,10 @@ def _preview_rows(path: str, limit: int = 30) -> list[list[Any]]:
                     cells.append(None)
                 elif hasattr(v, "item"):
                     cells.append(v.item())
+                elif isinstance(v, decimal.Decimal):
+                    # DECIMAL 无 .item()，且 grounding 白名单只收 int/float/str——
+                    # 不归一化会导致 LLM 报告数值全被判"不可溯源"
+                    cells.append(float(v))
                 else:
                     cells.append(v)
             out.append(cells)
@@ -1589,6 +1595,13 @@ import math
 baseline_df = read_input("{baseline_name}")
 current_df = read_input("{current_name}")
 
+# Gmall 数仓金额列为 DECIMAL，经数据集交换区进入 pandas 可能保持 Decimal 对象
+# 类型，与 float 混算（align fill_value / 算术）会 TypeError——统一转数值。
+for _df in (baseline_df, current_df):
+    for _col in ("gmv", "orders", "buyers"):
+        if _col in _df.columns:
+            _df[_col] = pd.to_numeric(_df[_col], errors="coerce")
+
 b_total = float(baseline_df["gmv"].sum()) if "gmv" in baseline_df.columns else 0.0
 c_total = float(current_df["gmv"].sum()) if "gmv" in current_df.columns else 0.0
 delta = c_total - b_total
@@ -1669,7 +1682,12 @@ def _drilldown_template(inputs: list[str]) -> str:
     """
     baseline_name = inputs[0] if inputs else ""
     current_name = inputs[1] if len(inputs) > 1 else (inputs[0] if inputs else "")
-    labels_literal = json.dumps(_DIMENSION_LABELS, ensure_ascii=False)
+    # 标签单一事实源 = catalog.COLUMNS[].label（semantic.json）；模板生成期
+    # 固化为字面量注入沙箱，refresh_catalog 后新生成的模板即时生效
+    labels_literal = json.dumps(
+        {f: _dimension_label(f) for f in catalog.DRILLDOWN_DIM_FIELDS},
+        ensure_ascii=False,
+    )
     return f"""
 import pandas as pd
 import json
@@ -1677,6 +1695,13 @@ import math
 
 baseline_df = read_input("{baseline_name}")
 current_df = read_input("{current_name}")
+
+# Gmall 数仓金额列为 DECIMAL，经数据集交换区进入 pandas 可能保持 Decimal 对象
+# 类型，与 float 混算（align fill_value / 算术）会 TypeError——统一转数值。
+for _df in (baseline_df, current_df):
+    for _col in ("gmv", "orders", "buyers"):
+        if _col in _df.columns:
+            _df[_col] = pd.to_numeric(_df[_col], errors="coerce")
 
 # 维度字段 -> 中文标签（叙述与图表标题人读化；矩阵列头保留字段名供数据审计）
 _DIM_LABELS = json.loads({labels_literal!r})
@@ -1975,69 +2000,11 @@ def code_exec_node(state: AgentState) -> AgentState:
 # --------------------------------------------------------------------------- #
 # 5) Critic
 # --------------------------------------------------------------------------- #
-# 反思缺口判定的"业务词 -> 可用域字段"映射：反思器提到这些概念时，只有
-# 语义目录确实覆盖（或本轮已取到）才算可执行的缺口。未列出的业务概念
+# M-P1：反思缺口判定的"业务词 -> 可用域字段"映射收编至 catalog.REFLECTOR_CONCEPTS
+# （semantic.json reflector_concepts 节，单一事实源）。反思器提到这些概念时，
+# 只有语义目录确实覆盖（或本轮已取到）才算可执行的缺口。未列出的业务概念
 # （流量/活动/投放/库存/物流等）数仓未采集，一律不可作为重规划理由。
-_REFLECTOR_CONCEPT_FIELDS: dict[str, tuple[str, ...]] = {
-    "订单量": ("order_id",),
-    "订单": ("order_id", "order_amount"),
-    "客单价": ("order_amount", "order_id"),
-    "买家": ("user_id",),
-    "用户": ("user_id", "register_time", "gender"),
-    "地区": ("province",),
-    "省份": ("province",),
-    "城市": ("province",),
-    "品类": ("category",),
-    "商品": ("product_id", "product_name", "category", "brand", "unit_price"),
-    "品牌": ("brand",),
-    "店铺": ("shop_id", "shop_name"),
-    "退款": ("refund_amount", "refund_status", "refund_time"),
-    "折扣": ("discount_amount",),
-    "支付": ("pay_status",),
-    "性别": ("gender",),
-    "时间": ("order_time",),
-}
-
-# 概念在本轮产物中的等价列名（确定性兜底模板的别名口径）：产物列名是
-# 聚合别名（orders/buyers）而非语义字段名（order_id/user_id），缺了这层
-# 映射会把"已取到的订单量与买家数"误判成可重规划的数据缺口。
-_REFLECTOR_CONCEPT_ALIASES: dict[str, tuple[str, ...]] = {
-    "订单量": ("orders",),
-    "订单": ("orders",),
-    "客单价": ("gmv", "orders"),  # 客单价 = GMV / 订单量，两者齐备即可推导
-    "买家": ("buyers",),
-    "用户": ("buyers",),
-    "地区": ("province",),
-    "省份": ("province",),
-    "城市": ("province",),
-    "支付": ("pay_status",),
-}
-
-# 数仓未覆盖的业务概念（出现在反思理由中即为不可执行缺口，禁止据此重规划）
-_REFLECTOR_OUT_OF_SCOPE_TERMS = (
-    "流量",
-    "曝光",
-    "点击",
-    "访客",
-    "uv",
-    "pv",
-    "活动",
-    "促销",
-    "投放",
-    "广告",
-    "预算",
-    "库存",
-    "物流",
-    "履约",
-    "竞品",
-    "市场",
-    "舆情",
-    "客服",
-    "异常单",
-    "转化率",
-    "留存",
-    "复购",
-)
+# 概念在本轮产物中的等价列名 = reflector_concepts[concept]["produced_aliases"]。
 
 
 def _reflector_available_scope() -> str:
@@ -2059,9 +2026,15 @@ def _reflector_available_scope() -> str:
 
 
 def _concept_covered(concept: str, produced_fields: set[str]) -> bool:
-    """该业务概念所需字段是否已在本轮产物中（语义字段名或聚合别名任一命中）。"""
-    required = _REFLECTOR_CONCEPT_FIELDS[concept]
-    aliases = _REFLECTOR_CONCEPT_ALIASES.get(concept, ())
+    """该业务概念所需字段是否已在本轮产物中（语义字段名或聚合别名任一命中）。
+
+    M-P1：映射单一事实源 = catalog.REFLECTOR_CONCEPTS（reflector_concepts 节）。
+    """
+    entry = catalog.REFLECTOR_CONCEPTS.get(concept)
+    if entry is None:
+        return False
+    required = tuple(entry.get("fields", ()))
+    aliases = tuple(entry.get("produced_aliases", ()))
     return all(f in produced_fields for f in required) or (
         bool(aliases) and all(a in produced_fields for a in aliases)
     )
@@ -2076,9 +2049,9 @@ def _gap_is_actionable(text: str, produced_fields: set[str]) -> bool:
     - 未提及任何可用域概念 => 属分析深度/叙述诉求，不可执行。
     """
     lowered = text.lower()
-    if any(term in lowered for term in _REFLECTOR_OUT_OF_SCOPE_TERMS):
+    if any(term in lowered for term in catalog.OUT_OF_SCOPE_CONCEPTS):
         return False
-    for concept in _REFLECTOR_CONCEPT_FIELDS:
+    for concept in catalog.REFLECTOR_CONCEPTS:
         if (concept in text or concept.lower() in lowered) and not _concept_covered(
             concept, produced_fields
         ):
@@ -2285,15 +2258,19 @@ def _default_scope_note(state: AgentState) -> str:
         if step.kind != "query" or step.dsl is None:
             continue
         tf = (step.dsl.get("time_filter") or {}).get("absolute") or {}
-        if tf.get("start") == "2024-05-01" and tf.get("end") == "2024-05-15":
+        dw = catalog.DEFAULT_WINDOW
+        if tf.get("start") == dw["start"] and tf.get("end") == dw["end"]:
             notes.append(f"缺省统计窗口 {tf['start']} ~ {tf['end']}")
         for f in step.dsl.get("filters") or []:
             if (
                 isinstance(f, dict)
-                and f.get("field") == "pay_status"
-                and f.get("value") == "SUCCESS"
+                and f.get("field") == catalog.PAID_FILTER["field"]
+                and f.get("value") == catalog.PAID_FILTER["value"]
             ):
-                notes.append("仅统计成功支付（pay_status=SUCCESS）订单")
+                notes.append(
+                    f"仅统计{catalog.PAID_FILTER['label']}"
+                    f"（{catalog.PAID_FILTER['field']}={catalog.PAID_FILTER['value']}）订单"
+                )
     if not notes:
         return ""
     return "- 口径说明：" + "；".join(dict.fromkeys(notes))

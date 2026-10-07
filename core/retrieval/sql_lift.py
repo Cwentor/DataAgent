@@ -8,7 +8,7 @@
 拒升 ≠ 拒答：拒升的查询交由编排层回落确定性兜底 / 探索层（M6）。
 
 可提升形态（M4 白名单）：
-- FROM fact_orders + 语义目录受控连接（JOIN_RULES / FACT_JOIN_RULES，含
+- FROM order_detail + 语义目录受控连接（JOIN_RULES / FACT_JOIN_RULES，含
   连接类型与连接条件逐项核对）；
 - 纯引用 CTE 内联（CTE 必须是"单表全量 SELECT"，含计算的 CTE 拒升）；
 - SELECT：聚合指标（SUM/COUNT/AVG/MIN/MAX/COUNT DISTINCT，须带别名）与
@@ -30,8 +30,12 @@ from sqlglot import exp
 from semantic import catalog
 from semantic.dsl_schema import IDENTIFIER_PATTERN, TIME_FIELDS
 
+
 # 允许提升的 FROM 主表（DSL 编译器恒以主事实表锚定）
-_MAIN_TABLE = catalog.FACT_TABLE
+def _main_table() -> str:
+    """主锚点表（动态读目录，refresh_catalog 后即时生效，M-P0 活缺陷 #3）。"""
+    return catalog.FACT_TABLE
+
 
 _MAX_LIMIT = 10000  # DSL 契约 limit 上限
 _MAX_SQL_LENGTH = 10_000  # 输入表面语法长度上限（先于解析挡住资源炸弹）
@@ -345,7 +349,7 @@ def _inline_pure_ctes(tree: exp.Expression, rejections: list[LiftRejection]) -> 
             )
             continue
         base_table = inner.args["from_"].this.name
-        if base_table != _MAIN_TABLE and base_table not in {t for (t, _c) in _COLUMN_INDEX}:
+        if base_table != _main_table() and base_table not in {t for (t, _c) in _COLUMN_INDEX}:
             rejections.append(
                 LiftRejection("with", f"CTE {name!r} 基表 {base_table!r}", "未登记的表")
             )
@@ -442,12 +446,12 @@ def lift_sql(sql: str) -> LiftResult:
     if from_node is None or not isinstance(from_node.this, exp.Table):
         return _one(LiftRejection("from", "缺失或非表", "必须有 FROM 主事实表"))
     main_table = _physical_table(from_node.this.name)
-    if main_table != _MAIN_TABLE:
+    if main_table != _main_table():
         return _one(
             LiftRejection(
                 "from",
                 f"主表 {main_table!r}",
-                f"FROM 主表必须为 {_MAIN_TABLE!r}（DSL 编译器恒以主事实表锚定）",
+                f"FROM 主表必须为 {_main_table()!r}（DSL 编译器恒以主事实表锚定）",
             )
         )
     # 受控连接期望：表 -> (连接类型, {(物理表, 列)} 集合)；JoinRule.on 为
@@ -457,7 +461,7 @@ def lift_sql(sql: str) -> LiftResult:
         cols: set[tuple[str, str]] = set()
         for joined_col, fact_col in rule.on:
             cols.add((table, joined_col))
-            cols.add((_MAIN_TABLE, fact_col))
+            cols.add((_main_table(), fact_col))
         expected_joins[table] = (rule.join_type, cols)
     for join in tree.args.get("joins") or []:
         joined = join.this

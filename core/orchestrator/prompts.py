@@ -56,7 +56,7 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
 - intent 字段是你对问题意图的判断回传，仅用于系统诊断观测，不影响计划合法性；
 - type 取值：diagnostic（归因诊断）/ cardinality（维度基数探查，如"多少个省份"）/
   metric_scalar（指标取值，如"5月GMV"）/ unknown（无法归类）；
-- anchors 填语义目录中实际命中的字段名（如 ["order_amount"]）。
+- anchors 填语义目录中实际命中的字段名（如 ["split_total_amount"]）。
 
 # DSL 契约要点（完整 Schema 见系统注入的语义目录；字段名与结构必须逐字对齐，写错即整计划被拒）
 - metrics: [{"kind": "aggregate", "field": "<语义字段>", "agg": "sum|count|avg|min|max|count_distinct", "alias": "<英文标识符>"}]
@@ -86,7 +86,7 @@ PLANNER_SYSTEM = """你是企业级数据分析 Agent 的规划器（Planner）�
   构造）且能用一条只读 SELECT 表达时，query 步骤可改用 "sql": "SELECT ..."
   替代 dsl 字段；
 - sql 会经提升闸门转译为 DSL 契约并由确定性编译器重新生成执行（你产出的 SQL
-  永不直接执行）：必须是受限可提升形态——FROM fact_orders 主表 + 语义目录
+  永不直接执行）：必须是受限可提升形态——FROM order_detail 主表 + 语义目录
   受控连接、聚合指标或 DISTINCT 纯维度投影、AND 连接的白名单比较谓词、
   HAVING/ORDER BY/LIMIT；
 - 以下构造会被闸门拒升（拒绝清单将喂回给你改写）：CASE/OR/子查询/窗口函数/
@@ -210,11 +210,11 @@ PLANNER_FEWSHOT = """# 示例
   "steps": [
     {"id": "s1", "goal": "取当前周（08-01~08-07）与上一周（07-25~07-31）的 GMV 总量、驱动因子与维度明细对比",
      "kind": "query", "depends_on": [],
-     "dsl": {"metrics": [{"kind": "aggregate", "field": "order_amount", "agg": "sum", "alias": "gmv"},
+     "dsl": {"metrics": [{"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"},
                           {"kind": "aggregate", "field": "order_id", "agg": "count", "alias": "orders"},
                           {"kind": "aggregate", "field": "user_id", "agg": "count_distinct", "alias": "buyers"}],
              "dimensions": [{"field": "province"}, {"field": "category"}],
-             "filters": [{"field": "pay_status", "operator": "eq", "value": "SUCCESS"}],
+             "filters": [{"field": "order_status", "operator": "eq", "value": "1002"}],
              "time_filter": {"range_type": "absolute", "absolute": {"start": "2026-07-25", "end": "2026-08-08"}}},
      "code": null},
     {"id": "s2", "goal": "先做乘法因子分解（GMV = 买家数 × 人均订单数 × 客单价），定位量跌还是价跌",
@@ -234,7 +234,7 @@ s3 由信息增益裁决主因维度并在结论中写明入选依据——**严
 
 # 诊断规划的口径一致性纪律（审计修复 R2）：归因拆分（按地区/品类等维度）
 必须继承总览口径——
-- 拆分 DSL 的 filters 必须逐条复制总览 DSL 的 filters（如 pay_status=SUCCESS）；
+- 拆分 DSL 的 filters 必须逐条复制总览 DSL 的 filters（如 order_status="1002"）；
 - 时间窗口必须显式落在与总览一致的两期窗口内（如总览 [05-01, 05-15)，
   拆分分别 [05-01, 05-08) 与 [05-08, 05-15)），严禁拆分窗口与总览窗口错位；
 - 违反口径一致会导致明细合计与总览对不上，触发无谓的反思重规划。
