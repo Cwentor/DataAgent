@@ -347,6 +347,40 @@ def test_planner_prompt_contract_examples_align_with_schema():
     assert 'operator": "eq|ne|in|gt|gte|lt|lte|between"' in PLANNER_SYSTEM
 
 
+def test_planner_prompt_global_topn_contract():
+    """全局 Top N 契约纪律必须写入提示词（防 LLM 误用 top_n 反复触发 GuardrailViolation）。
+
+    回归锚点（2026-10-07 线上案例：连续两次 top_n 形态错误耗尽自愈额度）：
+    - 全局 Top N 唯一正确形态是顶层 order_by + limit，严禁 top_n；
+    - top_n 仅限分组场景且 n/partition_by/order_by 缺一不可；
+    - Few-Shot 提供全局 Top N 正确示例。
+    """
+    from core.orchestrator.prompts import PLANNER_FEWSHOT, PLANNER_SYSTEM
+
+    assert "全局 Top N" in PLANNER_SYSTEM
+    assert "order_by + limit" in PLANNER_SYSTEM
+    assert "严禁用 top_n 表达全局 Top N" in PLANNER_SYSTEM
+    assert "partition_by" in PLANNER_SYSTEM and "order_by" in PLANNER_SYSTEM
+    # Few-Shot：全局 Top N 示例使用 order_by + limit，且包含成功支付口径与年度时间窗
+    assert '"limit": 10' in PLANNER_FEWSHOT
+    assert '"direction": "desc"' in PLANNER_FEWSHOT
+    assert '"order_status", "operator": "eq", "value": "1002"' in PLANNER_FEWSHOT
+
+
+def test_reflector_synthesizer_topn_completeness():
+    """Top N 列表完整性必须写入 Reflector 与 Synthesizer 提示词。
+
+    回归锚点（2026-10-07 线上案例：合成层只列 9 个商品缺第 10 名，反思正确
+    判 insufficient 但重规划额度已耗尽降级）：两端都须显式约束 N 条全列。
+    """
+    from core.orchestrator.prompts import REFLECTOR_SYSTEM, SYNTHESIZER_SYSTEM
+
+    assert "恰好 N 条" in REFLECTOR_SYSTEM
+    assert "Top N" in REFLECTOR_SYSTEM
+    assert "完整呈现全部 N 条" in SYNTHESIZER_SYSTEM
+    assert "截断即判定为未回答问题" in SYNTHESIZER_SYSTEM
+
+
 # --------------------------------------------------------------------------- #
 # 重规划自愈上下文（pi-agent-harness 对齐：行动项 3）
 # --------------------------------------------------------------------------- #
