@@ -27,7 +27,19 @@ IDENTIFIER_PATTERN: str = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
 
 # 时间维度逻辑字段白名单（时间主轴 / 窗口函数 / 补零排序所依赖）。
 # TimeFilter.time_field 只能取这些字段之一，防止把任意列当作时间轴（越权/语义错误）。
-TIME_FIELDS: frozenset[str] = frozenset({"order_time", "refund_time", "register_time"})
+# 交易域：order_time（订单明细）/ refund_time（退款）/ register_time（用户注册）；
+# 流量域：page_view_time / action_time / display_time / start_log_time（行为事实 ts）。
+TIME_FIELDS: frozenset[str] = frozenset(
+    {
+        "order_time",
+        "refund_time",
+        "register_time",
+        "page_view_time",
+        "action_time",
+        "display_time",
+        "start_log_time",
+    }
+)
 
 
 # --------------------------------------------------------------------------- #
