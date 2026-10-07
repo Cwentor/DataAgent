@@ -75,23 +75,138 @@
   }
 
   // ------------------------------------------------------------ 报告 Tab
+  /** 报告块锚点 id：turn 为数字时 report-turn-N，无轮次语境时 report-turn-history。 */
+  function reportTurnId(turn) { return "report-turn-" + (turn || "history"); }
+
+  /** 容器级事件委托：导航标签点击跳转、块内复制按钮（全量重绘后仍生效）。 */
+  var reportTabsBound = false;
+  var reportIo = null;
+  function bindReportTabs() {
+    $("report-tabs").addEventListener("click", function (e) {
+      var btn = e.target.closest(".report-tab");
+      if (btn) { jumpToTurn(btn.dataset.turn); }
+    });
+    $("report-content").addEventListener("click", function (e) {
+      var btn = e.target.closest(".report-link-btn");
+      if (btn) { copyTurnLink(btn.dataset.turn); }
+    });
+    if ("IntersectionObserver" in window) {
+      reportIo = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          if (!en.isIntersecting) { return; }
+          document.querySelectorAll("#report-tabs .report-tab").forEach(function (t) {
+            t.classList.toggle("active", t.dataset.turn === en.target.dataset.turn);
+          });
+        });
+      }, { root: $("view-report").querySelector(".canvas-scroll"), threshold: 0.2 });
+    }
+  }
+
+  /** 构建轮次导航条（多轮报告快速定位）；单轮无翻找需求，隐藏。 */
+  function renderReportTabs(groups) {
+    var tabs = $("report-tabs");
+    if (groups.length < 2) {
+      tabs.classList.add("hidden");
+      tabs.innerHTML = "";
+      return;
+    }
+    tabs.innerHTML = "";
+    groups.forEach(function (group) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "report-tab";
+      btn.dataset.turn = String(group.turn || "history");
+      var q = turnQuery(group) || "报告";
+      if (q.length > 24) { q = q.slice(0, 24) + "…"; }
+      btn.innerHTML = '<span class="rt-badge">' + esc(turnLabel(group)) + "</span>"
+        + '<span class="rt-q" title="' + esc(turnQuery(group)) + '">' + esc(q) + "</span>";
+      tabs.appendChild(btn);
+    });
+    tabs.classList.remove("hidden");
+  }
+
+  /** 滚动高亮当前可见块对应的导航标签（DOM 全量重绘后重新 observe）。 */
+  function observeReportBlocks() {
+    if (!reportIo) { return; }
+    reportIo.disconnect();
+    document.querySelectorAll("#report-content .report-block").forEach(function (b) {
+      reportIo.observe(b);
+    });
+  }
+
+  /** 跳转到指定轮次报告块：平滑滚动 + URL hash 同步 + 标签高亮。 */
+  function jumpToTurn(turn) {
+    var el = document.getElementById(reportTurnId(turn));
+    if (!el) { return; }
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    var hash = "#" + reportTurnId(turn);
+    if ((location.hash || "") !== hash) { history.replaceState(null, "", hash); }
+    document.querySelectorAll("#report-tabs .report-tab").forEach(function (t) {
+      t.classList.toggle("active", t.dataset.turn === String(turn));
+    });
+  }
+
+  /** 复制本轮报告链接（含锚点，跨刷新/分享可直接定位）。 */
+  function copyTurnLink(turn) {
+    var url = location.origin + location.pathname + "#" + reportTurnId(turn);
+    function done() { feedbackCopyBtn(turn); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(done).catch(function () { legacyCopy(url, done); });
+    } else {
+      legacyCopy(url, done);
+    }
+  }
+
+  function legacyCopy(text, done) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) { /* 忽略 */ }
+    ta.remove();
+  }
+
+  function feedbackCopyBtn(turn) {
+    document.querySelectorAll(
+      '#report-content .report-link-btn[data-turn="' + String(turn) + '"]'
+    ).forEach(function (btn) {
+      var old = btn.textContent;
+      btn.textContent = "✓ 已复制";
+      setTimeout(function () { btn.textContent = old; }, 1800);
+    });
+  }
+
   function renderReports(arts) {
     var box = $("report-content");
     var empty = $("report-empty");
+    var groups = groupByTurn(arts.reports);
     if (!arts.reports.length) {
       box.classList.add("hidden"); empty.classList.remove("hidden");
+      // 会话切换/清空后清理残留锚点，避免刷新误落空锚
+      if (/^#report-turn-/.test(location.hash || "")) {
+        history.replaceState(null, "", location.pathname);
+      }
+      renderReportTabs(groups);
       return;
     }
     empty.classList.add("hidden"); box.classList.remove("hidden");
     while (box.firstChild) { box.removeChild(box.firstChild); }
+    renderReportTabs(groups);
     // 每轮报告各自成块（第 N 轮 · 提问原文），不再只显示最后一份
-    groupByTurn(arts.reports).forEach(function (group) {
+    groups.forEach(function (group) {
       var block = document.createElement("div");
       block.className = "report-block";
+      var turn = group.turn || "history";
+      block.id = reportTurnId(group.turn);
+      block.dataset.turn = String(turn);
       var q = turnQuery(group);
       block.innerHTML = '<div class="turn-group-head"><span class="tg-badge">'
         + esc(turnLabel(group)) + "</span>"
-        + '<span class="tg-q" title="' + esc(q) + '">' + esc(q) + "</span></div>";
+        + '<span class="tg-q" title="' + esc(q) + '">' + esc(q) + "</span>"
+        + '<button type="button" class="report-link-btn" data-turn="' + esc(String(turn))
+        + '" title="复制本轮报告链接（含锚点，可直接定位）">🔗 复制链接</button></div>';
       var body = document.createElement("div");
       body.className = "report-body";
       // 一轮可能产多份报告（如重综合）：全部展开，不再丢弃
@@ -99,6 +214,13 @@
       block.appendChild(body);
       box.appendChild(block);
     });
+    observeReportBlocks();
+    // hash 恢复：刷新/分享的 #report-turn-N 直达对应轮次报告
+    var m = /^#(report-turn-[\w-]+)$/.exec(location.hash || "");
+    if (m) {
+      var target = document.getElementById(m[1]);
+      if (target) { target.scrollIntoView({ behavior: "auto", block: "start" }); return; }
+    }
   }
 
   // ------------------------------------------------------------ 图表 Tab
@@ -295,6 +417,7 @@
     init: function () {
       $("export-md").addEventListener("click", exportMarkdown);
       $("export-html").addEventListener("click", exportHtml);
+      bindReportTabs();
       AgentStore.subscribe("currentArtifacts", function (state) {
         render(state.currentArtifacts);
       });
