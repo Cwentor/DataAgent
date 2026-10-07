@@ -2872,6 +2872,33 @@ def _analysis_material(state: AgentState, *, include_trace: bool = True) -> str:
     return "\n\n".join(parts)
 
 
+def _render_enumeration_rows(state: AgentState) -> str:
+    """ENUMERATION 预路由直答：确定性渲染维度取值全量清单（不走 LLM 叙述）。
+
+    纯名称清单无数值，绕过 grounding 口径风险低；行数不截断，每行宽度独立
+    钳制防止极端宽行撑爆报告。_preview_rows 传大 limit 取全量（其默认 limit=30
+    是为分析题预览设计，枚举题须全量）。
+    """
+    lines: list[str] = [f"## 维度取值清单：{state.user_query}", ""]
+    for name, ref in state.datasets.items():
+        preview = _preview_rows(
+            str(workspace_path(state) / "inputs" / ref.get("path", "")), limit=1_000_000
+        )
+        cols = [str(c) for c in ref.get("columns", [])]
+        dims = [c for c in cols if c not in ("gmv", "orders", "buyers")]
+        if not dims or not preview:
+            continue
+        width = 40  # 每行宽度独立钳制，行数不截断
+        lines.append(f"**{name}**（{len(preview)} 个取值）")
+        lines.append("")
+        lines.append("| " + " | ".join(dims) + " |")
+        lines.append("| " + " | ".join("---" for _ in dims) + " |")
+        for row in preview:
+            cells = [str(row[cols.index(d)])[:width] for d in dims]
+            lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
 def _no_data_report(state: AgentState) -> str:
     """无数据场景的确定性诚实报告（2026-09 审计修复）。
 
@@ -3089,6 +3116,15 @@ def synthesize_node(state: AgentState) -> AgentState:
             {"artifact": {"type": "markdown_report", "title": "数据说明", "content": report}},
         )
         return state.apply(report=report, phase="done")
+
+    # ENUMERATION 预路由直答（P1）：不走 LLM 叙述，确定性渲染全量行清单
+    if classify_intent(state.user_query).intent == IntentType.ENUMERATION:
+        report = _render_enumeration_rows(state)
+        events.emit_event(
+            events.EVENT_ARTIFACT_EMIT,
+            {"artifact": {"type": "markdown_report", "title": "维度取值清单", "content": report}},
+        )
+        return state.apply(report=report, answered_by="enumeration", phase="done")
 
     seen_summary_titles: set[str] = set()
     rendered_charts: list[Artifact] = []
