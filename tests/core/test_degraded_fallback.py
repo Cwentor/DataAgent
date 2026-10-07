@@ -497,7 +497,7 @@ def test_protocol_js_whitelists_degrade_event():
     """前端协议契约锚定：AgentEventType 白名单含 "degrade"（否则 SSE 帧被静默丢弃）。"""
     from pathlib import Path
 
-    protocol = Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "protocol.js"
+    protocol = Path(__file__).resolve().parents[2] / "web" / "static" / "js" / "protocol.js"
     text = protocol.read_text(encoding="utf-8")
     assert '"degrade"' in text
 
