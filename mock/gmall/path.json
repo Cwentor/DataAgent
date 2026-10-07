@@ -1,0 +1,14 @@
+[
+  {"path":["start_app","home", "search", "good_list","good_detail","good_detail" ,"good_detail","cart","order","payment","mine","order_list","end"],"rate":100 },
+  {"path":["start_app","home", "good_list","good_detail","good_detail" ,"good_detail","cart","end"],"rate":30 },
+  {"path":["start_app","home", "activity1111","good_detail"  ,"cart","good_detail","cart","order","payment","end"],"rate":30 },
+  {"path":["activity1111","good_detail" ,"activity1111" ,"good_detail","order","payment","end"],"rate":200 },
+  {"path":["start_app","home" ,"activity1111" ,"good_detail","order","payment","end"],"rate":200 },
+  {"path":["start_app","home" ,"activity1111" ,"good_detail","order","end"],"rate":200 },
+  {"path":["start_app","home" , "good_detail","order","payment","end"],"rate":30 },
+  {"path":["good_detail","order","payment","end"],"rate":350 },
+  {"path":["good_detail"],"rate":30 },
+  {"path":["start_app","home","mine","good_detail"],"rate":30 },
+  {"path":["start_app","home", "good_detail","good_detail","good_detail","cart","order","payment","end"],"rate":200 },
+  {"path":["start_app","home", "search","good_list","good_detail","cart","order","payment","end"],"rate":200 }
+]
