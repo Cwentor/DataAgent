@@ -317,3 +317,72 @@ def test_routing_funnel_report_json_cli(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["total"] == 5
     assert payload["intents"][0]["intent"] == "data_query"
+
+
+# --------------------------------------------------------------------------- #
+# 编排审计字段：answered_by / planner_llm_error（P3 审计契约扩展）
+# --------------------------------------------------------------------------- #
+def test_audit_columns_ddl_consistent_after_extension():
+    """_AUDIT_COLUMN_TYPES 与 _AUDIT_DDL 列清单一致（含 answered_by / planner_llm_error）。
+
+    正则限定列定义行（类型关键字 VARCHAR/DOUBLE/BIGINT/INTEGER），避免误匹配
+    CREATE TABLE 等 DDL 语句行。
+    """
+    import re
+
+    from audit.store import _AUDIT_COLUMN_TYPES, _AUDIT_DDL
+
+    ddl_cols = set(
+        re.findall(
+            r"^\s+(\w+)\s+(?:VARCHAR|DOUBLE|BIGINT|INTEGER)\b",
+            _AUDIT_DDL,
+            flags=re.MULTILINE,
+        )
+    )
+    assert set(_AUDIT_COLUMN_TYPES) == ddl_cols
+    assert "answered_by" in _AUDIT_COLUMN_TYPES
+    assert "planner_llm_error" in _AUDIT_COLUMN_TYPES
+
+    # _INSERT_SQL：列名清单与占位符数量一致（第三处同步守卫）
+    from audit.store import _INSERT_SQL
+
+    cols_match = re.search(r"INSERT INTO audit_log\s*\(([^)]*)\)", _INSERT_SQL)
+    insert_cols = {c.strip() for c in cols_match.group(1).split(",") if c.strip()}
+    assert insert_cols == set(_AUDIT_COLUMN_TYPES)
+    placeholders = re.search(r"VALUES \(([^)]*)\)", _INSERT_SQL).group(1)
+    assert len(placeholders.split(",")) == len(insert_cols)
+
+
+def test_audit_record_serializes_orchestration_fields():
+    """AuditRecord 序列化包含编排特有字段。"""
+    from audit.record import AuditRecord
+
+    rec = AuditRecord(
+        request_id="r1", prompt="列举省份", answered_by="enumeration", planner_llm_error=None
+    )
+    d = rec.to_dict()
+    assert d["answered_by"] == "enumeration"
+    assert d["planner_llm_error"] is None
+
+
+def test_audit_store_db_orchestration_fields(tmp_path):
+    """DuckDB 审计表落盘编排字段（answered_by / planner_llm_error 可回读）。"""
+    store = AuditStore(db_path=tmp_path / "audit.duckdb")
+    store.write(
+        AuditRecord(
+            request_id="r1",
+            prompt="列举省份",
+            answered_by="enumeration",
+            planner_llm_error=None,
+        )
+    )
+    store.close()
+
+    conn = duckdb.connect(str(tmp_path / "audit.duckdb"), read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT request_id, answered_by, planner_llm_error FROM audit_log"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [("r1", "enumeration", None)]

@@ -40,6 +40,9 @@ class AuditRecord:
     detected_intent: str | None = None
     routing_latency_ms: float | None = None
     routing_reason: str | None = None
+    # 编排特有字段（P3）：编排裁决方与 LLM 规划失败原因
+    answered_by: str | None = None
+    planner_llm_error: str | None = None
     created_at: str = field(default_factory=_utcnow_iso)
 
     def to_dict(self) -> dict[str, Any]:
