@@ -125,7 +125,7 @@ def main() -> None:
     `python -m web.server [端口]` 用法保持兼容；ThreadingHTTPServer 与
     WEB_SERVER_ENGINE 开关已删除（FastAPI 为唯一 HTTP 实现）。
     """
-    setup_logging(_level_from_str(settings.LOG_LEVEL))
+    setup_logging(_level_from_str(settings.LOG_LEVEL), log_file=settings.AUDIT_LOG_FILE)
     host = settings.WEB_HOST
     issues = _startup_security_issues(host)
     if issues:
