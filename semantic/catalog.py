@@ -3,21 +3,59 @@
 这是"杜绝随意 Join / SQL 注入"的关键防线：编译器只允许引用本目录登记的字段，
 表连接关系也只由本目录声明，禁止任意 Join。
 
-多事实表模型：
-- FACT_TABLE 是主事实表（查询锚点，FROM 主表）；
-- 第二事实表（如 fact_refunds）通过 FACT_JOIN_RULES 受控连接，且与主事实表
-  在业务上保证 1:1（每订单至多一条退款），避免一对多扇出放大聚合结果。
+多事实表模型（Gmall 二十期）：
+- FACT_TABLE 是主事实表（order_detail，查询锚点，FROM 主表）；
+- 第二事实表（order_refund_info）通过 FACT_JOIN_RULES 受控连接，
+  业务上保证 1:1（每订单至多一条退款），避免一对多扇出放大聚合结果；
+- 流量域（fact_page_view/fact_action/fact_display/fact_start）为独立查询域
+  （QUERY_DOMAINS 域锚点），跨域查询由编译器拒绝。
 
-数据驱动（P0-2）：本文件的默认目录只是"内置回退"。生产启动时由
-semantic.catalog_loader.refresh_catalog() 从 DuckDB information_schema 元数据 +
-config/semantic.json 覆写重建目录（YAML 亦兼容；改配置即可新增表/字段，
-不再需要改 Python）。
-compiler / guard 一律通过 `catalog.XXX` 动态读取本模块当前状态。
+单一事实源（M-P2，2026-10）：**config/semantic.json 是唯一静态业务事实源**。
+本模块在 import 时从 json 直读构建全部内置目录常量（严格校验必要节，
+缺节/坏节直接报错），严禁在本文件手写任何业务事实——字段/标签/别名/连接/
+指标口径/大区映射/枚举值标签等一律改 json 登记即可，无需改 Python。
+生产启动时 semantic.catalog_loader.refresh_catalog() 再从 DuckDB
+information_schema + json 覆写重建目录（维度成员词表从库内 distinct 重建，
+dimension_members_seed 仅作库不可用时的离线回退）。
+compiler / guard / agent 一律通过 `catalog.XXX` 动态读取本模块当前状态。
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
+
+# --------------------------------------------------------------------------- #
+# json 直读（M-P2 单一事实源）
+# --------------------------------------------------------------------------- #
+
+# import 时必须存在的节：缺失即视为配置损坏，快速失败（严禁静默半目录）
+_REQUIRED_SECTIONS: tuple[str, ...] = (
+    "fact_table",
+    "fact_tables",
+    "aliases",
+    "fields",
+    "join_rules",
+    "fact_join_rules",
+    "query_domains",
+    "dimension_member_fields",
+)
+
+
+def _load_builtin(path: Path | None = None) -> dict:
+    """读取并校验 semantic.json（单一事实源；损坏配置快速失败）。"""
+    p = path or (Path(__file__).resolve().parents[1] / "config" / "semantic.json")
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError(f"semantic.json 顶层必须是对象: {path}")
+    missing = [k for k in _REQUIRED_SECTIONS if k not in data]
+    if missing:
+        raise RuntimeError(f"semantic.json 缺少必要节 {missing}，请补齐配置: {p}")
+    return data
+
+
+_BUILTIN = _load_builtin()
 
 
 @dataclass(frozen=True)
@@ -25,15 +63,14 @@ class FieldMeta:
     """字段元数据：物理表 + 列名 + 类型（dtype 用于字面量安全转义）。
 
     label：中文语义标签（如「订单金额」），供 Web 侧栏展示与 Planner
-    提示词注入；None 时消费方回退物理列名，保持旧契约逐字不变。
+    提示词注入；None 时消费方回退物理列名。
+    aliases：业务别名（意图分类/问法匹配词源），单一事实源登记在 json。
     """
 
     table: str
     column: str
     dtype: str  # 用于字面量安全转义：str / int / float / bool / timestamp
     label: str | None = None
-    # 业务别名（意图分类词源，二期收编）——新字段登记时别名随登记自动
-    # 进入意图分类器，单一事实源；tuple 保证 frozen dataclass 哈希安全。
     aliases: tuple[str, ...] = ()
 
 
@@ -50,175 +87,102 @@ class JoinRule:
     on: tuple[tuple[str, str], ...] = ()
 
 
-# 逻辑字段 -> 物理字段（内置默认目录；生产环境由 catalog_loader 从元数据+YAML 重建）
+def _rules(raw: dict) -> dict[str, JoinRule]:
+    """json 连接声明节 -> JoinRule 映射（type: inner/left，on: 字段对列表）。"""
+    return {
+        table: JoinRule(str(spec.get("type", "inner")), tuple(tuple(p) for p in spec.get("on", [])))
+        for table, spec in raw.items()
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 内置目录常量（全部派生自 semantic.json，本文件零手写业务事实）
+# --------------------------------------------------------------------------- #
+
+# 逻辑字段 -> 物理字段
 COLUMNS: dict[str, FieldMeta] = {
-    # fact_orders（主事实表）
-    "order_id": FieldMeta(
-        "fact_orders", "order_id", "int", label="订单ID", aliases=("订单量", "订单数")
-    ),
-    "user_id": FieldMeta(
-        "fact_orders", "user_id", "int", label="用户ID", aliases=("买家数", "用户数")
-    ),
-    "product_id": FieldMeta("fact_orders", "product_id", "int", label="商品ID"),
-    "order_amount": FieldMeta(
-        "fact_orders",
-        "order_amount",
-        "float",
-        label="订单金额",
-        aliases=("gmv", "销售额", "订单金额", "成交金额"),
-    ),
-    "discount_amount": FieldMeta(
-        "fact_orders",
-        "discount_amount",
-        "float",
-        label="优惠金额",
-        aliases=("优惠金额", "折扣金额"),
-    ),
-    "pay_status": FieldMeta("fact_orders", "pay_status", "str", label="支付状态"),
-    "order_time": FieldMeta("fact_orders", "order_time", "timestamp", label="下单时间"),
-    "shop_id": FieldMeta("fact_orders", "shop_id", "int", label="门店ID"),
-    # fact_refunds（第二事实表：退款）
-    "refund_id": FieldMeta("fact_refunds", "refund_id", "int", label="退款单ID"),
-    "refund_amount": FieldMeta(
-        "fact_refunds", "refund_amount", "float", label="退款金额", aliases=("退款金额",)
-    ),
-    "refund_time": FieldMeta("fact_refunds", "refund_time", "timestamp", label="退款时间"),
-    "refund_status": FieldMeta("fact_refunds", "refund_status", "str", label="退款状态"),
-    # dim_user
-    "province": FieldMeta(
-        "dim_user",
-        "province",
-        "str",
-        label="省份",
-        aliases=(
-            "province",
-            "省份",
-            "省",
-            "地区",
-            "地域",
-            "区域",
-            "大区",
-            "城市",
-            "广东",
-            "浙江",
-            "江苏",
-            "北京",
-            "上海",
-            "四川",
-            "湖北",
-            "山东",
-        ),
-    ),
-    "gender": FieldMeta("dim_user", "gender", "str", label="性别"),
-    "register_time": FieldMeta("dim_user", "register_time", "timestamp", label="注册时间"),
-    # dim_product
-    "category": FieldMeta(
-        "dim_product",
-        "category",
-        "str",
-        label="品类",
-        aliases=("category", "品类", "类目", "品类结构"),
-    ),
-    "brand": FieldMeta("dim_product", "brand", "str", label="品牌", aliases=("brand", "品牌")),
-    "unit_price": FieldMeta("dim_product", "unit_price", "float", label="单价"),
-    "product_name": FieldMeta("dim_product", "product_name", "str", label="商品名称"),
-    # dim_shop
-    "shop_name": FieldMeta(
-        "dim_shop", "shop_name", "str", label="门店名称", aliases=("shop_name", "店铺", "门店")
-    ),
+    name: FieldMeta(
+        str(spec["table"]),
+        str(spec["column"]),
+        str(spec.get("dtype") or ""),
+        label=spec.get("label"),
+        aliases=tuple(str(a) for a in spec.get("aliases", ())),
+    )
+    for name, spec in _BUILTIN["fields"].items()
 }
 
-# 物理表 -> 中文表标签：Web 侧栏分组标题与 Planner 摘要展示用。
-# 内置常量（不随 overlay 重建）；overlay 引入未登记的新表时消费方回退表名本身。
-TABLE_LABELS: dict[str, str] = {
-    "fact_orders": "订单事实表",
-    "fact_refunds": "退款事实表",
-    "dim_user": "用户维度表",
-    "dim_product": "商品维度表",
-    "dim_shop": "门店维度表",
-}
+# 物理表 -> 中文表标签：Web 侧栏分组标题与 Planner 摘要展示用
+TABLE_LABELS: dict[str, str] = dict(_BUILTIN.get("table_labels", {}))
 
-# 表别名（编译器内部使用）
-ALIASES: dict[str, str] = {
-    "fact_orders": "f",
-    "fact_refunds": "r",
-    "dim_user": "u",
-    "dim_product": "p",
-    "dim_shop": "s",
-}
+# 表别名（编译器内部使用；主锚点别名固定为 f，编译器 FROM 子句引用）
+ALIASES: dict[str, str] = dict(_BUILTIN["aliases"])
 
-# 主事实表（查询锚点，FROM 主表）
-FACT_TABLE: str = "fact_orders"
+# 主事实表（交易域查询锚点，FROM 主表）
+FACT_TABLE: str = str(_BUILTIN["fact_table"])
 
 # 全部事实表（用于校验/文档）
-FACT_TABLES: tuple[str, ...] = ("fact_orders", "fact_refunds")
+FACT_TABLES: tuple[str, ...] = tuple(str(t) for t in _BUILTIN["fact_tables"])
 
-# 受控连接规则：只允许从主事实表星型连接维度表
-JOIN_RULES: dict[str, JoinRule] = {
-    "dim_user": JoinRule("inner", (("user_id", "user_id"),)),
-    "dim_product": JoinRule("inner", (("product_id", "product_id"),)),
-    "dim_shop": JoinRule("inner", (("shop_id", "shop_id"),)),
+# 受控连接规则：只允许从主事实表星型连接维度表（全部 N:1，无扇出）
+JOIN_RULES: dict[str, JoinRule] = _rules(_BUILTIN["join_rules"])
+
+# 第二事实表 -> 主事实表 的受控连接（LEFT JOIN）
+FACT_JOIN_RULES: dict[str, JoinRule] = _rules(_BUILTIN["fact_join_rules"])
+
+# 独立查询域：锚点表 -> 该域允许的维度连接（编译器域锚点解析，跨域报错）
+QUERY_DOMAINS: dict[str, dict[str, JoinRule]] = {
+    anchor: _rules(rules) for anchor, rules in _BUILTIN["query_domains"].items()
 }
 
-# 第二事实表 -> 主事实表 的受控连接（LEFT JOIN，业务上 1:1，无扇出）
-FACT_JOIN_RULES: dict[str, JoinRule] = {
-    "fact_refunds": JoinRule("left", (("order_id", "order_id"),)),
-}
+# 维度成员词汇表离线回退种子（生产由 catalog_loader 从库内 distinct 重建）
+DIMENSION_MEMBERS_SEED: dict[str, list[str]] = dict(_BUILTIN.get("dimension_members_seed", {}))
 
-# 维度成员词汇表（逻辑字段 -> 成员值）：启发式解析与多轮会话继承从问题文本
-# 抽取维度值用（审计 §3.2-4：原 heuristic.PROVINCES/CATEGORIES 硬编码常量数据化）。
-# 内置默认仅作"库不可用"时的离线回退；服务启动时由
-# catalog_loader.refresh_catalog() 从数仓 dim 表 distinct 值重建——
-# 新增省份/品类等维度成员只需改库，离线启发式路径不再失明。
+# 维度成员词汇表（逻辑字段 -> 成员值）：启发式解析与多轮继承从问题文本抽取维度值用。
+# 内置默认 = seed 快照；服务启动时由 catalog_loader 按白名单从数仓 distinct 重建。
 DIMENSION_MEMBERS: dict[str, tuple[str, ...]] = {
-    "province": ("广东", "浙江", "江苏", "北京", "上海", "四川", "湖北", "山东"),
-    "gender": ("M", "F"),
-    "category": ("数码", "家电", "服饰", "美妆", "食品", "家居"),
-    "brand": (
-        "华为",
-        "小米",
-        "苹果",
-        "联想",
-        "美的",
-        "格力",
-        "海尔",
-        "TCL",
-        "优衣库",
-        "耐克",
-        "阿迪达斯",
-        "李宁",
-        "兰蔻",
-        "雅诗兰黛",
-        "欧莱雅",
-        "自然堂",
-        "三只松鼠",
-        "良品铺子",
-        "蒙牛",
-        "伊利",
-        "宜家",
-        "顾家",
-        "全友",
-        "林氏木业",
-    ),
+    k: tuple(v) for k, v in DIMENSION_MEMBERS_SEED.items()
 }
 
-# 可下钻字符串维度白名单（诊断归因候选维度池）：只有这些字段才允许作为
-# 「用户未显式指定维度」时的自动下钻候选——分省只是候选之一，由信息增益
-# 裁决入选者，严禁把 province 当默认第一梯队写死。高基数字段
-# （product_name/shop_name）与身份属性字段（gender）不在列。
-DRILLDOWN_DIM_FIELDS: tuple[str, ...] = ("province", "brand", "category")
+# 维度成员词汇表重建的字段白名单（逻辑字段名）
+DIMENSION_MEMBER_FIELDS: tuple[str, ...] = tuple(
+    str(f) for f in _BUILTIN["dimension_member_fields"]
+)
 
-# 大区 -> 省份成员映射（审计修复 M1 区域词展开）。
-# 行政区划归属是业务知识（保留常量），但展开值域必须与数仓实际存在的省份取交集：
-# mock 数仓 dim_user.province 仅含 广东/浙江/江苏/北京/上海/四川/湖北/山东，
-# 生产环境由 catalog_loader 从数仓 distinct 值重建 DIMENSION_MEMBERS，
-# 消费方（agent 启发式/LLM 路径、编排器规范化）一律经 region_provinces()
-# 与成员词汇表求交——库中裁撤的省份不会产出 province IN ('无效省') 空过滤。
-# 严禁把映射值直接当字面值写 SQL（province = '华东' 属错误口径，M1 缺陷根源）。
+# 可下钻字符串维度白名单（诊断归因候选维度池）
+DRILLDOWN_DIM_FIELDS: tuple[str, ...] = tuple(
+    str(f) for f in _BUILTIN.get("drilldown_dim_fields", ())
+)
+
+# 大区 -> 省份成员映射（区域词展开；消费方一律经 region_provinces() 与成员词表求交）
 REGION_PROVINCE_MAPPING: dict[str, tuple[str, ...]] = {
-    "华北": ("北京",),
-    "华东": ("上海", "江苏", "浙江", "山东"),
-    "华南": ("广东",),
-    "华中": ("湖北",),
-    "西南": ("四川",),
+    region: tuple(provinces)
+    for region, provinces in _BUILTIN.get("region_province_mapping", {}).items()
 }
+
+# 指标口径（glossary/heuristic/提示词的公共事实源）：key/title/aliases/
+# definition/formula/fields/shape（DSL 产出形态）
+METRICS: list[dict] = list(_BUILTIN.get("metrics", []))
+
+# 计数实体词表（"多少订单/用户/商品" -> count/count_distinct 形态）
+COUNT_ENTITIES: list[dict] = list(_BUILTIN.get("count_entities", []))
+
+# 支付口径（成功过滤的字段/值/问法词/反义问法）
+PAID_FILTER: dict = dict(_BUILTIN.get("paid_filter", {}))
+
+# 缺省分析窗口（无显式时间解析时使用；两期诊断按中点切分）
+DEFAULT_WINDOW: dict = dict(_BUILTIN.get("default_window", {}))
+
+# 反思器概念覆盖表：概念 -> {fields, produced_aliases}
+REFLECTOR_CONCEPTS: dict[str, dict] = dict(_BUILTIN.get("reflector_concepts", {}))
+
+# 数仓未覆盖的业务概念（出现在反思理由中即为不可执行缺口）
+OUT_OF_SCOPE_CONCEPTS: list[str] = list(_BUILTIN.get("out_of_scope_concepts", []))
+
+# 明确未定义业务指标清单（澄清层"宁拒答不近似"词源）
+UNDEFINED_METRICS: list[dict] = list(_BUILTIN.get("undefined_metrics", []))
+
+# 枚举值 -> 中文标签（order_status 码表/退款类型/评价/性别）
+VALUE_LABELS: dict[str, dict[str, str]] = dict(_BUILTIN.get("value_labels", {}))
+
+# 聚合产物别名 -> 中文（gmv/orders/buyers 等产物列的人读化）
+METRIC_ALIASES: dict[str, str] = dict(_BUILTIN.get("metric_aliases", {}))

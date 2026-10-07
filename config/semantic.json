@@ -1,41 +1,1351 @@
 {
-  "fact_table": "fact_orders",
-  "fact_tables": ["fact_orders", "fact_refunds"],
+  "fact_table": "order_detail",
+  "fact_tables": [
+    "order_detail",
+    "order_refund_info",
+    "fact_page_view",
+    "fact_action",
+    "fact_display",
+    "fact_start"
+  ],
   "aliases": {
-    "fact_orders": "f",
-    "fact_refunds": "r",
-    "dim_user": "u",
-    "dim_product": "p",
-    "dim_shop": "s"
+    "order_detail": "f",
+    "order_info": "oi",
+    "order_refund_info": "r",
+    "sku_info": "sk",
+    "user_info": "u",
+    "base_province": "pr",
+    "fact_page_view": "f",
+    "fact_action": "f",
+    "fact_display": "f",
+    "fact_start": "f"
   },
   "fields": {
-    "order_id": { "table": "fact_orders", "column": "order_id", "dtype": "int", "label": "订单ID" },
-    "user_id": { "table": "fact_orders", "column": "user_id", "dtype": "int", "label": "用户ID" },
-    "product_id": { "table": "fact_orders", "column": "product_id", "dtype": "int", "label": "商品ID" },
-    "order_amount": { "table": "fact_orders", "column": "order_amount", "dtype": "float", "label": "订单金额" },
-    "discount_amount": { "table": "fact_orders", "column": "discount_amount", "dtype": "float", "label": "优惠金额" },
-    "pay_status": { "table": "fact_orders", "column": "pay_status", "dtype": "str", "label": "支付状态" },
-    "order_time": { "table": "fact_orders", "column": "order_time", "dtype": "timestamp", "label": "下单时间" },
-    "refund_id": { "table": "fact_refunds", "column": "refund_id", "dtype": "int", "label": "退款单ID" },
-    "refund_amount": { "table": "fact_refunds", "column": "refund_amount", "dtype": "float", "label": "退款金额" },
-    "refund_time": { "table": "fact_refunds", "column": "refund_time", "dtype": "timestamp", "label": "退款时间" },
-    "refund_status": { "table": "fact_refunds", "column": "refund_status", "dtype": "str", "label": "退款状态" },
-    "province": { "table": "dim_user", "column": "province", "dtype": "str", "label": "省份" },
-    "gender": { "table": "dim_user", "column": "gender", "dtype": "str", "label": "性别" },
-    "register_time": { "table": "dim_user", "column": "register_time", "dtype": "timestamp", "label": "注册时间" },
-    "category": { "table": "dim_product", "column": "category", "dtype": "str", "label": "品类" },
-    "brand": { "table": "dim_product", "column": "brand", "dtype": "str", "label": "品牌" },
-    "unit_price": { "table": "dim_product", "column": "unit_price", "dtype": "float", "label": "单价" },
-    "product_name": { "table": "dim_product", "column": "product_name", "dtype": "str", "label": "商品名称" },
-    "shop_id": { "table": "fact_orders", "column": "shop_id", "dtype": "int", "label": "门店ID" },
-    "shop_name": { "table": "dim_shop", "column": "shop_name", "dtype": "str", "label": "门店名称" }
+    "order_detail_id": {
+      "table": "order_detail",
+      "column": "order_detail_id",
+      "dtype": "int",
+      "label": "订单明细ID"
+    },
+    "order_id": {
+      "table": "order_detail",
+      "column": "order_id",
+      "dtype": "int",
+      "label": "订单ID",
+      "aliases": [
+        "订单量",
+        "订单数"
+      ]
+    },
+    "order_status": {
+      "table": "order_detail",
+      "column": "order_status",
+      "dtype": "str",
+      "label": "订单状态",
+      "aliases": [
+        "订单状态",
+        "已支付",
+        "已取消",
+        "已完成",
+        "已退款",
+        "支付状态",
+        "支付方式"
+      ]
+    },
+    "user_id": {
+      "table": "order_detail",
+      "column": "user_id",
+      "dtype": "int",
+      "label": "用户ID",
+      "aliases": [
+        "买家数",
+        "用户数"
+      ]
+    },
+    "province_id": {
+      "table": "order_detail",
+      "column": "province_id",
+      "dtype": "int",
+      "label": "省份ID"
+    },
+    "sku_id": {
+      "table": "order_detail",
+      "column": "sku_id",
+      "dtype": "int",
+      "label": "商品ID",
+      "aliases": [
+        "商品数",
+        "在售商品"
+      ]
+    },
+    "sku_name": {
+      "table": "order_detail",
+      "column": "sku_name",
+      "dtype": "str",
+      "label": "商品名称",
+      "aliases": [
+        "商品名称",
+        "商品",
+        "sku"
+      ]
+    },
+    "order_price": {
+      "table": "order_detail",
+      "column": "order_price",
+      "dtype": "float",
+      "label": "成交单价",
+      "aliases": [
+        "成交单价",
+        "单价"
+      ]
+    },
+    "sku_num": {
+      "table": "order_detail",
+      "column": "sku_num",
+      "dtype": "int",
+      "label": "销售数量",
+      "aliases": [
+        "销量",
+        "销售数量",
+        "销售件数",
+        "件数",
+        "售出件数"
+      ]
+    },
+    "split_total_amount": {
+      "table": "order_detail",
+      "column": "split_total_amount",
+      "dtype": "float",
+      "label": "实付金额",
+      "aliases": [
+        "gmv",
+        "销售额",
+        "销售金额",
+        "实付金额",
+        "成交金额",
+        "营业额",
+        "流水"
+      ]
+    },
+    "split_coupon_amount": {
+      "table": "order_detail",
+      "column": "split_coupon_amount",
+      "dtype": "float",
+      "label": "券优惠金额",
+      "aliases": [
+        "优惠金额",
+        "优惠券金额",
+        "券减免",
+        "优惠"
+      ]
+    },
+    "split_activity_amount": {
+      "table": "order_detail",
+      "column": "split_activity_amount",
+      "dtype": "float",
+      "label": "活动优惠金额",
+      "aliases": [
+        "活动优惠",
+        "活动减免",
+        "促销优惠"
+      ]
+    },
+    "order_time": {
+      "table": "order_detail",
+      "column": "order_time",
+      "dtype": "timestamp",
+      "label": "下单时间",
+      "aliases": [
+        "下单时间",
+        "订单时间"
+      ]
+    },
+    "tm_name": {
+      "table": "order_detail",
+      "column": "tm_name",
+      "dtype": "str",
+      "label": "品牌",
+      "aliases": [
+        "brand",
+        "品牌"
+      ]
+    },
+    "category1_name": {
+      "table": "order_detail",
+      "column": "category1_name",
+      "dtype": "str",
+      "label": "一级类目",
+      "aliases": [
+        "category",
+        "品类",
+        "类目",
+        "品类结构",
+        "一级类目"
+      ]
+    },
+    "category2_name": {
+      "table": "order_detail",
+      "column": "category2_name",
+      "dtype": "str",
+      "label": "二级类目",
+      "aliases": [
+        "二级类目"
+      ]
+    },
+    "category3_name": {
+      "table": "order_detail",
+      "column": "category3_name",
+      "dtype": "str",
+      "label": "三级类目",
+      "aliases": [
+        "三级类目",
+        "细分类目"
+      ]
+    },
+    "out_trade_no": {
+      "table": "order_info",
+      "column": "out_trade_no",
+      "dtype": "str",
+      "label": "外部交易号"
+    },
+    "consignee": {
+      "table": "order_info",
+      "column": "consignee",
+      "dtype": "str",
+      "label": "收货人"
+    },
+    "feight_fee": {
+      "table": "order_info",
+      "column": "feight_fee",
+      "dtype": "float",
+      "label": "运费"
+    },
+    "payment_way": {
+      "table": "order_info",
+      "column": "payment_way",
+      "dtype": "str",
+      "label": "支付方式"
+    },
+    "refund_id": {
+      "table": "order_refund_info",
+      "column": "refund_id",
+      "dtype": "int",
+      "label": "退款单ID"
+    },
+    "refund_amount": {
+      "table": "order_refund_info",
+      "column": "refund_amount",
+      "dtype": "float",
+      "label": "退款金额",
+      "aliases": [
+        "退款金额"
+      ]
+    },
+    "refund_type": {
+      "table": "order_refund_info",
+      "column": "refund_type",
+      "dtype": "str",
+      "label": "退款类型",
+      "aliases": [
+        "退款类型",
+        "仅退款",
+        "退货退款"
+      ]
+    },
+    "refund_num": {
+      "table": "order_refund_info",
+      "column": "refund_num",
+      "dtype": "int",
+      "label": "退款数量"
+    },
+    "refund_reason_type": {
+      "table": "order_refund_info",
+      "column": "refund_reason_type",
+      "dtype": "str",
+      "label": "退款原因类型"
+    },
+    "refund_time": {
+      "table": "order_refund_info",
+      "column": "create_time",
+      "dtype": "timestamp",
+      "label": "退款时间",
+      "aliases": [
+        "退款时间"
+      ]
+    },
+    "price": {
+      "table": "sku_info",
+      "column": "price",
+      "dtype": "float",
+      "label": "商品标价",
+      "aliases": [
+        "标价",
+        "原价"
+      ]
+    },
+    "spu_id": {
+      "table": "sku_info",
+      "column": "spu_id",
+      "dtype": "int",
+      "label": "SPU ID"
+    },
+    "is_sale": {
+      "table": "sku_info",
+      "column": "is_sale",
+      "dtype": "int",
+      "label": "是否在售"
+    },
+    "nick_name": {
+      "table": "user_info",
+      "column": "nick_name",
+      "dtype": "str",
+      "label": "用户昵称"
+    },
+    "user_level": {
+      "table": "user_info",
+      "column": "user_level",
+      "dtype": "str",
+      "label": "用户等级",
+      "aliases": [
+        "会员等级",
+        "用户等级"
+      ]
+    },
+    "gender": {
+      "table": "user_info",
+      "column": "gender",
+      "dtype": "str",
+      "label": "性别",
+      "aliases": [
+        "gender",
+        "性别"
+      ]
+    },
+    "register_time": {
+      "table": "user_info",
+      "column": "create_time",
+      "dtype": "timestamp",
+      "label": "注册时间",
+      "aliases": [
+        "注册时间"
+      ]
+    },
+    "province": {
+      "table": "base_province",
+      "column": "province_name",
+      "dtype": "str",
+      "label": "省份",
+      "aliases": [
+        "province",
+        "省份",
+        "省",
+        "地区",
+        "地域",
+        "区域",
+        "城市",
+        "广东",
+        "浙江",
+        "江苏",
+        "北京",
+        "上海",
+        "四川",
+        "湖北",
+        "山东"
+      ]
+    },
+    "page_id": {
+      "table": "fact_page_view",
+      "column": "page_id",
+      "dtype": "str",
+      "label": "页面",
+      "aliases": [
+        "页面",
+        "页面浏览量",
+        "浏览量",
+        "pv",
+        "page",
+        "访问页面"
+      ]
+    },
+    "last_page_id": {
+      "table": "fact_page_view",
+      "column": "last_page_id",
+      "dtype": "str",
+      "label": "来源页面"
+    },
+    "during_time": {
+      "table": "fact_page_view",
+      "column": "during_time",
+      "dtype": "int",
+      "label": "页面停留时长",
+      "aliases": [
+        "停留时长",
+        "停留时间",
+        "访问时长"
+      ]
+    },
+    "page_view_time": {
+      "table": "fact_page_view",
+      "column": "ts",
+      "dtype": "timestamp",
+      "label": "浏览时间",
+      "aliases": [
+        "浏览时间"
+      ]
+    },
+    "mid": {
+      "table": "fact_page_view",
+      "column": "mid",
+      "dtype": "str",
+      "label": "设备ID",
+      "aliases": [
+        "uv",
+        "独立访客",
+        "访客数",
+        "设备数",
+        "设备量"
+      ]
+    },
+    "uid": {
+      "table": "fact_page_view",
+      "column": "uid",
+      "dtype": "str",
+      "label": "访问用户ID"
+    },
+    "sid": {
+      "table": "fact_page_view",
+      "column": "sid",
+      "dtype": "str",
+      "label": "会话ID",
+      "aliases": [
+        "会话数",
+        "访问次数",
+        "visit"
+      ]
+    },
+    "page_item": {
+      "table": "fact_page_view",
+      "column": "item",
+      "dtype": "str",
+      "label": "浏览对象ID"
+    },
+    "page_item_type": {
+      "table": "fact_page_view",
+      "column": "item_type",
+      "dtype": "str",
+      "label": "浏览对象类型"
+    },
+    "err_code": {
+      "table": "fact_page_view",
+      "column": "err_code",
+      "dtype": "int",
+      "label": "页面错误码",
+      "aliases": [
+        "报错",
+        "错误",
+        "异常"
+      ]
+    },
+    "action_id": {
+      "table": "fact_action",
+      "column": "action_id",
+      "dtype": "str",
+      "label": "点击行为",
+      "aliases": [
+        "点击",
+        "行为",
+        "加购次数",
+        "收藏次数",
+        "领券次数",
+        "action"
+      ]
+    },
+    "action_item": {
+      "table": "fact_action",
+      "column": "item",
+      "dtype": "str",
+      "label": "行为目标对象ID"
+    },
+    "action_item_type": {
+      "table": "fact_action",
+      "column": "item_type",
+      "dtype": "str",
+      "label": "行为目标类型"
+    },
+    "action_time": {
+      "table": "fact_action",
+      "column": "ts",
+      "dtype": "timestamp",
+      "label": "行为时间"
+    },
+    "pos_id": {
+      "table": "fact_display",
+      "column": "pos_id",
+      "dtype": "int",
+      "label": "曝光位ID"
+    },
+    "pos_seq": {
+      "table": "fact_display",
+      "column": "pos_seq",
+      "dtype": "int",
+      "label": "曝光位序号"
+    },
+    "display_item": {
+      "table": "fact_display",
+      "column": "item",
+      "dtype": "str",
+      "label": "曝光对象ID"
+    },
+    "display_item_type": {
+      "table": "fact_display",
+      "column": "item_type",
+      "dtype": "str",
+      "label": "曝光对象类型"
+    },
+    "display_time": {
+      "table": "fact_display",
+      "column": "ts",
+      "dtype": "timestamp",
+      "label": "曝光时间"
+    },
+    "entry": {
+      "table": "fact_start",
+      "column": "entry",
+      "dtype": "str",
+      "label": "启动入口",
+      "aliases": [
+        "启动入口",
+        "入口"
+      ]
+    },
+    "channel": {
+      "table": "fact_start",
+      "column": "channel",
+      "dtype": "str",
+      "label": "推广渠道",
+      "aliases": [
+        "渠道",
+        "推广渠道",
+        "下载渠道"
+      ]
+    },
+    "os": {
+      "table": "fact_start",
+      "column": "os",
+      "dtype": "str",
+      "label": "操作系统",
+      "aliases": [
+        "操作系统",
+        "系统",
+        "ios",
+        "android"
+      ]
+    },
+    "open_ad_ms": {
+      "table": "fact_start",
+      "column": "open_ad_ms",
+      "dtype": "int",
+      "label": "开屏广告时长"
+    },
+    "loading_time_ms": {
+      "table": "fact_start",
+      "column": "loading_time_ms",
+      "dtype": "int",
+      "label": "启动加载时长",
+      "aliases": [
+        "启动时长"
+      ]
+    },
+    "start_log_time": {
+      "table": "fact_start",
+      "column": "ts",
+      "dtype": "timestamp",
+      "label": "启动时间"
+    }
   },
   "join_rules": {
-    "dim_user": { "type": "inner", "on": [["user_id", "user_id"]] },
-    "dim_product": { "type": "inner", "on": [["product_id", "product_id"]] },
-    "dim_shop": { "type": "inner", "on": [["shop_id", "shop_id"]] }
+    "order_info": {
+      "type": "inner",
+      "on": [
+        [
+          "order_id",
+          "order_id"
+        ]
+      ]
+    },
+    "sku_info": {
+      "type": "inner",
+      "on": [
+        [
+          "sku_id",
+          "sku_id"
+        ]
+      ]
+    },
+    "user_info": {
+      "type": "inner",
+      "on": [
+        [
+          "user_id",
+          "user_id"
+        ]
+      ]
+    },
+    "base_province": {
+      "type": "inner",
+      "on": [
+        [
+          "province_id",
+          "province_id"
+        ]
+      ]
+    }
   },
   "fact_join_rules": {
-    "fact_refunds": { "type": "left", "on": [["order_id", "order_id"]] }
+    "order_refund_info": {
+      "type": "left",
+      "on": [
+        [
+          "order_id",
+          "order_id"
+        ],
+        [
+          "sku_id",
+          "sku_id"
+        ]
+      ]
+    }
+  },
+  "query_domains": {
+    "fact_page_view": {
+      "base_province": {
+        "type": "inner",
+        "on": [
+          [
+            "province_id",
+            "province_id"
+          ]
+        ]
+      }
+    },
+    "fact_action": {},
+    "fact_display": {},
+    "fact_start": {}
+  },
+  "dimension_member_fields": [
+    "province",
+    "gender",
+    "tm_name",
+    "category1_name",
+    "category3_name",
+    "order_status",
+    "user_level",
+    "page_id",
+    "action_id",
+    "channel",
+    "entry"
+  ],
+  "metrics": [
+    {
+      "key": "gmv",
+      "title": "GMV（商品交易总额）",
+      "aliases": [
+        "gmv",
+        "销售额",
+        "销售总额",
+        "成交额",
+        "成交金额",
+        "总销售",
+        "总销售额"
+      ],
+      "definition": "成功支付订单的实付金额之和；通常需限定支付状态为成功，并给定时间窗口。",
+      "formula": "SUM(order_detail.split_total_amount)",
+      "fields": [
+        "split_total_amount",
+        "order_status",
+        "order_time"
+      ],
+      "shape": [
+        {
+          "kind": "aggregate",
+          "field": "split_total_amount",
+          "agg": "sum",
+          "alias": "gmv"
+        }
+      ]
+    },
+    {
+      "key": "order_count",
+      "title": "订单数",
+      "aliases": [
+        "订单数",
+        "订单量",
+        "订单总数",
+        "订单笔数"
+      ],
+      "definition": "订单主键的计数；若要求成功订单，需附加支付状态为成功的过滤条件。",
+      "formula": "COUNT(DISTINCT order_detail.order_id)",
+      "fields": [
+        "order_id",
+        "order_status",
+        "order_time"
+      ],
+      "shape": [
+        {
+          "kind": "aggregate",
+          "field": "order_id",
+          "agg": "count_distinct",
+          "alias": "order_count"
+        }
+      ]
+    },
+    {
+      "key": "active_users",
+      "title": "活跃用户数（去重用户数）",
+      "aliases": [
+        "去重用户",
+        "活跃用户",
+        "去重用户数",
+        "活跃用户数"
+      ],
+      "definition": "在指定时间窗口内发生下单行为的去重用户数。注意：该口径不区分活跃度高低。",
+      "formula": "COUNT(DISTINCT order_detail.user_id)",
+      "fields": [
+        "user_id",
+        "order_time"
+      ],
+      "shape": [
+        {
+          "kind": "aggregate",
+          "field": "user_id",
+          "agg": "count_distinct",
+          "alias": "active_users"
+        }
+      ]
+    },
+    {
+      "key": "arpu",
+      "title": "ARPU（人均消费）",
+      "aliases": [
+        "arpu",
+        "人均消费"
+      ],
+      "definition": "总成交金额除以去重用户数，即平均每用户的消费金额。",
+      "formula": "SUM(split_total_amount) / COUNT(DISTINCT user_id)",
+      "fields": [
+        "split_total_amount",
+        "user_id"
+      ],
+      "shape": [
+        {
+          "kind": "ratio",
+          "numerator": {
+            "kind": "aggregate",
+            "field": "split_total_amount",
+            "agg": "sum",
+            "alias": "gmv"
+          },
+          "denominator": {
+            "kind": "aggregate",
+            "field": "user_id",
+            "agg": "count_distinct",
+            "alias": "active_users"
+          },
+          "alias": "arpu"
+        }
+      ]
+    },
+    {
+      "key": "refund_rate",
+      "title": "退款率",
+      "aliases": [
+        "退款率"
+      ],
+      "definition": "退款金额占订单金额的比例，用于衡量订单退款强度。",
+      "formula": "SUM(order_refund_info.refund_amount) / SUM(order_detail.split_total_amount)",
+      "fields": [
+        "refund_amount",
+        "split_total_amount"
+      ],
+      "shape": [
+        {
+          "kind": "ratio",
+          "numerator": {
+            "kind": "aggregate",
+            "field": "refund_amount",
+            "agg": "sum",
+            "alias": "refund_amount"
+          },
+          "denominator": {
+            "kind": "aggregate",
+            "field": "split_total_amount",
+            "agg": "sum",
+            "alias": "gmv"
+          },
+          "alias": "refund_rate"
+        }
+      ]
+    },
+    {
+      "key": "refund_amount",
+      "title": "退款金额",
+      "aliases": [
+        "退款金额",
+        "退款总额",
+        "退款额"
+      ],
+      "definition": "退款事实表中退款金额的求和。",
+      "formula": "SUM(order_refund_info.refund_amount)",
+      "fields": [
+        "refund_amount"
+      ],
+      "shape": [
+        {
+          "kind": "aggregate",
+          "field": "refund_amount",
+          "agg": "sum",
+          "alias": "refund_amount"
+        }
+      ]
+    },
+    {
+      "key": "avg_order_amount",
+      "title": "客单价",
+      "aliases": [
+        "客单价"
+      ],
+      "definition": "平均每笔订单的实付金额。",
+      "formula": "SUM(order_detail.split_total_amount) / COUNT(DISTINCT order_detail.order_id)",
+      "fields": [
+        "split_total_amount",
+        "order_id"
+      ],
+      "shape": [
+        {
+          "kind": "aggregate",
+          "field": "split_total_amount",
+          "agg": "sum",
+          "alias": "gmv"
+        },
+        {
+          "kind": "aggregate",
+          "field": "order_id",
+          "agg": "count_distinct",
+          "alias": "orders"
+        },
+        {
+          "kind": "expression",
+          "alias": "aov",
+          "expr": {
+            "op": "div",
+            "args": [
+              {
+                "ref": "gmv"
+              },
+              {
+                "ref": "orders"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "count_entities": [
+    {
+      "trigger_words": [
+        "订单",
+        "单子",
+        "笔",
+        "单"
+      ],
+      "quantity_words": [
+        "多少",
+        "几个",
+        "多少个",
+        "几笔",
+        "几单"
+      ],
+      "shape": {
+        "kind": "aggregate",
+        "field": "order_id",
+        "agg": "count_distinct",
+        "alias": "order_count"
+      }
+    },
+    {
+      "trigger_words": [
+        "用户",
+        "客户",
+        "人"
+      ],
+      "quantity_words": [
+        "多少",
+        "几个",
+        "多少个",
+        "几笔",
+        "几单"
+      ],
+      "shape": {
+        "kind": "aggregate",
+        "field": "user_id",
+        "agg": "count_distinct",
+        "alias": "active_users"
+      }
+    },
+    {
+      "trigger_words": [
+        "商品",
+        "产品"
+      ],
+      "quantity_words": [
+        "多少",
+        "几个",
+        "多少个",
+        "几笔",
+        "几单"
+      ],
+      "shape": {
+        "kind": "aggregate",
+        "field": "sku_id",
+        "agg": "count_distinct",
+        "alias": "sku_count"
+      }
+    }
+  ],
+  "paid_filter": {
+    "field": "order_status",
+    "value": "1002",
+    "label": "成功支付",
+    "anti_question_words": [
+      "未支付",
+      "已取消",
+      "未成交"
+    ],
+    "question_words": [
+      "成功",
+      "成交",
+      "已支付"
+    ]
+  },
+  "default_window": {
+    "start": "2024-05-01",
+    "end": "2024-05-15",
+    "two_period_midpoint": true,
+    "description": "缺省分析窗口（无显式时间解析时使用）；两期诊断按窗口中点切分基期/现期"
+  },
+  "reflector_concepts": {
+    "订单量": {
+      "fields": [
+        "order_id"
+      ],
+      "produced_aliases": [
+        "orders"
+      ]
+    },
+    "订单": {
+      "fields": [
+        "order_id",
+        "split_total_amount"
+      ],
+      "produced_aliases": [
+        "orders"
+      ]
+    },
+    "客单价": {
+      "fields": [
+        "split_total_amount",
+        "order_id"
+      ],
+      "produced_aliases": [
+        "gmv",
+        "orders"
+      ]
+    },
+    "买家": {
+      "fields": [
+        "user_id"
+      ],
+      "produced_aliases": [
+        "buyers"
+      ]
+    },
+    "用户": {
+      "fields": [
+        "user_id",
+        "register_time",
+        "gender"
+      ],
+      "produced_aliases": [
+        "buyers"
+      ]
+    },
+    "地区": {
+      "fields": [
+        "province"
+      ],
+      "produced_aliases": [
+        "province"
+      ]
+    },
+    "省份": {
+      "fields": [
+        "province"
+      ],
+      "produced_aliases": [
+        "province"
+      ]
+    },
+    "城市": {
+      "fields": [
+        "province"
+      ],
+      "produced_aliases": [
+        "province"
+      ]
+    },
+    "品类": {
+      "fields": [
+        "category1_name"
+      ],
+      "produced_aliases": []
+    },
+    "商品": {
+      "fields": [
+        "sku_id",
+        "sku_name",
+        "category1_name",
+        "tm_name",
+        "price"
+      ],
+      "produced_aliases": []
+    },
+    "品牌": {
+      "fields": [
+        "tm_name"
+      ],
+      "produced_aliases": []
+    },
+    "退款": {
+      "fields": [
+        "refund_amount",
+        "refund_type",
+        "refund_time"
+      ],
+      "produced_aliases": []
+    },
+    "优惠": {
+      "fields": [
+        "split_coupon_amount"
+      ],
+      "produced_aliases": []
+    },
+    "支付": {
+      "fields": [
+        "order_status"
+      ],
+      "produced_aliases": [
+        "order_status"
+      ]
+    },
+    "性别": {
+      "fields": [
+        "gender"
+      ],
+      "produced_aliases": []
+    },
+    "浏览": {
+      "fields": [
+        "page_id",
+        "mid",
+        "page_view_time"
+      ],
+      "produced_aliases": []
+    },
+    "点击": {
+      "fields": [
+        "action_id",
+        "action_time"
+      ],
+      "produced_aliases": []
+    },
+    "曝光": {
+      "fields": [
+        "pos_id",
+        "display_time"
+      ],
+      "produced_aliases": []
+    },
+    "时间": {
+      "fields": [
+        "order_time"
+      ],
+      "produced_aliases": []
+    }
+  },
+  "out_of_scope_concepts": [
+    "活动",
+    "促销",
+    "投放",
+    "广告",
+    "预算",
+    "库存",
+    "物流",
+    "履约",
+    "竞品",
+    "市场",
+    "舆情",
+    "客服",
+    "异常单",
+    "转化率",
+    "留存",
+    "复购"
+  ],
+  "undefined_metrics": [
+    {
+      "term": "复购率",
+      "reply": "复购率"
+    },
+    {
+      "term": "留存率",
+      "reply": "留存率"
+    },
+    {
+      "term": "转化率",
+      "reply": "转化率"
+    },
+    {
+      "term": "日活",
+      "reply": "日活用户(DAU)"
+    },
+    {
+      "term": "月活",
+      "reply": "月活用户(MAU)"
+    },
+    {
+      "term": "dau",
+      "reply": "DAU(日活用户)"
+    },
+    {
+      "term": "mau",
+      "reply": "MAU(月活用户)"
+    },
+    {
+      "term": "新客",
+      "reply": "新客"
+    },
+    {
+      "term": "老客",
+      "reply": "老客"
+    }
+  ],
+  "value_labels": {
+    "order_status": {
+      "1001": "已创建",
+      "1002": "已支付",
+      "1003": "已取消",
+      "1004": "已完成",
+      "1005": "退款中",
+      "1006": "已退款"
+    },
+    "refund_type": {
+      "1501": "仅退款",
+      "1502": "退货退款"
+    },
+    "appraise": {
+      "1201": "好评",
+      "1202": "中评",
+      "1203": "差评",
+      "1204": "追评"
+    },
+    "gender": {
+      "M": "男",
+      "F": "女"
+    }
+  },
+  "table_labels": {
+    "order_detail": "订单明细事实表（交易域锚点）",
+    "order_info": "订单事实表",
+    "order_refund_info": "退款事实表（SKU 级）",
+    "payment_info": "支付事实表",
+    "sku_info": "商品维度表",
+    "user_info": "用户维度表",
+    "base_province": "省份维度表",
+    "base_region": "大区维度表",
+    "base_trademark": "品牌维度表",
+    "coupon_info": "优惠券维度表",
+    "activity_info": "活动维度表",
+    "cart_info": "购物车事实表",
+    "favor_info": "收藏事实表",
+    "comment_info": "评论事实表",
+    "fact_page_view": "页面浏览事实表（流量域锚点）",
+    "fact_action": "点击行为事实表（流量域）",
+    "fact_display": "曝光事实表（流量域）",
+    "fact_start": "启动事实表（流量域）"
+  },
+  "drilldown_dim_fields": [
+    "province",
+    "tm_name",
+    "category1_name"
+  ],
+  "region_province_mapping": {
+    "华北": [
+      "北京",
+      "天津",
+      "山西",
+      "内蒙古",
+      "河北"
+    ],
+    "东北": [
+      "黑龙江",
+      "吉林",
+      "辽宁"
+    ],
+    "华东": [
+      "上海",
+      "江苏",
+      "浙江",
+      "安徽",
+      "福建",
+      "江西",
+      "山东",
+      "台湾"
+    ],
+    "华中": [
+      "河南",
+      "湖北",
+      "湖南"
+    ],
+    "华南": [
+      "广东",
+      "广西",
+      "海南",
+      "香港",
+      "澳门"
+    ],
+    "西南": [
+      "重庆",
+      "四川",
+      "贵州",
+      "云南",
+      "西藏"
+    ],
+    "西北": [
+      "陕西",
+      "甘肃",
+      "青海",
+      "宁夏",
+      "新疆"
+    ]
+  },
+  "dimension_members_seed": {
+    "province": [
+      "北京",
+      "天津",
+      "山西",
+      "内蒙古",
+      "河北",
+      "上海",
+      "江苏",
+      "浙江",
+      "安徽",
+      "福建",
+      "江西",
+      "山东",
+      "重庆",
+      "台湾",
+      "黑龙江",
+      "吉林",
+      "辽宁",
+      "陕西",
+      "甘肃",
+      "青海",
+      "宁夏",
+      "新疆",
+      "河南",
+      "湖北",
+      "湖南",
+      "广东",
+      "广西",
+      "海南",
+      "香港",
+      "澳门",
+      "四川",
+      "贵州",
+      "云南",
+      "西藏"
+    ],
+    "gender": [
+      "M",
+      "F"
+    ],
+    "tm_name": [
+      "Redmi",
+      "苹果",
+      "联想",
+      "TCL",
+      "小米",
+      "长粒香",
+      "金沙河",
+      "索芙特",
+      "CAREMiLLE",
+      "欧莱雅",
+      "香奈儿"
+    ],
+    "category1_name": [
+      "个护化妆",
+      "家用电器",
+      "手机",
+      "电脑办公",
+      "食品饮料、保健食品"
+    ],
+    "category3_name": [
+      "唇部",
+      "平板电视",
+      "手机",
+      "游戏本",
+      "米面杂粮",
+      "香水"
+    ],
+    "page_id": [
+      "activity1111",
+      "cart",
+      "good_detail",
+      "good_list",
+      "home",
+      "mine",
+      "order",
+      "order_list",
+      "payment",
+      "register",
+      "search"
+    ],
+    "action_id": [
+      "cart_add",
+      "cart_add_num",
+      "cart_remove",
+      "favor_add",
+      "favor_canel",
+      "get_coupon"
+    ],
+    "channel": [
+      "360",
+      "Appstore",
+      "oppo",
+      "vivo",
+      "wandoujia",
+      "web",
+      "xiaomi"
+    ],
+    "entry": [
+      "install",
+      "icon",
+      "notice"
+    ]
+  },
+  "metric_aliases": {
+    "gmv": "GMV",
+    "orders": "订单数",
+    "buyers": "买家数"
   }
 }
