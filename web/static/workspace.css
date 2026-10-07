@@ -516,9 +516,35 @@ button.act-head:hover .act-label { color: var(--accent-dark); }
 .code-group-body, .data-group-body { display: flex; flex-direction: column; gap: 12px; }
 
 /* 报告视图：每轮报告独立成块 */
-.report-block { margin-bottom: 26px; }
+.report-block { margin-bottom: 26px; scroll-margin-top: 64px; }
 .report-block:last-child { margin-bottom: 0; }
 .report-block .turn-group-head { margin-bottom: 12px; }
+
+/* 报告视图：轮次导航条（多轮报告快速定位，sticky 吸顶） */
+.report-tabs {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; gap: 6px; overflow-x: auto;
+  padding: 10px 16px; margin: 0 0 14px;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: var(--shadow-card);
+}
+.report-tab {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+  max-width: 320px; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--card-soft);
+  color: var(--text); font-size: 12.5px; cursor: pointer;
+}
+.report-tab:hover { border-color: var(--accent); color: var(--accent-dark); }
+.report-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.report-tab .rt-badge { flex: 0 0 auto; font-size: 10.5px; font-weight: 700; font-family: var(--mono); }
+.report-tab .rt-q { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.report-tab.active .rt-q { color: #fff; }
+.report-link-btn {
+  flex: 0 0 auto; margin-left: auto; padding: 2px 10px;
+  border-radius: 999px; border: 1px solid var(--border);
+  background: var(--card); color: var(--muted); font-size: 11.5px; cursor: pointer;
+}
+.report-link-btn:hover { color: var(--accent-dark); border-color: var(--accent); }
 .report-body h1:first-child, .report-body h2:first-child { margin-top: 0; }
 
 .chart-block {
