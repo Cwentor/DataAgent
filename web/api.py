@@ -21,8 +21,9 @@ from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from audit.logging import get_request_id, set_request_context
+from audit.logging import get_logger, get_request_id, set_request_context
 from audit.metrics import default_registry as metrics_registry
+from audit.record import AuditRecord
 from auth.errors import AuthenticationError
 from auth.gateway import AuthContext, authenticate, create_session, default_identity_store
 from auth.ratelimit import LoginRateLimitError, default_login_limiter
@@ -39,10 +40,11 @@ from web.server import (
     _bound_session_id,
     _cookie_session_id,
 )
-from web.service import run_query
+from web.service import _default_audit_store, run_query
 from web.tasks import default_task_manager
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+logger = get_logger("web.api")
 
 
 # --------------------------------------------------------------------------- #
@@ -586,6 +588,24 @@ async def post_agent_run(request: Request) -> Response:
         )
     result_dict = result.to_dict()
     result_dict["auth"] = ctx.to_dict()
+    # 编排审计（P3）：done 路径落 audit.jsonl，记录裁决方与 LLM 规划失败原因；
+    # 审计写入失败绝不影响主链路（RF4）
+    store = _default_audit_store()
+    if store is not None:
+        try:
+            store.write(
+                AuditRecord(
+                    request_id=request.headers.get("X-Request-ID") or _uuid.uuid4().hex,
+                    session_id=ctx.session_id or ctx.username,
+                    user=ctx.username,
+                    prompt=query,
+                    detected_intent=result.detected_intent,
+                    answered_by=result.answered_by or None,
+                    planner_llm_error=result.planner_llm_error,
+                )
+            )
+        except Exception:
+            logger.exception("audit_write_failed", extra={"event": "audit_write_failed"})
     # default=str：结果行含 DECIMAL 金额，裸 dumps 抛 TypeError
     return Response(
         content=json.dumps(result_dict, ensure_ascii=False, default=str),

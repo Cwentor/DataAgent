@@ -44,6 +44,12 @@ class AgentTrace(BaseModel):
     session_id: str = "default"
     turn_id: str = "t1"
     trace_id: str = "tr1"
+    # 编排裁决字段（P3 审计闭环）：终态裁决方与 LLM 规划失败原因，
+    # 供 /api/agent/run 审计写入消费（answered_by / planner_llm_error /
+    # detected_intent 与 AuditRecord 字段对齐）
+    answered_by: str = ""
+    planner_llm_error: str | None = None
+    detected_intent: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """序列化（审计与 API 响应）。"""
@@ -209,6 +215,9 @@ def run_agent(
         session_id=final.session_id,
         turn_id=final.turn_id,
         trace_id=final.trace_id,
+        answered_by=final.answered_by,
+        planner_llm_error=final.planner_llm_error,
+        detected_intent=final.intent_type,
     )
 
 
