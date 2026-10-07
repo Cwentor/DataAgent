@@ -1,6 +1,6 @@
 """一次性脚本：重建 golden_dataset.json 到 Gmall 新模型（29 条映射 + 2 条流量域）。
 
-用法：C:/Users/cwt15/.conda/envs/futurebi/python.exe eval/rebuild_golden.py
+用法：conda activate dataagent && python eval/rebuild_golden.py
 先跑 python -m mock.init_duckdb 重建数仓。DSL 为手工映射，SQL 由编译器生成，
 结果断言在生成期即对数仓执行校验。
 """

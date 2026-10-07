@@ -47,9 +47,9 @@ conda activate dataagent
 pip install -r requirements-dev.txt
 ```
 
-> 注：本机历史环境名仍为 `futurebi`（更名前创建，位于 `C:\Users\<user>\.conda\envs\futurebi`），
-> 在其重建/重命名为 `dataagent` 之前，用 `conda activate futurebi` 亦可进入，二者等效。
-> 执行任何命令前必须确认已激活上述环境之一。
+> 注：历史环境 `futurebi`（更名前创建）已于 2026-10-07 清理删除，本机现为重建后的干净
+> `dataagent` 环境（Python 3.12，`C:\Users\<user>\.conda\envs\dataagent`，依赖以
+> requirements-dev.txt 全新安装）。执行任何命令前必须确认已激活 `dataagent`。
 
 ## 常用命令
 
