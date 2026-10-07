@@ -2,7 +2,7 @@
   {
     "question": "有多少个省份",
     "expect": "count_answer",
-    "expected_value": 8
+    "expected_value": 34
   },
   {
     "question": "2024年5月订单量是多少",
@@ -18,7 +18,7 @@
     "expect": "multi_metric"
   },
   {
-    "question": "海南省的GMV是多少",
+    "question": "琼崖省的GMV是多少",
     "expect": "refusal"
   },
   {
@@ -41,7 +41,7 @@
   {
     "question": "有哪些品类",
     "expect": "list_answer",
-    "expected_contains": "数码"
+    "expected_contains": "个护化妆"
   },
   {
     "question": "列出所有省份和品牌",
