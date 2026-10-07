@@ -20,7 +20,10 @@ python -m eval.intent_eval
 python -m pytest -q
 ```
 
-`eval_runner` 默认运行 oracle 流程；`--pipeline agent` 运行真实 Agent（未配置 API Key 时使用启发式兜底）；`intent_eval` 验证意图路由与诚实兜底（基数直答 / 指标锚定直答 / 目录外实体拒答）。如需打印编译 SQL：
+`eval_runner` 默认运行 oracle 流程；`--pipeline agent` 运行真实 Agent（未配置 API Key 时使用启发式兜底）。
+Golden 评测包含 31 条 Gmall 电商用例（oracle / agent 双模式，断言分层 contract/snapshot）；
+`intent_eval` 验证意图路由与诚实兜底（12 用例：基数直答 / 指标锚定直答 / 目录外实体拒答 / 枚举预路由直答）。
+如需打印编译 SQL：
 
 ```bash
 python -m eval.eval_runner --print-sql
