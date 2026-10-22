@@ -1,4 +1,9 @@
 pydantic>=2.6
-duckdb>=0.10
+# duckdb 主版本上界锁定（CI 事故 2026-10-22）：2.0.0 起 count/sum 等聚合走元数据
+# 快路径，执行计划被折叠为单算子，EXPLAIN ANALYZE 只输出 Summary 块、不再渲染
+# "N rows" 算子行数 —— exec/guards.py 的扫描行熔断（parse_scan_rows）会失去计量口径，
+# 静默退化为"不熔断"。升级 2.x 必须先改造护栏计量方式并跑全量回归，不得由
+# 无上界的 pip 解析自动升级。
+duckdb>=1.5.6,<2.0
 python-dotenv>=1.0
 sqlglot>=25.0

@@ -59,6 +59,25 @@ def test_scan_cap_logs_error(big_conn, caplog):
     assert any("扫描行数上限熔断" in r.message for r in _records(caplog, "exec.guards"))
 
 
+def test_scan_cap_logs_warning_when_plan_unmeasurable(big_conn, caplog, monkeypatch):
+    """计划无可解析行数（如 DuckDB 版本变更）：warning 留痕，且不得静默当成 0 行。
+
+    回归背景（CI 2026-10-22，duckdb 2.0.0）：EXPLAIN ANALYZE 只渲染 Summary 块时
+    parse_scan_rows 退化为 0，熔断静默失效。此处桩掉解析结果，断言护栏
+    在"测不到"时仍有可采集的 warning，而非无声放行。
+    """
+    import exec.guards as guards
+
+    # 模拟 duckdb 2.0 的计划渲染：无 "N rows" 算子行数（不可计量）+ 解析结果退化为 0
+    monkeypatch.setattr(guards, "parse_scan_rows", lambda _plan: 0)
+    monkeypatch.setattr(guards, "plan_rows_measurable", lambda _plan: False)
+
+    # 用与 test_scan_cap_logs_error 不同的 SQL，避免命中全局扫描行缓存（缓存命中即不走预检）
+    result = execute_sql(big_conn, "SELECT count(*) FROM big", max_scan_rows=100)
+    assert result.rows == [[200000]]
+    assert any("扫描行数预检不可计量" in r.message for r in _records(caplog, "exec.guards"))
+
+
 def test_dataqa_findings_logged(tmp_path, monkeypatch, caplog):
     """DataQA 质检发现：warning 级留痕（负值场景，注入桩执行器）。"""
     import core.retrieval.tools as tools

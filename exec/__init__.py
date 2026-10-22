@@ -14,6 +14,7 @@ from exec.guards import (
     assert_read_only_sql,
     execute_sql,
     parse_scan_rows,
+    plan_rows_measurable,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "assert_read_only_sql",
     "execute_sql",
     "parse_scan_rows",
+    "plan_rows_measurable",
 ]
