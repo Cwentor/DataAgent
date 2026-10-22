@@ -22,6 +22,7 @@ from exec.guards import (
     assert_read_only_sql,
     execute_sql,
     parse_scan_rows,
+    plan_rows_measurable,
 )
 
 
@@ -142,6 +143,29 @@ def test_parse_scan_rows():
     )
     assert parse_scan_rows(txt) == 100000
     assert parse_scan_rows("no rows here") == 0
+
+
+def test_plan_rows_measurable_distinguishes_zero_scan():
+    """可计量性探针：真·零扫描（含 "0 rows"）可计量，无行数渲染则不可计量。"""
+    assert plan_rows_measurable("│        0 rows             │") is True
+    assert plan_rows_measurable("╭─ Summary ─╮\n│ Total Time: 0.0000s │") is False
+
+
+def test_scan_rows_measured_on_real_plan(big_conn):
+    """真实 EXPLAIN ANALYZE 产物必须能测出扫描行数（DuckDB 版本漂移探针）。
+
+    回归背景（CI 2026-10-22）：duckdb 2.0.0 起 count 类聚合走元数据快路径，
+    EXPLAIN ANALYZE 只渲染 Summary 块，parse_scan_rows 退化为 0，
+    扫描行熔断静默失效。本用例直接对本机安装版本的实时计划断言，
+    一旦版本/计划格式漂移会立即以本断言的提示语失败，而不是表现为
+    "熔断未触发"的间接症状。
+    """
+    result = execute_sql(big_conn, "SELECT count(id) FROM big", max_scan_rows=10**9)
+    assert result.scan_rows > 0, (
+        "扫描行数预检未测到任何行数：当前 DuckDB 版本的 EXPLAIN ANALYZE 未渲染 "
+        "'N rows' 算子行数，扫描行熔断失去计量口径。请核验 duckdb 版本上界"
+        "（requirements.txt 锁定 <2.0），升级需同步改造 exec/guards.py 的计量方式。"
+    )
 
 
 def test_engine_error_wrapped_on_real_execution(big_conn):

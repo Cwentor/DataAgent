@@ -16,6 +16,12 @@
    注意：EXPLAIN ANALYZE 会实际执行查询，这是"先计量后放行"的成本，
    也是 DuckDB 上实现预防式扫描上限的唯一可靠手段。
 
+   版本敏感：本机制的计量口径完全依赖 DuckDB 计划文本的 "N rows" 渲染格式。
+   DuckDB 2.0 起 count/sum 等聚合走元数据快路径，计划被折叠为单算子且
+   EXPLAIN ANALYZE 只输出 Summary 块（无任何算子行数），届时本护栏会失效——
+   因此 requirements.txt 对 duckdb 锁定主版本上界，且计划不可测量时记 warning
+   留痕（plan_rows_measurable），避免"测不到"被静默当成"扫了 0 行"。
+
 3. LIMIT 硬上限熔断（返回行数熔断）
    无论 DSL 的 limit 是多少，执行层对返回行数做独立硬上限 max_result_rows
    （防御性校验，不依赖 schema 约束），超限抛 ResultLimitExceeded。
@@ -307,6 +313,17 @@ def parse_scan_rows(plan_text: str) -> int:
     return max(counts) if counts else 0
 
 
+def plan_rows_measurable(plan_text: str) -> bool:
+    """计划文本是否含可解析的算子行数记录（护栏可计量性探针）。
+
+    与 ``parse_scan_rows`` 返回 0 的两种情形区分开：
+    - 真·零扫描（如 ``SELECT 1`` 的 Dummy Scan）→ 返回 True（含 "0 rows"）；
+    - 计划格式变更导致完全无行数渲染（DuckDB 2.0 元数据快路径）→ 返回 False，
+      调用方应记 warning 留痕，不得把"测不到"静默当成"扫了 0 行"。
+    """
+    return _ROWS_LINE_RE.search(plan_text) is not None
+
+
 # --------------------------------------------------------------------------- #
 # 扫描行预算缓存（整改指令3-3：同一 SQL 自愈重试不重复 EXPLAIN 预检降本）
 # --------------------------------------------------------------------------- #
@@ -457,7 +474,17 @@ def execute_sql(
                 else (str(plan_rows[0][0]) if plan_rows else "")
             )
             scanned = parse_scan_rows(plan_text)
-            cache_scan_rows(sql, scanned)
+            if plan_rows_measurable(plan_text):
+                cache_scan_rows(sql, scanned)
+            else:
+                # 计划不含任何算子行数：护栏本轮不可计量（DuckDB 版本/计划格式变更）。
+                # 不缓存——避免把"测不到"固化成"扫了 0 行"的假事实，也不静默放行。
+                logger.warning(
+                    "扫描行数预检不可计量：执行计划未包含算子行数，本轮跳过扫描行熔断",
+                    extra={
+                        "error": "plan 无 'N rows' 渲染，请核验 DuckDB 版本（requirements.txt 锁定 <2.0）"
+                    },
+                )
         scan_rows = scanned
         if scanned > max_scan_rows:
             logger.error(
