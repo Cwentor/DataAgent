@@ -183,7 +183,7 @@ else:
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
 | 夜跑（`schedule`）验证 | **待观察** | 修复后尚未触发过夜跑；`nightly` job 独有的 `boundary_eval` + RLS 对抗矩阵只在 schedule 跑，需下一次夜跑确认 |
-| Windows 并发 SQLite 用例 | **已修**（同日追加） | `test_audit_store_db_multi_writer_threads`、`test_concurrent_workers_no_lost_write` 曾因 Windows 并发首次创建文件的竞争稳定失败（`readonly database` / `PermissionError(13)`），Linux CI 不触发。已定位并修复，见提交 `cf1bf9a`：并发 `connect`/`open` 未写完的文件被 SQLite 判为只读（状态持久，必须重连），已在 kvstore 初始化与审计锁文件打开路径加"重建连接 + 有界退避"重试 |
+| Windows 并发 SQLite 用例 | **已修**（同日追加） | `test_audit_store_db_multi_writer_threads`、`test_concurrent_workers_no_lost_write` 曾因 Windows 并发首次创建文件的竞争稳定失败（`readonly database` / `PermissionError(13)`），Linux CI 不触发。已定位并修复，见提交 `cf1bf9a` 与专项报告 [20261024-repair-win32-sqlite-create-race.md](20261024-repair-win32-sqlite-create-race.md)：并发 `connect`/`open` 未写完的文件被 SQLite 判为只读（状态持久，必须重连），已在 kvstore 初始化与审计锁文件打开路径加"重建连接 + 有界退避"重试 |
 | 护栏计量方式改造 | **未做** | 解除 `duckdb<2.0` 上界的前置条件：先让扫描行计量不依赖计划文本渲染 |
 
 ---
