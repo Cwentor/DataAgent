@@ -103,3 +103,46 @@ def test_wal_mode_across_named_tables(tmp_path, table):
     store = SqliteKVStore(tmp_path / f"state-{table}.db", table=table)
     assert store._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     store.close()
+
+
+# --------------------------------------------------------------------------- #
+# 并发首次创建重试（Windows 竞争回归，CI 2026-10-24）
+# --------------------------------------------------------------------------- #
+def test_init_retries_and_reconnects_on_readonly_contention(tmp_path, monkeypatch):
+    """首次建库撞 readonly 竞争时必须**重建连接**重试成功。
+
+    回归背景（CI 2026-10-24）：多线程同时 connect 一个尚未创建的 SQLite 文件，
+    后到者拿到未写完文件头的库，SQLite 判为只读（该状态在连接上持久，
+    原地重试无效）。此处桩掉第一次 connect，断言后续重建连接后正常可用。
+    """
+    import sqlite3
+
+    real_connect = sqlite3.connect
+    calls = {"n": 0}
+
+    def flaky_connect(*args, **kwargs):
+        if calls["n"] == 0:
+            calls["n"] += 1
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", flaky_connect)
+    store = SqliteKVStore(tmp_path / "state.db", table="t1")
+    try:
+        store.set("k", {"v": 1})
+        assert store.get("k") == {"v": 1}
+    finally:
+        store.close()
+    assert calls["n"] == 1
+
+
+def test_init_retry_exhausted_raises_with_context(tmp_path, monkeypatch):
+    """重试耗尽必须抛出并带上库路径，不得静默降级为可写假象。"""
+    import sqlite3
+
+    def always_readonly(*args, **kwargs):
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+    monkeypatch.setattr(sqlite3, "connect", always_readonly)
+    with pytest.raises(sqlite3.OperationalError, match="初始化存储失败"):
+        SqliteKVStore(tmp_path / "state.db", table="t1")

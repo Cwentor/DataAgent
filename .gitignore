@@ -79,3 +79,9 @@ logs/
 
 # --- 计划工作台账（dev-executing-plans）---
 .plan-work/
+
+# --- pytest 固定 basetemp（Windows 沙箱删除拦截规避）---
+.pytest_tmp/
+
+# --- 本地工作记录目录（不应入库）---
+.workbuddy/
