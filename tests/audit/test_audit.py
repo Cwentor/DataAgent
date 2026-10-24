@@ -6,6 +6,7 @@ import json
 import logging
 
 import duckdb
+import pytest
 
 from audit.logging import JsonFormatter, get_request_id, set_request_context, setup_logging
 from audit.record import AuditRecord
@@ -386,3 +387,48 @@ def test_audit_store_db_orchestration_fields(tmp_path):
     finally:
         conn.close()
     assert rows == [("r1", "enumeration", None)]
+
+
+# --------------------------------------------------------------------------- #
+# 锁文件并发创建重试（Windows 竞争回归，CI 2026-10-24）
+# --------------------------------------------------------------------------- #
+def test_lock_file_open_retries_on_permission_error(tmp_path, monkeypatch):
+    """锁文件首次 open 撞 Windows 并发创建竞争（PermissionError）时必须重试成功。
+
+    回归背景（CI 2026-10-24）：多线程同时首次创建同一 .lock 文件，Windows
+    CreateFile 对后到者瞬时返回 ERROR_ACCESS_DENIED，审计写入直接失败。
+    此处桩掉前两次 open，断言第三次成功拿到锁并正常释放。
+    """
+    import builtins
+
+    from audit.store import _CrossProcessLock
+
+    real_open = builtins.open
+    attempts = {"n": 0}
+
+    def flaky_open(file, *args, **kwargs):
+        if str(file).endswith(".lock") and attempts["n"] < 2:
+            attempts["n"] += 1
+            raise PermissionError(13, "Permission denied", str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", flaky_open)
+    target = tmp_path / "audit.duckdb"
+    with _CrossProcessLock(target):
+        assert (tmp_path / "audit.duckdb.lock").exists()
+    assert attempts["n"] == 2
+
+
+def test_lock_file_open_exhausted_raises(tmp_path, monkeypatch):
+    """重试耗尽后必须抛出并带上锁文件路径，不得静默放行（不吞错）。"""
+    import builtins
+
+    from audit.store import _CrossProcessLock
+
+    def always_denied(file, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(file))
+
+    monkeypatch.setattr(builtins, "open", always_denied)
+    lock = _CrossProcessLock(tmp_path / "audit.duckdb")
+    with pytest.raises(PermissionError, match="锁文件打开失败"):
+        lock.__enter__()

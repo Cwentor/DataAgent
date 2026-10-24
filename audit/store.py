@@ -11,12 +11,16 @@ import json
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import duckdb
 
 from audit.record import AuditRecord
+
+# 锁文件并发创建重试（Windows CreateFile 竞争，详见 _CrossProcessLock._open_lock_file）
+_LOCK_OPEN_RETRY_ATTEMPTS = 50
 
 # 审计列名标识符白名单（迁移 DDL 使用，杜绝标识符注入面）
 _AUDIT_COLUMN_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -93,9 +97,33 @@ class _CrossProcessLock:
     def __init__(self, target: Path) -> None:
         self._lock_path = target.with_name(target.name + ".lock")
 
+    def _open_lock_file(self) -> Any:
+        """打开（必要时创建）锁文件，Windows 并发创建竞争时有界重试。
+
+        事故背景（CI 2026-10-24）：多线程同时首次 open 同一不存在的锁文件时，
+        Windows 的 CreateFile 会对后到者瞬时返回 ERROR_ACCESS_DENIED
+        （``PermissionError: [Errno 13]``），POSIX 下同名并发创建是原子的，
+        故 Linux CI 从不触发。此错误可重试且窗口极短，重试即可消除。
+        """
+        delay = 0.01
+        last_exc: Exception | None = None
+        for attempt in range(_LOCK_OPEN_RETRY_ATTEMPTS):
+            try:
+                return open(self._lock_path, "a+b")
+            except PermissionError as exc:
+                if attempt == _LOCK_OPEN_RETRY_ATTEMPTS - 1:
+                    last_exc = exc
+                    break
+                time.sleep(delay)
+                delay = min(delay * 2, 0.2)
+        raise PermissionError(
+            f"锁文件打开失败（并发创建竞争重试 {_LOCK_OPEN_RETRY_ATTEMPTS} 次耗尽）: "
+            f"{self._lock_path}"
+        ) from last_exc
+
     def __enter__(self) -> _CrossProcessLock:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self._lock_path, "a+b")
+        self._fh = self._open_lock_file()
         # 确保文件至少一个字节：msvcrt.locking 不能锁空文件
         if self._fh.seek(0, 2) == 0:
             self._fh.write(b"\0")
