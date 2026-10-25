@@ -146,11 +146,18 @@ class MySqlAdapter:
         cols = list(df.columns)
         placeholders = ", ".join(["%s"] * len(cols))
         sql = f"INSERT INTO `{table}` ({', '.join(f'`{c}`' for c in cols)}) VALUES ({placeholders})"
-        # NaN -> None：pandas NaN 直插 DECIMAL 列会报错（DuckDB 隐式转 NULL，对齐口径）
-        data = [
-            tuple(None if v is None or (isinstance(v, float) and math.isnan(v)) else v for v in row)
-            for row in df.itertuples(index=False)
-        ]
+        # NaN/pd.NA -> None：pandas 空值直插 DECIMAL 列会报错（DuckDB 隐式
+        # 转 NULL，对齐口径）；nullable Int64 列的 itertuples 产出 pd.NA
+        import pandas as pd
+
+        def _cell(v: Any) -> Any:
+            if v is None or v is pd.NA:
+                return None
+            if isinstance(v, float) and math.isnan(v):
+                return None
+            return v
+
+        data = [tuple(_cell(v) for v in row) for row in df.itertuples(index=False)]
         with conn.cursor() as cur:
             for i in range(0, len(data), 5000):
                 cur.executemany(sql, data[i : i + 5000])
