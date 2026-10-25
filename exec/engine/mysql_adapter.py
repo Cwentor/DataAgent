@@ -7,12 +7,14 @@ read_timeout 留 5s 余量保证服务端先超时、连接可复用；KILL QUER
 
 连接加固（spec D10，fail-closed）：只读事务 / NO_BACKSLASH_ESCAPES
 （反斜杠防线一）/ cte_max_recursion_depth（递归 spine）/ max_execution_time。
-扫描预检（spec D3）：EXPLAIN ANALYZE actual rows 口径，Task 4 落地。
+扫描预检（spec D3）：EXPLAIN ANALYZE actual rows 口径（8.0.18+），
+解析不可计量时 warning 留痕跳过（不静默放行也不硬熔断）。
 """
 
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from config import settings
@@ -21,6 +23,25 @@ from exec.errors import QueryTimeoutError, SqlExecutionError
 
 # MySQL ER_QUERY_TIMEOUT（服务端 max_execution_time 触发，8.0.1+）
 ER_QUERY_TIMEOUT = 3024
+
+# 只认 actual 段的 rows（cost 段的 rows=N 是优化器估算，绝不能混入实际口径）。
+# 输出样例（8.0.18+ 树形文本）：
+#   -> Table scan on t  (cost=1.05 rows=100) (actual time=0.023..0.025 rows=98 loops=1)
+# 版本敏感：格式随版本演进可能变化（spec §8.1），不可计量时返回 (0, False)
+# 由上层 warning 留痕，不得静默当成 0 行放行。
+_MYSQL_ACTUAL_ROWS_RE = re.compile(r"\(\s*actual\s+time=[^)]*?\brows=(\d+)", re.IGNORECASE)
+
+
+def parse_mysql_scan_rows(plan_text: str) -> tuple[int, bool]:
+    """解析 EXPLAIN ANALYZE 树形文本，返回 (最大 actual rows, 是否可计量)。
+
+    口径与 DuckDB 版 parse_scan_rows 对齐：取所有算子实际行数的最大值
+    作为"扫描行数"预算（多表查询即各基表扫描的最大值）。
+    """
+    counts = [int(m.group(1)) for m in _MYSQL_ACTUAL_ROWS_RE.finditer(plan_text)]
+    if not counts:
+        return 0, False
+    return max(counts), True
 
 
 def HARDEN_STATEMENTS(timeout_ms: int | None = None) -> tuple[str, ...]:
@@ -113,7 +134,13 @@ class MySqlAdapter:
             raise SecurityError(f"MySQL 连接加固失败: {exc}") from exc
 
     def explain_scan_rows(self, conn, sql: str, timeout_ms: int | None) -> tuple[int, bool]:
-        raise NotImplementedError("扫描行预检由 T4 落地（EXPLAIN ANALYZE actual rows 解析）")
+        """EXPLAIN ANALYZE 预检（spec D3）：actual rows 口径，解析失败不可计量。"""
+        from exec.engine.watchdog import run_with_timeout
+
+        _, rows = run_with_timeout(self, conn, "EXPLAIN ANALYZE " + sql, timeout_ms)
+        # MySQL EXPLAIN ANALYZE 输出单列长文本（一列一行）
+        plan_text = str(rows[0][0]) if rows else ""
+        return parse_mysql_scan_rows(plan_text)
 
     def insert_dataframe(self, conn, table: str, df) -> int:
         cols = list(df.columns)

@@ -105,3 +105,40 @@ def test_get_adapter_rejects_unknown(monkeypatch):
     monkeypatch.setattr(settings, "DB_BACKEND", "oracle")
     with pytest.raises(ValueError, match="oracle"):
         get_adapter()
+
+
+# --------------------------------------------------------------------------- #
+# EXPLAIN ANALYZE 解析（spec D3 / Review Focus #6）：样例文本锁定格式，不连服务
+# --------------------------------------------------------------------------- #
+
+# MySQL 8.0 EXPLAIN ANALYZE 真实输出样例（8.0.18+；版本敏感见 spec §8.1）
+_MYSQL_PLAN_SAMPLE = (
+    "-> Table scan on order_detail  (cost=1.05 rows=100) (actual time=0.023..0.025 rows=98 loops=1)\n"
+    "    -> Filter: (f.order_time >= DATE'2025-01-01')  (cost=0.35 rows=40) "
+    "(actual time=0.010..0.012 rows=40 loops=1)\n"
+)
+
+_MYSQL_PLAN_NO_ACTUAL = "-> Count rows in order_detail  (cost=1.05 rows=100)\n"
+
+
+def test_parse_mysql_scan_rows_takes_max_actual():
+    from exec.engine.mysql_adapter import parse_mysql_scan_rows
+
+    rows, measurable = parse_mysql_scan_rows(_MYSQL_PLAN_SAMPLE)
+    assert rows == 98 and measurable is True
+
+
+def test_parse_mysql_scan_rows_ignores_cost_estimate():
+    """cost 段估算行数（rows=100 > actual 98）绝不混入实际口径。"""
+    from exec.engine.mysql_adapter import parse_mysql_scan_rows
+
+    rows, _ = parse_mysql_scan_rows(_MYSQL_PLAN_SAMPLE)
+    assert rows == 98  # 非 cost 段的 100
+
+
+def test_parse_mysql_scan_rows_not_measurable_without_actual():
+    """无 actual 段（计划格式变更/版本演进）：(0, False) 交上层 warning 留痕。"""
+    from exec.engine.mysql_adapter import parse_mysql_scan_rows
+
+    rows, measurable = parse_mysql_scan_rows(_MYSQL_PLAN_NO_ACTUAL)
+    assert rows == 0 and measurable is False
