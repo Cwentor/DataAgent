@@ -92,6 +92,14 @@ _DTYPE_MAP: dict[str, str] = {
     "TIMESTAMP": "timestamp",
     "TIMESTAMP WITH TIME ZONE": "timestamp",
     "DATE": "timestamp",
+    # MySQL 类型族（二十一期 spec：physical 面按后端读取 information_schema）
+    "INT": "int",
+    "MEDIUMINT": "int",
+    "NUMERIC": "float",
+    "CHAR": "str",
+    "TINYTEXT": "str",
+    "MEDIUMTEXT": "str",
+    "LONGTEXT": "str",
     "DATETIME": "timestamp",
     "BOOLEAN": "bool",
 }
@@ -129,21 +137,48 @@ class Catalog:
 # --------------------------------------------------------------------------- #
 # 物理元数据
 # --------------------------------------------------------------------------- #
+def _fetch_all(conn, sql: str, params: tuple | None = None) -> list[tuple]:
+    """执行只读元数据查询并 fetchall（duckdb / pymysql 连接双兼容）。
+
+    DuckDB 连接有 execute 直用；pymysql 连接无 execute、走显式 cursor。
+    """
+    if hasattr(conn, "execute"):
+        return conn.execute(sql, list(params or ())).fetchall()
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        return cur.fetchall()
+
+
+def _quote(name: str) -> str:
+    """元数据查询标识符按当前方言渲染（duckdb 双引号 / mysql 反引号）。"""
+    from compiler.dialect import get_renderer
+
+    return get_renderer().quote_ident(name)
+
+
 def _map_dtype(duckdb_type: str) -> str:
     # 带精度/刻度的类型（DECIMAL(16,2) 等）取括号前的基类型映射
     base = str(duckdb_type).upper().strip().split("(")[0].strip()
     mapped = _DTYPE_MAP.get(base)
     if mapped is None:
-        raise ValueError(f"未支持的 DuckDB 类型: {duckdb_type!r}，请在 catalog_loader 中登记")
+        raise ValueError(f"未支持的数据库类型: {duckdb_type!r}，请在 catalog_loader 中登记")
     return mapped
 
 
-def _physical_columns(conn: duckdb.DuckDBPyConnection) -> dict[str, dict[str, str]]:
-    """table -> {column: dtype}；跳过下划线前缀的元数据表（_field_metadata 等）。"""
-    rows = conn.execute(
-        "SELECT table_name, column_name, data_type "
-        "FROM information_schema.columns ORDER BY table_name, ordinal_position"
-    ).fetchall()
+def _physical_columns(conn, schema: str | None = None) -> dict[str, dict[str, str]]:
+    """table -> {column: dtype}；跳过下划线前缀的元数据表（_field_metadata 等）。
+
+    schema 过滤（二十一期）：MySQL 的 information_schema.columns 含实例内
+    全部库的列，必须按当前库过滤（spec §9 隐患）；DuckDB 单库无妨（None
+    保持现状无过滤）。
+    """
+    sql = "SELECT table_name, column_name, data_type " "FROM information_schema.columns"
+    params: tuple[str, ...] = ()
+    if schema is not None:
+        sql += " WHERE table_schema = ?"
+        params = (schema,)
+    sql += " ORDER BY table_name, ordinal_position"
+    rows = _fetch_all(conn, sql, params)
     out: dict[str, dict[str, str]] = {}
     for table, column, dtype in rows:
         if str(table).startswith("_"):
@@ -166,10 +201,12 @@ def _load_dimension_members(
         meta = columns.get(name)
         if meta is None or meta.dtype != "str":
             continue
-        rows = conn.execute(
-            f'SELECT DISTINCT "{meta.column}" FROM "{meta.table}" '
-            f'WHERE "{meta.column}" IS NOT NULL ORDER BY 1 LIMIT {_DIMENSION_MEMBER_CAP}'
-        ).fetchall()
+        col_q, table_q = _quote(meta.column), _quote(meta.table)
+        rows = _fetch_all(
+            conn,
+            f"SELECT DISTINCT {col_q} FROM {table_q} "
+            f"WHERE {col_q} IS NOT NULL ORDER BY 1 LIMIT {_DIMENSION_MEMBER_CAP}",
+        )
         members[name] = tuple(str(r[0]) for r in rows)
     return members
 
@@ -435,13 +472,20 @@ def build_catalog(
     - overlay_path：覆写配置文件；默认 config/semantic.json，缺失则用内置默认。
     """
     physical: dict[str, dict[str, str]] | None = None
-    own_conn: duckdb.DuckDBPyConnection | None = None
+    own_conn = None
     try:
         if conn is not None:
             physical = _physical_columns(conn)
         elif db_path is not None and Path(db_path).is_file():
             own_conn = duckdb.connect(str(db_path), read_only=True)
             physical = _physical_columns(own_conn)
+        elif settings.DB_BACKEND == "mysql":
+            # MySQL（二十一期）：按配置连接并按当前库过滤 information_schema
+            # （实例级 information_schema 含全部库，不过滤即污染目录）
+            from exec.engine.mysql_adapter import MySqlAdapter
+
+            own_conn = MySqlAdapter().connect_readonly()
+            physical = _physical_columns(own_conn, schema=settings.MYSQL_DATABASE)
         elif settings.DB_PATH.is_file():
             own_conn = duckdb.connect(str(settings.DB_PATH), read_only=True)
             physical = _physical_columns(own_conn)
