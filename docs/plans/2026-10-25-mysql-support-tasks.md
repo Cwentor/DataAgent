@@ -95,6 +95,25 @@ T5/T6/T7/T9 依赖仅 T1/T2，可并行推进；T10 收口依赖全部。
   + oracle 31/31。
 - **全部 T1-T10 完成**。剩余服务级验证清单见上方（需本地 MySQL 8.0.18+）。
 
+**CI mysql-parity 门禁落地与六轮迭代（2026-10-25，PR #16）**：
+新增 `.github/workflows/ci.yml` mysql-parity job（MySQL 8.0 容器 + init_mysql
+建仓 + 一致性测试），首跑起连续暴露六处"本地无 MySQL 环境从未真正执行"的
+缺陷，逐轮修复（该 job 的价值即时兑现——全部属 T8/T10 的服务级验证缺口）：
+
+1. `sqlglot Create.this 是 Schema（.name 恒空）`：表名提取依赖 .this.name
+   产出 `DROP TABLE IF EXISTS ```（1103）→ 改版本无关正则（1bdfb39）；
+   对拍测试同型假绿（两侧塌缩成空名仍过）一并修正；
+2. init_mysql 双重建表（自身 create + build_gmall_tables 再 create → 1050）
+   → 建表全权交 build，清场 DROP 补元数据表（61f07dd）；
+3. pymysql Connection 无 executemany（仅 Cursor 有）→ _insert_seed 分执行
+   通道（0ab7f21）；
+4. 无列名 DataFrame（元组行构造，columns=0..n）被拼进列子句 → Unknown
+   column '0'（1054）→ insert_dataframe 位置对应模式（b462cb5）；
+5. NaT 直插 DATETIME 列报 1292 → 空值统一 pd.isna 清洗（418fc7e）；
+6. 一致性测试自身两处：_compile_dsl 漏 QueryDSL.model_validate（dict 直传
+   compile_sql）+ pool 用例误用运行时 MYSQL_* 默认账号（1045 拒绝）→
+   补契约校验 + 统一 _test_dsn()。
+
 <!-- 后续格式：
 ### YYYY-MM-DD
 - T<n> 完成：<一句话>；提交 <hash>；测试 <数量> 绿 / 回归差异 <无|明细>。
