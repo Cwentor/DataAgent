@@ -3,20 +3,31 @@
 转换由 sqlglot 运行时承担（schema.mysql_ddl），对拍锁定：表集合一致、
 每表列名序一致（类型允许方言差异）；类型口径抽查关键映射。
 不依赖 MySQL 服务。
+
+表名提取用正则（版本无关）：sqlglot 的 Create.this 是 Schema 节点
+（.name 恒为空；表名在内层 Table），依赖 .this.name 会让两侧同构塌缩成
+空名、对拍假绿（CI mysql-parity 首跑实锤，2026-10-25）。
 """
 
 from __future__ import annotations
 
+import re
+
 import sqlglot
+
+_TABLE_NAME_RE = re.compile(r"CREATE\s+TABLE\s+`?([a-zA-Z0-9_]+)`?", re.IGNORECASE)
 
 
 def _tables(ddls: list[str], dialect: str) -> dict[str, list[str]]:
     parsed = {}
     for ddl in ddls:
-        tree = sqlglot.parse_one(ddl, read=dialect)
-        name = tree.this.name.lower()
-        cols = [c.name.lower() for c in tree.find_all(sqlglot.exp.ColumnDef)]
-        parsed[name] = cols
+        m = _TABLE_NAME_RE.search(ddl)
+        assert m is not None, f"表名提取失败: {ddl.strip()[:80]!r}"
+        cols = [
+            c.name.lower()
+            for c in sqlglot.parse_one(ddl, read=dialect).find_all(sqlglot.exp.ColumnDef)
+        ]
+        parsed[m.group(1).lower()] = cols
     return parsed
 
 

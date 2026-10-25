@@ -14,9 +14,17 @@ ANALYZE 预检本身即拖垮建仓验证。
 
 from __future__ import annotations
 
+import re
+
 import sqlglot
 
 from mock.gmall.schema import DDL_STATEMENTS
+
+# 表名正则提取（版本无关）：sqlglot 的 Create.this 是 Schema 节点（.name 恒为
+# 空串；表名在其内层 Table），依赖 .this.name 会产出空表名 -> DROP TABLE
+# IF EXISTS `` 报 1103（CI mysql-parity 首跑实锤，2026-10-25）；源 DDL 文本
+# 规整（CREATE TABLE name (），正则绝对稳定。
+_TABLE_NAME_RE = re.compile(r"CREATE\s+TABLE\s+`?([a-zA-Z0-9_]+)`?", re.IGNORECASE)
 
 
 def mysql_ddl() -> list[str]:
@@ -29,8 +37,14 @@ def mysql_ddl() -> list[str]:
 
 
 def mysql_table_names() -> list[str]:
-    """转译产物中的表名（按 DDL 声明序，供 DROP 重建与对拍）。"""
-    return [sqlglot.parse_one(ddl, read="mysql").this.name for ddl in mysql_ddl()]
+    """源 DDL 的表名清单（按声明序；供 DROP 重建与对拍，正则提取版本无关）。"""
+    names: list[str] = []
+    for ddl in DDL_STATEMENTS:
+        m = _TABLE_NAME_RE.search(ddl)
+        if m is None:
+            raise RuntimeError(f"DDL 表名提取失败: {ddl.strip()[:80]!r}")
+        names.append(m.group(1))
+    return names
 
 
 # 二级索引（spec D12：MySQL 无 zoneMap，时间主轴 + 常用过滤列显式索引）
