@@ -113,6 +113,23 @@ T5/T6/T7/T9 依赖仅 T1/T2，可并行推进；T10 收口依赖全部。
 6. 一致性测试自身两处：_compile_dsl 漏 QueryDSL.model_validate（dict 直传
    compile_sql）+ pool 用例误用运行时 MYSQL_* 默认账号（1045 拒绝）→
    补契约校验 + 统一 _test_dsn()。
+7. 跨引擎类型/口径归一（第七至十二轮，数据已真实回流后暴露）：
+   Decimal(datetime) 类型面（duck DECIMAL 聚合返回 Decimal 为既有行为，
+   不动 adapter 以免打穿 golden 哈希，比对层归一）+ DATE vs TIMESTAMP
+   归一（spec D5 语义等价）+ golden 多轮 turns[] 嵌套遍历 + 数值容差
+   校准（rel=1e-5 大值 / abs=1e-6 小值——MySQL DECIMAL 除法按
+   div_precision_increment=4 六位小数舍入的绝对量级差）；
+8. **既有审计门真缺陷**（非 MySQL 引入，eval 裸执行从未暴露）：无维度
+   comparison 的 FROM cur, prev（两标量聚合 CTE，恒单行）被笛卡尔检查
+   误拒 → _is_scalar_aggregate 解包 Alias(Sum)（原判定对带别名聚合恒
+   False）+ 无 ON Join 精确放行（sqlglot 30.x 逗号 FROM 归一化形态；
+   WITH 键 with_/根 From 键 from_ 版本兼容；CTE 体内 FROM 排除）；
+   普通表逗号 FROM / CROSS JOIN 仍拒（防回归用例锁定）。
+
+**终态（2026-10-25）**：PR #16 CI 四 job 全绿（lint / test / mysql-parity /
+nightly-skip），mysql-parity = MySQL 8.0 容器建仓 + 35 条 golden DSL 双后端
+一致性 + Review Focus 全专项通过；本地 1101 passed + 7 skipped。教训固化：
+black/ruff 检查禁用裸管道（tail 吃退出码，三次掩盖实锤，一律 pipefail）。
 
 <!-- 后续格式：
 ### YYYY-MM-DD
