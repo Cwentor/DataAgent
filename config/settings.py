@@ -27,6 +27,9 @@ DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 
 # 查询执行后端（二十一期）：duckdb（默认，零破坏）| mysql
 DB_BACKEND: str = os.getenv("DB_BACKEND", "duckdb")
+# SQL 方言（编译器渲染目标，二十一期）：缺省跟随 DB_BACKEND 推导；
+# 可独立覆盖（测试/排查用，如 duckdb 后端下单独产出 mysql 方言 SQL）
+SQL_DIALECT: str = os.getenv("SQL_DIALECT", "")
 
 # 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
 WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
