@@ -26,7 +26,7 @@ import pymysql
 from config import settings
 from exec.engine.mysql_adapter import MySqlAdapter
 from mock.gmall.build import build_gmall_tables
-from mock.gmall.schema_mysql import create_mysql_tables, mysql_table_names
+from mock.gmall.schema_mysql import mysql_table_names
 from mock.metadata import FIELD_METADATA, TABLE_METADATA
 
 SEED = 42  # 与 mock.init_duckdb 同源：保证评测可复现
@@ -65,9 +65,10 @@ def main() -> None:
     conn = _writable_conn()
     try:
         with conn.cursor() as cur:
-            for table in mysql_table_names():
+            # 幂等清场（含元数据表；建表全权交 build_gmall_tables 的 mysql 分支，
+            # 严禁在此再显式 create——双重建表 1050 事故，CI mysql-parity 实锤）
+            for table in (*mysql_table_names(), "_field_metadata", "_table_metadata"):
                 cur.execute(f"DROP TABLE IF EXISTS `{table}`")
-        create_mysql_tables(conn)
         # write_applog 默认 True：行为事实表由埋点日志解析入仓（与 DuckDB 版
         # 同链路；日志生成确定性，重复落盘幂等）
         counts = build_gmall_tables(conn, seed=SEED, adapter=MySqlAdapter())
