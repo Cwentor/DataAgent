@@ -13,7 +13,6 @@ read_timeout 留 5s 余量保证服务端先超时、连接可复用；KILL QUER
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
@@ -153,18 +152,16 @@ class MySqlAdapter:
             sql = f"INSERT INTO `{table}` VALUES ({placeholders})"
         else:
             sql = f"INSERT INTO `{table}` ({', '.join(f'`{c}`' for c in cols)}) VALUES ({placeholders})"
-        # NaN/pd.NA -> None：pandas 空值直插 DECIMAL 列会报错（DuckDB 隐式
-        # 转 NULL，对齐口径）；nullable Int64 列的 itertuples 产出 pd.NA
+        # 空值统一清洗：pd.isna 覆盖 None/NaN/pd.NA/NaT（datetime 列空值——
+        # CI 实锤 NaT 直插 DATETIME 列报 1292 Incorrect datetime value）；
+        # pandas 空值直插 DECIMAL/DATETIME 列都会报错（DuckDB 隐式转 NULL，
+        # 对齐口径）
         import pandas as pd
 
-        def _cell(v: Any) -> Any:
-            if v is None or v is pd.NA:
-                return None
-            if isinstance(v, float) and math.isnan(v):
-                return None
-            return v
-
-        data = [tuple(_cell(v) for v in row) for row in df.itertuples(index=False)]
+        data = [
+            tuple(None if pd.isna(v) else v for v in row)
+            for row in df.itertuples(index=False)
+        ]
         with conn.cursor() as cur:
             for i in range(0, len(data), 5000):
                 cur.executemany(sql, data[i : i + 5000])

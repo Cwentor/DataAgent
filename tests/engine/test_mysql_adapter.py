@@ -176,3 +176,28 @@ def test_insert_dataframe_positional_mode_for_unnamed_df():
     named = pd.DataFrame({"a": [1], "b": ["x"]})
     MySqlAdapter().insert_dataframe(_Conn(), "t", named)
     assert captured["sql"] == "INSERT INTO `t` (`a`, `b`) VALUES (%s, %s)"
+
+
+def test_insert_dataframe_nat_to_none():
+    """datetime 列空值 NaT -> None（CI 实锤：NaT 直插 DATETIME 报 1292）。"""
+    import pandas as pd
+
+    captured: dict[str, object] = {}
+
+    class _Cur:
+        def executemany(self, sql, data):
+            captured["data"] = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    df = pd.DataFrame({"t": [pd.Timestamp("2025-01-01"), pd.NaT]})
+    MySqlAdapter().insert_dataframe(_Conn(), "t", df)
+    assert captured["data"][1][0] is None
