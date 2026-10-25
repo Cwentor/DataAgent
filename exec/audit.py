@@ -71,8 +71,17 @@ class GuardrailFinding:
         )
 
 
-def _finding_cartesian(join: exp.Join) -> GuardrailFinding | None:
-    """单个 JOIN 子句的笛卡尔积判定：CROSS / 无 ON / 无 USING。"""
+def _finding_cartesian(
+    join: exp.Join,
+    scalar_ctes: set[str] | None = None,
+    from_main_names: set[str] | None = None,
+) -> GuardrailFinding | None:
+    """单个 JOIN 子句的笛卡尔积判定：CROSS / 无 ON / 无 USING。
+
+    放行例外：无关联 JOIN 引用的表与 FROM 主表全部是纯标量聚合 CTE
+    （恒单行 × 单行，无笛卡尔风险——comparison 无维度形态 FROM cur, prev；
+    sqlglot 30.x 把逗号 FROM 归一化为无 ON 的 Join 节点）。
+    """
     kind = (join.kind or "").upper()
     if kind == "CROSS":
         return GuardrailFinding(
@@ -82,6 +91,16 @@ def _finding_cartesian(join: exp.Join) -> GuardrailFinding | None:
             "改写查询：为 JOIN 提供显式关联条件，或去除多余表引用",
         )
     if join.args.get("on") is None and join.args.get("using") is None and kind != "LATERAL":
+        joined = join.this
+        if (
+            scalar_ctes is not None
+            and from_main_names is not None
+            and from_main_names
+            and from_main_names <= scalar_ctes
+            and isinstance(joined, exp.Table)
+            and joined.name in scalar_ctes
+        ):
+            return None  # 标量聚合 CTE 逗号连接（恒单行），精确放行
         return GuardrailFinding(
             "cartesian_product",
             "rejected",
@@ -92,15 +111,39 @@ def _finding_cartesian(join: exp.Join) -> GuardrailFinding | None:
 
 
 def _is_scalar_aggregate(root: exp.Expression) -> bool:
-    """纯标量聚合形态判定：无 GROUP BY / DISTINCT / JOIN / 窗口，SELECT 项全为聚合。"""
+    """纯标量聚合形态判定：无 GROUP BY / DISTINCT / JOIN / 窗口，SELECT 项全为聚合。
+
+    投影为 ``SUM(x) AS gmv`` 形态时 sqlglot 节点是 Alias(Sum)——按 Alias.this
+    解包判定（不解包则恒 False，标量 CTE 放行随之失效）。
+    """
     if isinstance(root, exp.Select):
         if root.args.get("group") or root.args.get("distinct"):
             return False
         projections = root.expressions
         if not projections:
             return False
-        return all(isinstance(p, exp.AggFunc) for p in projections)
+        unwrapped = [p.this if isinstance(p, exp.Alias) else p for p in projections]
+        return all(isinstance(p, exp.AggFunc) for p in unwrapped)
     return False
+
+
+def _scalar_cte_names(root: exp.Expression) -> set[str]:
+    """纯标量聚合 CTE 名单：恒单行，逗号连接无笛卡尔风险。
+
+    编译器 comparison 无维度形态产出 ``FROM cur, prev``（两 CTE 均为空
+    分组聚合，数学上各恒一行）；审计门按形态精确放行，普通表的逗号
+    FROM 仍拒（CI mysql-parity 首次以全护栏链路执行该形态时实锤误报）。
+    """
+    names: set[str] = set()
+    # sqlglot 版本差异：WITH 挂载键有 "with" 与 "with_" 两种（30.x 为 with_）
+    with_expr = root.args.get("with_") or root.args.get("with")
+    if with_expr is None:
+        return names
+    for cte in with_expr.expressions:
+        body = cte.this
+        if isinstance(body, exp.Select) and _is_scalar_aggregate(body):
+            names.add(cte.alias_or_name)
+    return names
 
 
 def audit_compiled_sql(sql: str, dialect: str | None = None) -> list[GuardrailFinding]:
@@ -145,9 +188,18 @@ def audit_compiled_sql(sql: str, dialect: str | None = None) -> list[GuardrailFi
         return findings
 
     # 2) 笛卡尔积：FROM 多表（逗号 JOIN）与无关联条件 JOIN
+    #    放行例外：逗号引用的全部是纯标量聚合 CTE（恒单行 × 单行，无笛卡尔
+    #    风险——comparison 无维度形态 FROM cur, prev）；普通表逗号 FROM 仍拒
+    scalar_ctes = _scalar_cte_names(root)
+    # 根查询自己的 FROM 主表（键名 from_/from 版本兼容；不得用 find_all——
+    # 会把 CTE 体内的 FROM 也算进来导致放行判定失效）
+    from_main_names: set[str] = set()
+    from_expr = root.args.get("from_") or root.args.get("from")
+    if from_expr is not None and isinstance(from_expr.this, exp.Table):
+        from_main_names.add(from_expr.this.name)
     for from_node in root.find_all(exp.From):
         extra = [e for e in from_node.expressions if isinstance(e, (exp.Table, exp.Subquery))]
-        if extra:
+        if extra and not all(isinstance(e, exp.Table) and e.name in scalar_ctes for e in extra):
             findings.append(
                 GuardrailFinding(
                     "cartesian_product",
@@ -157,7 +209,7 @@ def audit_compiled_sql(sql: str, dialect: str | None = None) -> list[GuardrailFi
                 )
             )
     for join in root.find_all(exp.Join):
-        finding = _finding_cartesian(join)
+        finding = _finding_cartesian(join, scalar_ctes, from_main_names)
         if finding is not None:
             findings.append(finding)
 

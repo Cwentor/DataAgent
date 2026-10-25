@@ -198,3 +198,28 @@ def test_m2_new_shapes_pass_audit_gate(conn):
         findings = audit_compiled_sql(sql)
         rejected = [f for f in findings if f.severity == "rejected"]
         assert rejected == [], (name, [f.to_dict() for f in rejected])
+
+
+def test_scalar_cte_comma_from_allowed_but_plain_tables_rejected():
+    """标量聚合 CTE 逗号连接放行（恒单行×单行）；普通表逗号 FROM 仍拒。
+
+    放行背景：comparison 无维度形态产出 FROM cur, prev（两 CTE 均为空分组
+    聚合）；CI mysql-parity 首次以全护栏链路执行该形态时审计门误报实锤。
+    """
+    from exec.audit import audit_compiled_sql
+
+    ok_sql = (
+        "WITH cur AS (SELECT SUM(order_amount) AS gmv FROM order_detail), "
+        "prev AS (SELECT SUM(order_amount) AS gmv_p FROM order_detail) "
+        "SELECT gmv, gmv_p FROM cur, prev"
+    )
+    for dialect in ("duckdb", "mysql"):
+        assert all(
+            f.check != "cartesian_product" for f in audit_compiled_sql(ok_sql, dialect=dialect)
+        ), dialect
+
+    bad_sql = "SELECT a.id, b.id FROM order_detail a, user_info b"
+    assert any(
+        f.check == "cartesian_product" and f.severity == "rejected"
+        for f in audit_compiled_sql(bad_sql, dialect="duckdb")
+    )

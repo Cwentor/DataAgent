@@ -55,7 +55,10 @@ def _assert_rows_equal(duck_rows, mysql_rows):
                 assert vd is vm, f"空值不一致: {vd!r} vs {vm!r}"
                 continue
             if isinstance(vd, (int, float)) and isinstance(vm, (int, float)):
-                assert vm == pytest.approx(vd, rel=1e-6, abs=1e-9), f"数值漂移: {vd!r} vs {vm!r}"
+                # rel=1e-5：吸收 DECIMAL 舍入策略差（MySQL 除法按 scale 增量
+                # 精确十进制舍入 vs DuckDB float 全精度，CI 第九轮实测差 1.45e-6，
+                # spec §9 风险表预告的 Decimal 精度差异）
+                assert vm == pytest.approx(vd, rel=1e-5, abs=1e-9), f"数值漂移: {vd!r} vs {vm!r}"
             else:
                 assert vm == vd, f"值不一致: {vd!r} vs {vm!r}"
 
