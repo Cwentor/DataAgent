@@ -52,6 +52,7 @@ PostgreSQL 作为第三个执行后端，**全量对齐二十一期交付模式*
 | C13 | `requirements.txt` | 驱动 pin + 选型理由注释模式（duckdb 上界、pymysql 纯 Python 理由） |
 | C14 | `eval/eval_runner.py:387-438` | `--backend` choices 与 `_mysql_smoke()` 冒烟先例 |
 | C15 | `exec/engine/` 全目录 | 无任何 postgres 预留/TODO；全仓 "postgres" 仅 `guards.py` 函数黑名单前缀 `postgres_`（安全拦截，非预留） |
+| C16 | `compiler/sql_compiler.py:551` | comparison 配对硬编码 `date_add(expr, INTERVAL …)`——DuckDB/MySQL 恰好同名兼容，**PG 无 `date_add` 函数**，需方言原语化（见 D17） |
 
 ## 3. 总体架构
 
@@ -173,6 +174,15 @@ mock.init_postgres` → `pytest tests/test_pg_backend_parity.py -q`。
 
 **D16 评测冒烟**：`eval --backend` choices 增加 `postgres`，`_postgres_smoke()`
 对齐 `_mysql_smoke()`（COUNT order_detail，全护栏链路）。golden 评测不动。
+
+**D17 comparison 对齐的方言原语化（date_add）**。调研补遗（计划期实证发现）：
+`sql_compiler.py:551` 硬编码 `date_add(expr, INTERVAL …)`——DuckDB/MySQL 恰好
+同名兼容，**PostgreSQL 无 `date_add` 函数**。DialectRenderer 协议新增第 8 原语
+`date_add(expr, interval)`：DuckDB/MySQL 渲染与现状**逐字节一致**（golden 锚点
+不动）；PG 渲染 `{expr} + INTERVAL '…'` 加法等价式。INTERVAL 字面量转译
+（`INTERVAL 1 DAY` → `INTERVAL '1 day'`——编译器产出形态为 DuckDB/MySQL 兼容
+语法，PG 非法）与 spine 步长共用同一转译点 `pg_interval_literal`，未知形态
+显式 `CompileError`。
 
 ## 5. 安全模型对照（治理管道等价性）
 
