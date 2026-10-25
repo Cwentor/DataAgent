@@ -60,9 +60,7 @@ def _assert_rows_equal(duck_rows, mysql_rows):
                 # 十进制舍入，DuckDB 走 float 全精度——舍入差为**绝对量级**
                 # （<=5e-7，小值增长率上相对差可达 3e-5），故 abs 兜底小值、
                 # rel 覆盖大值（CI 九/十轮实测校准）
-                assert vm == pytest.approx(vd, rel=1e-5, abs=1e-6), (
-                    f"数值漂移: {vd!r} vs {vm!r}"
-                )
+                assert vm == pytest.approx(vd, rel=1e-5, abs=1e-6), f"数值漂移: {vd!r} vs {vm!r}"
             else:
                 assert vm == vd, f"值不一致: {vd!r} vs {vm!r}"
 
@@ -130,9 +128,7 @@ def test_golden_dsls_parity(conn, mysql_conn):
         (Path(__file__).parents[1] / "eval" / "golden_dataset.json").read_text(encoding="utf-8")
     )
     # 单轮条目带顶层 dsl；多轮条目（M 系列）为 turns[] 嵌套——两层都覆盖
-    dsls = [
-        item["dsl"] for item in golden if "dsl" in item
-    ] + [
+    dsls = [item["dsl"] for item in golden if "dsl" in item] + [
         turn["dsl"] for item in golden for turn in item.get("turns", []) if "dsl" in turn
     ]
     assert dsls, "golden_dataset 未解析出任何 DSL"
