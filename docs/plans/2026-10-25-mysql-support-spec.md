@@ -374,11 +374,33 @@ SQL_DIALECT = ""                 # 缺省跟随 DB_BACKEND 推导；可独立覆
 - 本地开发：`docker run -e MYSQL_ROOT_PASSWORD=... -p 3306:3306
   mysql:8.0` 即可，一致性与冒烟测试对无 MySQL 环境自动 skip。
 
+### 8.1 版本演进跟随策略（已批准的注意点，2026-10-25）
+
+**项目必须随 MySQL 版本更新一同演进，这是采纳本设计的不可避免代价。**
+治理管道对引擎的依赖是深层的（计划文本计量、服务端超时、sql_mode
+默认值、优化器行为），MySQL 升级不可能"零成本免费获得"。既有教训：
+DuckDB 2.0 计划渲染变更曾打穿扫描行熔断（2026-10-22 CI 事故，
+requirements 被迫锁定主版本上界）——MySQL 侧同类风险只多不少。
+
+跟随策略（写入 README 部署要求，随 Task 10 落地）：
+
+1. **声明支持区间**：README 与 requirements 注释声明本期支持
+   `mysql 8.0（>= 8.0.18）`；8.4 / 9.x 未纳入回归，不在支持区间；
+2. **格式漂移可探测**：`parse_mysql_scan_rows` 以真实输出样例文本的
+   单测锁定（Task 4），MySQL 升级后跑测试即可暴露 EXPLAIN ANALYZE
+   格式漂移（不可计量路径只 warning 不熔断，不会静默错杀）；
+3. **升级准入流程**：跨版本升级（8.0.x 小版本、8.0→8.4 大版本）须先跑
+   全量 pytest + 双后端一致性测试（Task 10）+ 手工核验
+   `EXPLAIN ANALYZE` 样例，全绿后再变更支持区间声明；
+4. **敏感面登记**：对版本敏感的面集中在 EXPLAIN ANALYZE 输出格式、
+   `max_execution_time` 语义、`sql_mode`/`cte_max_recursion_depth`
+   默认值——升级评审按此清单逐项核对（§9 风险表第 1 条）。
+
 ## 9. 风险与开放问题
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| MySQL EXPLAIN ANALYZE 输出格式随版本变化（同 DuckDB 2.0 前车之鉴） | 扫描熔断失效或误报 | 解析含 actual 段才可计量，否则 warning 留痕跳过（不静默放行也不硬熔断）；以样例文本单测锁定格式 |
+| MySQL 版本演进（EXPLAIN ANALYZE 输出格式 / sql_mode 默认值 / 优化器行为随版本变化） | 扫描熔断失效或误报、加固被部署默认值架空 | **已批准为必然代价**（§8.1）：声明支持区间 + 样例单测锁格式 + 升级准入流程（全量回归 + 双后端一致性）|
 | week 口径漂移（MySQL WEEK mode 众多） | 周粒度结果两后端不一致 | D5 明确用 WEEKDAY（周一锚）；双后端一致性测试含跨周边界用例 |
 | Decimal 精度：DuckDB float vs MySQL DECIMAL | 快照比对/质检数值漂移 | D13 统一 float 化；mock 金额字段 DECIMAL(16,2) 在 float 化后误差 < 1e-9，一致性测试容差按 1e-6 相对误差 |
 | 大表无索引导致 EXPLAIN ANALYZE 预检本身超时 | 预检被自身超时拦截 | 预检与执行共用超时预算（现状语义）；DDL 补索引（D12）降低预检成本 |
