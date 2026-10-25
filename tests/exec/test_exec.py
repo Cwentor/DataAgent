@@ -303,7 +303,8 @@ def test_scan_cache_key_normalizes_whitespace():
 
 def test_execute_sql_reuses_scan_cache(big_conn, monkeypatch):
     """命中缓存后不再重复 EXPLAIN ANALYZE（预检降本），scan_rows 仍正确回填。"""
-    from exec.guards import _run_with_timeout, cache_scan_rows, cached_scan_rows
+    from exec.engine import watchdog
+    from exec.guards import cache_scan_rows, cached_scan_rows
 
     sql = "SELECT grp, sum(id) AS s FROM big GROUP BY grp"
     # 预填缓存（等价于首次预检的结果）
@@ -311,14 +312,15 @@ def test_execute_sql_reuses_scan_cache(big_conn, monkeypatch):
     assert cached_scan_rows(sql) == 200000
 
     # 若再次出现 EXPLAIN ANALYZE 预检（缓存未命中）则视为回归缺陷；真实执行不受影响
-    real_run = _run_with_timeout
+    # （二十一期：执行路径改经 exec.engine.watchdog.run_with_timeout，桩点随之迁移）
+    real_run = watchdog.run_with_timeout
 
-    def guarded_run(conn, s, timeout):
+    def guarded_run(adapter, conn, s, timeout):
         if s.startswith("EXPLAIN ANALYZE"):
             raise AssertionError("预检缓存未命中，重复执行了 EXPLAIN ANALYZE")
-        return real_run(conn, s, timeout)
+        return real_run(adapter, conn, s, timeout)
 
-    monkeypatch.setattr("exec.guards._run_with_timeout", guarded_run)
+    monkeypatch.setattr(watchdog, "run_with_timeout", guarded_run)
     result = execute_sql(big_conn, sql, max_scan_rows=500000)
     assert result.scan_rows == 200000  # 缓存值回填
     assert len(result.rows) == 7

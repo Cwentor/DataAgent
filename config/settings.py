@@ -25,6 +25,9 @@ load_dotenv(PROJECT_ROOT / ".env")
 # 本地开发零成本数仓文件（模块 C 生成）
 DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 
+# 查询执行后端（二十一期）：duckdb（默认，零破坏）| mysql
+DB_BACKEND: str = os.getenv("DB_BACKEND", "duckdb")
+
 # 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
 WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
 

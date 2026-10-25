@@ -8,6 +8,7 @@ import time
 import duckdb
 import pytest
 
+from exec.engine.duckdb_adapter import DuckDbAdapter
 from exec.pool import ReadOnlyConnectionPool
 
 
@@ -23,7 +24,7 @@ def db_path(tmp_path):
 
 
 def test_pool_acquire_release_reuses_connection(db_path):
-    pool = ReadOnlyConnectionPool(db_path, max_connections=2)
+    pool = ReadOnlyConnectionPool(DuckDbAdapter(db_path), max_connections=2)
     try:
         c1 = pool.acquire()
         assert c1.execute("SELECT count(*) FROM t").fetchone()[0] == 3
@@ -39,7 +40,7 @@ def test_pool_acquire_release_reuses_connection(db_path):
 
 def test_pool_caps_concurrent_connections(db_path):
     """容量上限：池满后 acquire 阻塞排队，直到有连接归还。"""
-    pool = ReadOnlyConnectionPool(db_path, max_connections=2)
+    pool = ReadOnlyConnectionPool(DuckDbAdapter(db_path), max_connections=2)
     try:
         c1 = pool.acquire()
         c2 = pool.acquire()
@@ -68,11 +69,11 @@ def test_pool_caps_concurrent_connections(db_path):
 
 def test_pool_rejects_invalid_capacity(db_path):
     with pytest.raises(ValueError):
-        ReadOnlyConnectionPool(db_path, max_connections=0)
+        ReadOnlyConnectionPool(DuckDbAdapter(db_path), max_connections=0)
 
 
 def test_pool_acquire_after_close_raises(db_path):
-    pool = ReadOnlyConnectionPool(db_path, max_connections=1)
+    pool = ReadOnlyConnectionPool(DuckDbAdapter(db_path), max_connections=1)
     pool.close()
     with pytest.raises(RuntimeError):
         pool.acquire()
@@ -80,7 +81,7 @@ def test_pool_acquire_after_close_raises(db_path):
 
 def test_pool_uses_read_only(db_path):
     """只读连接：写操作应被 DuckDB 拒绝。"""
-    pool = ReadOnlyConnectionPool(db_path, max_connections=1)
+    pool = ReadOnlyConnectionPool(DuckDbAdapter(db_path), max_connections=1)
     try:
         c = pool.acquire()
         with pytest.raises(duckdb.InvalidInputException):
