@@ -184,6 +184,16 @@ mock.init_postgres` → `pytest tests/test_pg_backend_parity.py -q`。
 语法，PG 非法）与 spine 步长共用同一转译点 `pg_interval_literal`，未知形态
 显式 `CompileError`。
 
+**D18 HAVING 指标引用的方言原语化（having_metric_ref）**。CI postgres-parity
+首跑实证发现（spec §9 R1 预判场景）：HAVING 聚合后过滤（十九期 M2）产出
+`HAVING "gmv" > …` 引用输出别名——DuckDB/MySQL 语义允许（此前双后端全绿），
+**PostgreSQL 禁止**（HAVING 仅可用聚合表达式与 GROUP BY 列，
+`UndefinedColumn: column "gmv" does not exist`）。DialectRenderer 协议新增
+第 9 原语 `having_metric_ref(alias, expr)`：DuckDB/MySQL 返回别名引用（golden
+锚点逐字节不变）；PG 借编译器既有两遍渲染机制（`alias_expr` 映射）**重放底层
+聚合表达式**。窗口/表达式指标的 alias_expr 同样登记；HAVING 引用窗口指标的
+窗口函数非法性为既有两方言共同边界，不在本期处理。
+
 ## 5. 安全模型对照（治理管道等价性）
 
 | 防线 | DuckDB | MySQL | PostgreSQL |

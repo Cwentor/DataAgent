@@ -320,3 +320,55 @@ class TestCompilePostgresDialect:
         assert "date_add(" not in sql
         assert "+ INTERVAL '1 year'" in sql
         sqlglot.parse_one(sql, read="postgres")
+
+
+# --------------------------------------------------------------------------- #
+# HAVING 指标引用方言原语（二十二期 D18）：PG 语义禁止 HAVING 引用输出别名
+# --------------------------------------------------------------------------- #
+
+
+def _having_gmv_dsl() -> dict:
+    """HAVING 聚合后过滤 DSL（形态取自 golden_dataset 用例 [23]）。"""
+    return {
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
+        "dimensions": [{"field": "category1_name", "alias": None}],
+        "filters": [],
+        "order_by": [{"field": "gmv", "direction": "desc"}],
+        "having": [{"field": "gmv", "operator": "gt", "value": 1000.0}],
+        "limit": 100,
+    }
+
+
+def test_having_metric_ref_alias_on_anchored_dialects():
+    """golden 锚点保护：DuckDB/MySQL 的 HAVING 指标引用为输出别名（逐字节不变）。"""
+    from compiler.dialect.duckdb import DuckDbRenderer
+    from compiler.dialect.mysql import MySqlRenderer
+
+    assert DuckDbRenderer().having_metric_ref("gmv", "SUM(f.x)") == '"gmv"'
+    assert MySqlRenderer().having_metric_ref("gmv", "SUM(f.x)") == "`gmv`"
+
+
+def test_having_metric_ref_replays_expr_on_postgres():
+    """spec D18：PG 语义禁止 HAVING 引用输出别名，重放底层聚合表达式。"""
+    from compiler.dialect.postgres import PostgresRenderer
+
+    r = PostgresRenderer()
+    assert r.having_metric_ref("gmv", "SUM(f.split_total_amount)") == "SUM(f.split_total_amount)"
+
+
+def test_compile_having_postgres_no_bare_alias():
+    """端到端：HAVING 编译产物在 PG 下重放聚合表达式（无裸别名引用）。"""
+    import sqlglot
+
+    sql = _compile_dsl(_having_gmv_dsl(), "postgres")
+    assert 'HAVING "gmv"' not in sql
+    assert "HAVING SUM(f.split_total_amount) > 1000.0" in sql
+    sqlglot.parse_one(sql, read="postgres")
+
+
+def test_compile_having_anchored_dialects_unchanged():
+    """端到端：DuckDB/MySQL 的 HAVING 产物保持输出别名引用（golden 不变）。"""
+    assert 'HAVING "gmv" > 1000.0' in _compile_dsl(_having_gmv_dsl(), "duckdb")
+    assert "HAVING `gmv` > 1000.0" in _compile_dsl(_having_gmv_dsl(), "mysql")

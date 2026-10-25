@@ -34,6 +34,10 @@ class DuckDbRenderer:
         # DuckDB 原生 date_add(timestamp, interval)——与迁移前内联渲染逐字节一致（golden 锚点）
         return f"date_add({expr}, {interval})"
 
+    def having_metric_ref(self, alias: str, expr: str) -> str:
+        # DuckDB 允许 HAVING 引用输出别名——与迁移前内联渲染逐字节一致（golden 锚点）
+        return self.quote_ident(alias)
+
     def spine_cte_sql(self, alias: str, start: str, end: str, step: str) -> str:
         return (
             f"SELECT UNNEST(generate_series(TIMESTAMP '{start}', TIMESTAMP '{end}', {step})) "

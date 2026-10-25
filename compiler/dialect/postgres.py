@@ -78,5 +78,10 @@ class PostgresRenderer:
         # PG 无 date_add 函数（spec D17）：加法等价式 + INTERVAL 字面量转译
         return f"{expr} + {pg_interval_literal(interval)}"
 
+    def having_metric_ref(self, alias: str, expr: str) -> str:
+        # PG 语义禁止 HAVING 引用输出别名（UndefinedColumn 实锤，CI 首跑）：
+        # 重放底层聚合表达式（alias_expr 由编译器两遍渲染机制提供）
+        return expr
+
 
 __all__ = ["PostgresRenderer", "pg_interval_literal"]

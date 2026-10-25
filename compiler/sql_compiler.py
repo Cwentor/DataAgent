@@ -909,11 +909,14 @@ def compile_sql(dsl: QueryDSL) -> str:
 
     if dsl.having and not is_projection:
         # HAVING 聚合后过滤（十九期 M2）：字段经契约层校验必为本 DSL 指标
-        # 别名，直接引用输出别名（DuckDB 支持）；值按数值字面量渲染
+        # 别名；引用形态方言化（二十二期 D18）：DuckDB/MySQL 引用输出别名
+        # （golden 锚点不变），PG 重放底层聚合表达式（语义禁止输出别名引用）
+        renderer = get_renderer()
         having_parts: list[str] = []
         for h in dsl.having:
             if h.field not in metric_aliases:
                 raise CompileError(f"HAVING 字段 {h.field!r} 不是指标别名")
+            metric_ref = renderer.having_metric_ref(h.field, alias_expr[h.field])
             op_map = {
                 FilterOperator.EQ: "=",
                 FilterOperator.NE: "<>",
@@ -924,16 +927,16 @@ def compile_sql(dsl: QueryDSL) -> str:
             }
             if h.operator == FilterOperator.IN:
                 vals = ", ".join(render_literal(v, "float") for v in h.value)
-                having_parts.append(f"{_quote_ident(h.field)} IN ({vals})")
+                having_parts.append(f"{metric_ref} IN ({vals})")
             elif h.operator == FilterOperator.BETWEEN:
                 lo, hi = h.value
                 having_parts.append(
-                    f"{_quote_ident(h.field)} BETWEEN {render_literal(lo, 'float')} "
+                    f"{metric_ref} BETWEEN {render_literal(lo, 'float')} "
                     f"AND {render_literal(hi, 'float')}"
                 )
             else:
                 having_parts.append(
-                    f"{_quote_ident(h.field)} {op_map[h.operator]} {render_literal(h.value, 'float')}"
+                    f"{metric_ref} {op_map[h.operator]} {render_literal(h.value, 'float')}"
                 )
         sql += "\nHAVING " + " AND ".join(having_parts)
 
