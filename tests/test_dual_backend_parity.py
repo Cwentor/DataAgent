@@ -55,10 +55,14 @@ def _assert_rows_equal(duck_rows, mysql_rows):
                 assert vd is vm, f"空值不一致: {vd!r} vs {vm!r}"
                 continue
             if isinstance(vd, (int, float)) and isinstance(vm, (int, float)):
-                # rel=1e-5：吸收 DECIMAL 舍入策略差（MySQL 除法按 scale 增量
-                # 精确十进制舍入 vs DuckDB float 全精度，CI 第九轮实测差 1.45e-6，
-                # spec §9 风险表预告的 Decimal 精度差异）
-                assert vm == pytest.approx(vd, rel=1e-5, abs=1e-9), f"数值漂移: {vd!r} vs {vm!r}"
+                # 容差口径（spec §9 Decimal 精度差异）：MySQL DECIMAL 除法按
+                # div_precision_increment=4 增量 scale（结果 6 位小数）精确
+                # 十进制舍入，DuckDB 走 float 全精度——舍入差为**绝对量级**
+                # （<=5e-7，小值增长率上相对差可达 3e-5），故 abs 兜底小值、
+                # rel 覆盖大值（CI 九/十轮实测校准）
+                assert vm == pytest.approx(vd, rel=1e-5, abs=1e-6), (
+                    f"数值漂移: {vd!r} vs {vm!r}"
+                )
             else:
                 assert vm == vd, f"值不一致: {vd!r} vs {vm!r}"
 
@@ -125,8 +129,15 @@ def test_golden_dsls_parity(conn, mysql_conn):
     golden = json.loads(
         (Path(__file__).parents[1] / "eval" / "golden_dataset.json").read_text(encoding="utf-8")
     )
-    for item in golden:
-        results = _run_dsl(item["dsl"], conn, mysql_conn)
+    # 单轮条目带顶层 dsl；多轮条目（M 系列）为 turns[] 嵌套——两层都覆盖
+    dsls = [
+        item["dsl"] for item in golden if "dsl" in item
+    ] + [
+        turn["dsl"] for item in golden for turn in item.get("turns", []) if "dsl" in turn
+    ]
+    assert dsls, "golden_dataset 未解析出任何 DSL"
+    for dsl in dsls:
+        results = _run_dsl(dsl, conn, mysql_conn)
         _assert_rows_equal(results["duckdb"].rows, results["mysql"].rows)
 
 
