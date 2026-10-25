@@ -464,3 +464,116 @@ def test_builtin_catalog_missing_section_fails_fast(tmp_path):
 
     with _pytest.raises(RuntimeError, match="缺少必要节"):
         _catalog._load_builtin(bad)
+
+
+# --------------------------------------------------------------------------- #
+# MySQL 物理面兼容（二十一期 spec：类型映射 / schema 过滤 / 标识符方言化）
+# --------------------------------------------------------------------------- #
+
+
+class TestMapDtypeMysql:
+    @pytest.mark.parametrize(
+        "mysql_type,expected",
+        [
+            ("int", "int"),
+            ("bigint", "int"),
+            ("smallint", "int"),
+            ("tinyint", "int"),
+            ("mediumint", "int"),
+            ("decimal", "float"),
+            ("numeric", "float"),
+            ("double", "float"),
+            ("float", "float"),
+            ("datetime", "timestamp"),
+            ("timestamp", "timestamp"),
+            ("date", "timestamp"),
+            ("varchar", "str"),
+            ("char", "str"),
+            ("text", "str"),
+            ("longtext", "str"),
+        ],
+    )
+    def test_mysql_types(self, mysql_type, expected):
+        from semantic.catalog_loader import _map_dtype
+
+        assert _map_dtype(mysql_type) == expected
+
+    def test_mysql_decimal_with_precision(self):
+        from semantic.catalog_loader import _map_dtype
+
+        assert _map_dtype("decimal(16,2)") == "float"
+
+
+def test_physical_columns_filters_schema(monkeypatch):
+    """MySQL information_schema 含全部库——必须按当前库过滤（spec §9 隐患）。"""
+    from semantic import catalog_loader
+
+    captured: dict[str, object] = {}
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    class _Conn:  # pymysql 形态：无 execute、走 cursor
+        def cursor(self):
+            return _Cur()
+
+    catalog_loader._physical_columns(_Conn(), schema="gmall")
+    assert "table_schema" in str(captured["sql"])
+    assert "gmall" in (captured["params"] or ())
+
+
+def test_physical_columns_duckdb_keeps_legacy_path():
+    """DuckDB 路径（schema=None）保持无过滤现状（回归保护）。"""
+    from semantic import catalog_loader
+
+    captured: dict[str, object] = {}
+
+    class _Cur:
+        def fetchall(self):
+            return [("order_detail", "order_id", "BIGINT")]
+
+    class _Conn:  # duckdb 形态：有 execute（执行即记录）
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            return _Cur()
+
+    out = catalog_loader._physical_columns(_Conn())
+    assert "table_schema" not in str(captured["sql"])
+    assert out == {"order_detail": {"order_id": "int"}}
+
+
+def test_dimension_members_mysql_quoted_identifiers(monkeypatch):
+    """维度成员 distinct 查询的标识符按方言渲染（mysql 反引号防字符串语义）。"""
+    import config.settings as settings
+
+    monkeypatch.setattr(settings, "SQL_DIALECT", "mysql")
+    from semantic import catalog_loader
+    from semantic.catalog import FieldMeta
+
+    captured: dict[str, object] = {}
+
+    class _Cur:
+        def fetchall(self):
+            return [("广东",), ("浙江",)]
+
+    class _Conn:  # duckdb 形态连接（execute 即执行）
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            return _Cur()
+
+    columns = {"province": FieldMeta(table="base_province", column="province_name", dtype="str")}
+    members = catalog_loader._load_dimension_members(_Conn(), columns, ("province",))
+    assert members["province"] == ("广东", "浙江")
+    assert "`province_name`" in str(captured["sql"]) and "`base_province`" in str(captured["sql"])
+    assert '"' not in str(captured["sql"])

@@ -39,48 +39,26 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import duckdb
 import sqlglot
 from sqlglot import exp
 
 from audit.logging import get_logger
 from config import settings
+from exec.engine.base import EngineAdapter
+from exec.engine.plan_text import parse_scan_rows, plan_rows_measurable
+from exec.errors import (
+    MaxRowsScannedExceeded,
+    QueryTimeoutError,
+    ResultLimitExceeded,
+    SqlExecutionError,
+    UnsafeSqlError,
+)
 
 logger = get_logger("exec.guards")
 
 # --------------------------------------------------------------------------- #
-# 异常体系
+# 异常体系（二十一期迁至 exec.errors；本模块 re-export 保旧 import 路径）
 # --------------------------------------------------------------------------- #
-
-
-class SqlExecutionError(RuntimeError):
-    """SQL 执行失败（可自愈：精确报错可喂回 LLM 重写 DSL 后重试）。"""
-
-    code = "sql_execution_error"
-
-
-class QueryTimeoutError(SqlExecutionError):
-    """查询超过 statement_timeout，已被中断取消。"""
-
-    code = "query_timeout"
-
-
-class MaxRowsScannedExceeded(SqlExecutionError):
-    """任一基表扫描行数超过上限，熔断拒绝执行。"""
-
-    code = "max_rows_scanned_exceeded"
-
-
-class ResultLimitExceeded(SqlExecutionError):
-    """返回行数超过 LIMIT 硬上限，熔断拒绝放行结果。"""
-
-    code = "result_limit_exceeded"
-
-
-class UnsafeSqlError(RuntimeError):
-    """SQL 未通过只读语句白名单，拒绝执行且不进入自愈。"""
-
-    code = "unsafe_sql"
 
 
 # 语句级黑名单：DDL/DML/外部资源语句。
@@ -153,6 +131,59 @@ _FORBIDDEN_FUNCTION_RE = re.compile(
 # DuckDB 字符串字面量表引用（FROM '<path>'）：等价直接读取本地文件，拒绝。
 _FROM_STRING_TABLE_RE = re.compile(r"""\bFROM\s*['"]""", re.IGNORECASE)
 
+# --------------------------------------------------------------------------- #
+# 方言增量黑名单（二十一期 spec D11）：通用黑名单之外按引擎追加
+# --------------------------------------------------------------------------- #
+# MySQL 语句族：USE 切库 / SHOW 元数据 / KILL 连接 / PREPARE 家族二次注入 /
+# LOAD 数据导入 / 事务与锁语句族 / 管理语句（FLUSH/OPTIMIZE/RENAME/TRUNCATE/
+# GRANT/REVOKE/HANDLER/DO/SHUTDOWN/PURGE/HELP）；OUTFILE/DUMPFILE 为
+# SELECT ... INTO OUTFILE 写服务器文件的目标子句（AST Into 节点另有拦截）
+_DIALECT_EXTRA_KEYWORDS: dict[str, frozenset[str]] = {
+    "mysql": frozenset(
+        {
+            "USE",
+            "SHOW",
+            "KILL",
+            "PREPARE",
+            "EXECUTE",
+            "DEALLOCATE",
+            "LOAD",
+            "START",
+            "XA",
+            "FLUSH",
+            "ANALYZE",
+            "OPTIMIZE",
+            "RENAME",
+            "TRUNCATE",
+            "GRANT",
+            "REVOKE",
+            "HANDLER",
+            "DO",
+            "SHUTDOWN",
+            "PURGE",
+            "HELP",
+            "OUTFILE",
+            "DUMPFILE",
+        }
+    ),
+}
+# MySQL 函数族：load_file 读服务器文件 / sleep、benchmark DoS / 锁滥用族
+_DIALECT_EXTRA_FUNC_RE: dict[str, re.Pattern[str]] = {
+    "mysql": re.compile(
+        r"\b(?:load_file|sleep|benchmark|get_lock|release_lock|is_used_lock|is_free_lock)\s*\(",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _resolve_dialect(dialect: str | None) -> str:
+    """解析执行方言：显式传入优先，缺省取当前后端 adapter 的方言。"""
+    if dialect is not None:
+        return dialect
+    from exec.engine import get_adapter  # 惰性导入：engine 顶层不反向依赖 guards
+
+    return get_adapter().dialect
+
 
 def _strip_sql_comments(sql: str) -> str:
     """移除 SQL 注释，同时保留字符串内容，避免误判字面量。"""
@@ -209,18 +240,20 @@ def _func_name(node: exp.Func) -> str | None:
     return name.lower() if name else None
 
 
-def _assert_read_only_structure(sql: str) -> None:
+def _assert_read_only_structure(sql: str, dialect: str = "duckdb") -> None:
     """sqlglot AST 结构化只读校验（P0-1 主防线，取代纯正则黑名单）。
 
-    四个条件（全部 fail-closed）：
+    五个条件（全部 fail-closed）：
     1. 恰好解析为一条语句；
     2. 根节点必须是 SELECT / UNION（WITH 是 Select 的属性，自然覆盖）；
     3. 全树不允许出现被禁函数（read_*/parquet_*/sqlite_*/*_scan/*_query 等家族）；
     4. 全树不允许引号/字符串字面量表引用（FROM '<path>' / FROM "path"）与
-       SELECT INTO 写表语句。
+       SELECT INTO 写表语句；
+    5. MySQL 方言额外拒绝锁语句节点（FOR UPDATE / LOCK IN SHARE MODE——
+       读锁同样占用锁资源且形态非纯只读）。
     """
     try:
-        statements = sqlglot.parse(sql, read="duckdb")
+        statements = sqlglot.parse(sql, read=dialect)
     except sqlglot.errors.ParseError as exc:
         raise UnsafeSqlError(f"SQL 解析失败，拒绝执行: {exc}") from exc
     if len(statements) != 1:
@@ -231,6 +264,8 @@ def _assert_read_only_structure(sql: str) -> None:
     for node in root.walk():
         if isinstance(node, exp.Into):
             raise UnsafeSqlError("拒绝 SELECT INTO 写表语句")
+        if dialect == "mysql" and isinstance(node, exp.Lock):
+            raise UnsafeSqlError("拒绝 SELECT ... FOR UPDATE / LOCK IN SHARE MODE 锁语句")
         if isinstance(node, exp.Func):
             name = _func_name(node)
             if name and _FORBIDDEN_FUNCTION_RE.fullmatch(name):
@@ -243,18 +278,24 @@ def _assert_read_only_structure(sql: str) -> None:
                 raise UnsafeSqlError(f"拒绝字符串/引号字面量表引用: {node.sql()}")
 
 
-def assert_read_only_sql(sql: str) -> None:
-    """硬断言 SQL 是单条只读 SELECT/WITH（P0-1 加固）。
+def assert_read_only_sql(sql: str, dialect: str | None = None) -> None:
+    """硬断言 SQL 是单条只读 SELECT/WITH（P0-1 加固；方言感知，spec D11）。
+
+    参数 dialect 缺省取当前后端 adapter 的方言（测试可显式指定）。
 
     四层防线（全部 fail-closed）：
     1. 语句形态：仅 SELECT/WITH 开头、无分号堆叠；
-    2. 语句级黑名单：DDL/DML/COPY/EXPORT/IMPORT/INSTALL/LOAD 等外部资源语句；
+    2. 语句级黑名单：DDL/DML/COPY/EXPORT/IMPORT/INSTALL/LOAD 等外部资源语句
+       （叠加方言增量：MySQL 的 USE/SHOW/KILL/PREPARE/OUTFILE 等）；
     3. 函数调用级黑名单：read_* / *_scan / *_query / parquet_* / glob / query 等
        可读取任意本地文件或外部数据源的表函数（渗透测试已实锤 read_csv 可外泄文件），
        以及 FROM '<path>' 字符串字面量表引用（DuckDB 等价直接读文件）；
-    4. sqlglot AST 结构性校验：根节点必须为 SELECT，全树拒绝被禁函数家族、
-       引号字符串表引用与 SELECT INTO（取代纯正则黑名单，杜绝引号/别名/嵌套绕过）。
+       MySQL 增量 load_file/sleep/benchmark/锁族；
+    4. sqlglot AST 结构性校验（按方言解析）：根节点必须为 SELECT，全树拒绝
+       被禁函数家族、引号字符串表引用、SELECT INTO 与（MySQL）锁语句
+       （取代纯正则黑名单，杜绝引号/别名/嵌套绕过）。
     """
+    dialect = _resolve_dialect(dialect)
     code = _sql_code_without_literals(_strip_sql_comments(sql))
     tokens = code.strip().split()
     if not tokens or tokens[0].upper() not in {"SELECT", "WITH"}:
@@ -262,16 +303,19 @@ def assert_read_only_sql(sql: str) -> None:
     if ";" in code:
         raise UnsafeSqlError("拒绝执行多语句 SQL")
     upper = code.upper()
-    for keyword in _FORBIDDEN_SQL_KEYWORDS:
+    for keyword in _FORBIDDEN_SQL_KEYWORDS | _DIALECT_EXTRA_KEYWORDS.get(dialect, frozenset()):
         if re.search(rf"\b{keyword}\b", upper):
             raise UnsafeSqlError(f"检测到被禁止的 SQL 关键字: {keyword}")
-    if _FORBIDDEN_FUNCTION_CALL_RE.search(code):
+    extra_func = _DIALECT_EXTRA_FUNC_RE.get(dialect)
+    if _FORBIDDEN_FUNCTION_CALL_RE.search(code) or (
+        extra_func is not None and extra_func.search(code)
+    ):
         raise UnsafeSqlError(
             "检测到被禁止的表函数调用（read_*/ *_scan/glob/query 可读取外部文件，已拒绝）"
         )
     if _FROM_STRING_TABLE_RE.search(_strip_sql_comments(sql)):
         raise UnsafeSqlError("拒绝字符串字面量表引用（FROM '<path>' 等价直接读取本地文件）")
-    _assert_read_only_structure(sql)
+    _assert_read_only_structure(sql, dialect=dialect)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,36 +336,8 @@ class ExecutionResult:
 
 
 # --------------------------------------------------------------------------- #
-# EXPLAIN ANALYZE 解析
+# DuckDB 计划文本解析（二十一期迁至 exec.engine.plan_text；本模块 re-export）
 # --------------------------------------------------------------------------- #
-
-# TABLE_SCAN 算子块：每个物理算子块末尾都含一行形如 "        100,000 rows" 的
-# 行数记录。取所有算子行数的最大值作为"扫描行数"预算口径。
-_ROWS_LINE_RE = re.compile(r"(\d[\d,]*)\s+rows", re.MULTILINE)
-
-
-def parse_scan_rows(plan_text: str) -> int:
-    """从 EXPLAIN ANALYZE / profiling 文本中解析最大单算子处理行数。
-
-    DuckDB 的算子块以 box-drawing 字符包围，行形如 "│ 100,000 rows │"，
-    因此用非锚定匹配提取所有 "N rows"，取最大值作为"扫描行数"预算口径
-    （对多表/CTE 查询即各基表扫描的最大值）。解析失败（无行数记录）返回 0。
-    """
-    counts: list[int] = []
-    for match in _ROWS_LINE_RE.finditer(plan_text):
-        counts.append(int(match.group(1).replace(",", "")))
-    return max(counts) if counts else 0
-
-
-def plan_rows_measurable(plan_text: str) -> bool:
-    """计划文本是否含可解析的算子行数记录（护栏可计量性探针）。
-
-    与 ``parse_scan_rows`` 返回 0 的两种情形区分开：
-    - 真·零扫描（如 ``SELECT 1`` 的 Dummy Scan）→ 返回 True（含 "0 rows"）；
-    - 计划格式变更导致完全无行数渲染（DuckDB 2.0 元数据快路径）→ 返回 False，
-      调用方应记 warning 留痕，不得把"测不到"静默当成"扫了 0 行"。
-    """
-    return _ROWS_LINE_RE.search(plan_text) is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -366,52 +382,9 @@ def cache_scan_rows(sql: str, scan_rows: int, cache: dict[str, int] | None = Non
 
 
 # --------------------------------------------------------------------------- #
-# 超时看门狗
+# 超时看门狗（二十一期下沉至 exec.engine.watchdog，线程框架引擎无关；
+# 取消手段由 adapter.cancel 承载——DuckDB interrupt / MySQL 服务端自限）
 # --------------------------------------------------------------------------- #
-
-
-def _run_with_timeout(
-    conn: duckdb.DuckDBPyConnection,
-    sql: str,
-    timeout_ms: int | None,
-) -> tuple[list[str], list[list[Any]]]:
-    """在工作线程中执行查询并取回结果；超时则 interrupt() 取消。
-
-    返回 (columns, rows)。连接在中断后可继续复用（DuckDB 保证）。
-    """
-    if timeout_ms is None:
-        cur = conn.execute(sql)
-        columns = tuple(d[0] for d in cur.description)
-        rows = [list(row) for row in cur.fetchall()]
-        return list(columns), rows
-
-    outcome: dict[str, Any] = {}
-
-    def _worker() -> None:
-        try:
-            cur = conn.execute(sql)
-            outcome["columns"] = tuple(d[0] for d in cur.description)
-            outcome["rows"] = [list(row) for row in cur.fetchall()]
-        except BaseException as exc:  # 线程内任意异常均须回传
-            outcome["exc"] = exc
-
-    worker = threading.Thread(target=_worker, daemon=True)
-    worker.start()
-    worker.join(timeout_ms / 1000.0)
-
-    if worker.is_alive():
-        # 超时：强制中断，等待线程真正退出
-        try:
-            conn.interrupt()
-        except Exception:  # interrupt 失败也须继续走超时分支
-            pass
-        worker.join(2.0)
-        logger.error("查询超时被强制取消", extra={"error": f"timeout_ms={timeout_ms}"})
-        raise QueryTimeoutError(f"查询超时（>{timeout_ms}ms），已强制取消")
-
-    if "exc" in outcome:
-        raise outcome["exc"]
-    return list(outcome["columns"]), outcome["rows"]
 
 
 # --------------------------------------------------------------------------- #
@@ -420,25 +393,33 @@ def _run_with_timeout(
 
 
 def execute_sql(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Any,
     sql: str,
     *,
     statement_timeout_ms: int | None = None,
     max_scan_rows: int | None = None,
     max_result_rows: int | None = None,
+    adapter: EngineAdapter | None = None,
 ) -> ExecutionResult:
-    """带资源护栏执行一条只读 SELECT。
+    """带资源护栏执行一条只读 SELECT（引擎无关，差异由 adapter 承载）。
 
     参数（None 表示不启用该护栏）：
     - statement_timeout_ms：语句超时（毫秒），超时中断并抛 QueryTimeoutError；
     - max_scan_rows：扫描行数上限，预检超过即抛 MaxRowsScannedExceeded；
-    - max_result_rows：返回行数硬上限，超过即抛 ResultLimitExceeded。
+    - max_result_rows：返回行数硬上限，超过即抛 ResultLimitExceeded；
+    - adapter：执行引擎适配器；None 时按 settings.DB_BACKEND 现取。
 
     执行前审计（GuardrailAgent）：只读断言后追加笛卡尔积 / 无界输出静态审计，
     REJECTED 级发现抛 GuardrailRejected（不执行），WARNING 级随结果输出。
     """
+    from exec.engine.watchdog import run_with_timeout  # 惰性导入防循环（同 audit 先例）
+
+    if adapter is None:
+        from exec.engine import get_adapter  # 惰性导入：engine 顶层不反向依赖 guards
+
+        adapter = get_adapter()
     try:
-        assert_read_only_sql(sql)
+        assert_read_only_sql(sql, dialect=adapter.dialect)
     except UnsafeSqlError:
         # 高危拦截（P0 防线）：必须留痕供安全审计，不改变异常传播
         logger.exception("只读白名单拦截非只读/高危 SQL")
@@ -448,41 +429,40 @@ def execute_sql(
     from exec.audit import GuardrailRejected, assert_guardrails
 
     try:
-        guard_warnings = [f.to_dict() for f in assert_guardrails(sql)]
+        guard_warnings = [f.to_dict() for f in assert_guardrails(sql, dialect=adapter.dialect)]
     except GuardrailRejected as exc:
         logger.error("执行前审计拒绝（笛卡尔积/只读结构违规）", extra={"error": str(exc)[:500]})
         raise
     started = time.perf_counter()
     scan_rows = 0
 
-    # 1) 扫描行预算预检（EXPLAIN ANALYZE 在超时看门狗内运行）
+    # 1) 扫描行预算预检（EXPLAIN ANALYZE 在超时看门狗内运行；解析口径由 adapter 决定）
     #    整改指令3-3：同一 SQL（自愈重试同编译产物）命中缓存则跳过重复预检降本
     if max_scan_rows is not None:
         scanned = cached_scan_rows(sql)
         if scanned is None:
-            plan_sql = "EXPLAIN ANALYZE " + sql
             try:
-                _, plan_rows = _run_with_timeout(conn, plan_sql, statement_timeout_ms)
+                scanned, measurable = adapter.explain_scan_rows(conn, sql, statement_timeout_ms)
             except QueryTimeoutError:
                 raise
-            except duckdb.Error as exc:
+            except Exception as exc:
                 # 预检阶段暴露的引擎错误同样视为执行失败（可自愈）
-                raise SqlExecutionError(f"{type(exc).__name__}: {exc}") from exc
-            plan_text = (
-                str(plan_rows[0][1])
-                if plan_rows and len(plan_rows[0]) > 1
-                else (str(plan_rows[0][0]) if plan_rows else "")
-            )
-            scanned = parse_scan_rows(plan_text)
-            if plan_rows_measurable(plan_text):
+                norm = adapter.engine_error(exc)
+                if norm is not None:
+                    raise norm from exc
+                raise
+            if measurable:
                 cache_scan_rows(sql, scanned)
             else:
-                # 计划不含任何算子行数：护栏本轮不可计量（DuckDB 版本/计划格式变更）。
+                # 计划不含任何算子行数：护栏本轮不可计量（引擎版本/计划格式变更）。
                 # 不缓存——避免把"测不到"固化成"扫了 0 行"的假事实，也不静默放行。
                 logger.warning(
                     "扫描行数预检不可计量：执行计划未包含算子行数，本轮跳过扫描行熔断",
                     extra={
-                        "error": "plan 无 'N rows' 渲染，请核验 DuckDB 版本（requirements.txt 锁定 <2.0）"
+                        "error": (
+                            f"plan 无 'N rows' 渲染，请核验 {adapter.name} 版本与计划格式"
+                            "（duckdb 侧 requirements.txt 锁定 <2.0）"
+                        )
                     },
                 )
         scan_rows = scanned
@@ -495,17 +475,20 @@ def execute_sql(
                 f"扫描行数上限熔断：本次查询扫描 {scanned} 行，超过上限 {max_scan_rows}"
             )
 
-    # 2) 真实执行（同样受超时护栏保护）；引擎报错统一包装为 SqlExecutionError（可自愈）
+    # 2) 真实执行（同样受超时护栏保护）；引擎报错统一归一为 SqlExecutionError（可自愈）
     try:
-        columns, rows = _run_with_timeout(conn, sql, statement_timeout_ms)
+        columns, rows = run_with_timeout(adapter, conn, sql, statement_timeout_ms)
     except QueryTimeoutError:
         raise
-    except duckdb.Error as exc:
+    except Exception as exc:
+        norm = adapter.engine_error(exc)
+        if norm is None:
+            raise
         logger.warning(
             "SQL 执行引擎报错（可自愈）",
-            extra={"error": f"{type(exc).__name__}: {exc}"[:500]},
+            extra={"error": str(norm)[:500]},
         )
-        raise SqlExecutionError(f"{type(exc).__name__}: {exc}") from exc
+        raise norm from exc
 
     # 3) 返回行数硬上限
     if max_result_rows is not None and len(rows) > max_result_rows:
@@ -525,3 +508,17 @@ def execute_sql(
         duration_ms=duration_ms,
         findings=guard_warnings,
     )
+
+
+__all__ = [
+    "ExecutionResult",
+    "MaxRowsScannedExceeded",
+    "QueryTimeoutError",
+    "ResultLimitExceeded",
+    "SqlExecutionError",
+    "UnsafeSqlError",
+    "assert_read_only_sql",
+    "execute_sql",
+    "parse_scan_rows",
+    "plan_rows_measurable",
+]

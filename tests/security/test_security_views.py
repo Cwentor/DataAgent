@@ -11,9 +11,9 @@ import duckdb
 import pytest
 
 from compiler.sql_compiler import compile_sql
+from exec.engine.duckdb_adapter import DuckDbAdapter
 from security.guard import apply_policy
 from security.policy import PRINCIPAL_ATTRS
-from security.views import install_secure_views
 from semantic.catalog import COLUMNS
 from semantic.dsl_schema import QueryDSL
 
@@ -29,7 +29,7 @@ def _make_conn():
 
 def test_restricted_views_exclude_forbidden_columns_physically(conn):
     """禁列物理不存在于视图（非查询时拦截）。"""
-    install_secure_views(conn, "restricted")
+    DuckDbAdapter().install_secure_views(conn, "restricted")
     cols = {row[0] for row in conn.execute("DESCRIBE sec_order_detail").fetchall()}
     assert "split_coupon_amount" not in cols
     assert "refund_amount" not in cols
@@ -42,7 +42,7 @@ def test_restricted_view_enforces_row_filter(conn):
     数据 pin 清理（M-P0）：期望集由 PRINCIPAL_ATTRS ∩ 库内省份动态计算，
     防主体属性或数仓成员变更导致夹具漂移。
     """
-    install_secure_views(conn, "restricted")
+    DuckDbAdapter().install_secure_views(conn, "restricted")
     rows = conn.execute("SELECT DISTINCT province FROM sec_order_detail").fetchall()
     db_provinces = {
         r[0] for r in conn.execute("SELECT DISTINCT province_name FROM base_province").fetchall()
@@ -53,14 +53,14 @@ def test_restricted_view_enforces_row_filter(conn):
 
 def test_out_of_scope_table_has_no_view(conn):
     """越权表不生成视图——引用即报错（表不存在）。"""
-    install_secure_views(conn, "restricted")
+    DuckDbAdapter().install_secure_views(conn, "restricted")
     with pytest.raises(duckdb.Error):
         conn.execute("SELECT COUNT(*) FROM sec_order_refund_info").fetchone()
 
 
 def test_admin_views_full_columns_no_row_filter(conn):
     """admin 视图全列、无行过滤（对照基线）。"""
-    install_secure_views(conn, "admin")
+    DuckDbAdapter().install_secure_views(conn, "admin")
     cols = {row[0] for row in conn.execute("DESCRIBE sec_order_detail").fetchall()}
     expected = {m.column for m in COLUMNS.values() if m.table == "order_detail"}
     assert expected <= cols
@@ -72,7 +72,7 @@ def test_admin_views_full_columns_no_row_filter(conn):
 
 def test_view_semantics_match_guard_rls(conn):
     """双保险交叉验证：restricted 视图聚合 == guard 注入 RLS 后编译查询。"""
-    install_secure_views(conn, "restricted")
+    DuckDbAdapter().install_secure_views(conn, "restricted")
     view_rows = conn.execute(
         "SELECT province, SUM(split_total_amount) FROM sec_order_detail GROUP BY province ORDER BY 1"
     ).fetchall()
@@ -104,9 +104,9 @@ def test_view_semantics_match_guard_rls(conn):
 # --------------------------------------------------------------------------- #
 def test_harden_connection_blocks_external_access(conn):
     """加固后 ATTACH / COPY TO / read_csv 必须被 DuckDB 拒绝（连接层实测）。"""
-    from security.views import harden_connection
+    from exec.engine.duckdb_adapter import DuckDbAdapter
 
-    harden_connection(conn)
+    DuckDbAdapter().harden(conn)
     with pytest.raises(duckdb.Error):
         conn.execute("ATTACH 'evil_external.duckdb' AS evil")
     with pytest.raises(duckdb.Error):
@@ -117,7 +117,54 @@ def test_harden_connection_blocks_external_access(conn):
 
 def test_harden_connection_idempotent(conn):
     """重复加固幂等（lock_configuration 后重复 SET 不抛错）。"""
-    from security.views import harden_connection
+    from exec.engine.duckdb_adapter import DuckDbAdapter
 
-    harden_connection(conn)
-    harden_connection(conn)
+    DuckDbAdapter().harden(conn)
+    DuckDbAdapter().harden(conn)
+
+
+# --------------------------------------------------------------------------- #
+# 安全面方言化（二十一期 spec D9）：投影纯函数 + MySQL 派生表形态
+# --------------------------------------------------------------------------- #
+def test_build_secure_projection_mysql_dialect():
+    """MySQL 方言投影：反引号 + RLS 固化 + 禁列物理缺席。"""
+    import sqlglot
+
+    from compiler.dialect.mysql import MySqlRenderer
+    from security.policy import POLICIES
+    from security.views import build_secure_projection
+
+    proj = build_secure_projection("order_detail", POLICIES["analyst"], MySqlRenderer())
+    assert proj is not None
+    body = "SELECT " + ", ".join(proj.select_list) + f" FROM {proj.from_sql}"
+    if proj.where_sql:
+        body += f" WHERE {proj.where_sql}"
+    assert "`f`.`order_time`" in body  # 反引号限定列
+    sqlglot.parse_one(body, read="mysql")  # 投影体语法合法
+
+
+def test_build_secure_projection_duckdb_matches_view_ddl():
+    """DuckDB 投影与视图 DDL 单一来源：DDL 体即投影拼接。"""
+    from compiler.dialect.duckdb import DuckDbRenderer
+    from security.policy import POLICIES
+    from security.views import VIEW_PREFIX, build_secure_projection, build_secure_views
+
+    policy = POLICIES["restricted"]
+    proj = build_secure_projection("order_detail", policy, DuckDbRenderer())
+    ddl = build_secure_views("restricted")[f"{VIEW_PREFIX}order_detail"]
+    assert f"SELECT {', '.join(proj.select_list)} FROM {proj.from_sql}" in ddl
+
+
+def test_build_secure_projection_forbidden_absent_both_dialects():
+    """禁列在两种方言投影中均物理缺席（双保险同一实现）。"""
+    from compiler.dialect.duckdb import DuckDbRenderer
+    from compiler.dialect.mysql import MySqlRenderer
+    from security.policy import POLICIES
+    from security.views import build_secure_projection
+
+    policy = POLICIES["restricted"]
+    for renderer in (DuckDbRenderer(), MySqlRenderer()):
+        proj = build_secure_projection("order_detail", policy, renderer)
+        joined = " ".join(proj.select_list)
+        assert "split_coupon_amount" not in joined
+        assert "refund_amount" not in joined

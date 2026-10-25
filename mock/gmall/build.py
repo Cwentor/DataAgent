@@ -17,8 +17,8 @@ import random
 import re
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
-import duckdb
 import pandas as pd
 
 from config import settings
@@ -29,20 +29,26 @@ from mock.gmall.simulate import SEED_COLUMNS, SeedCatalog, SessionSimulator, War
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
 
-def _bulk_insert(conn: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) -> None:
-    """pandas DataFrame 批量插入（executemany 在十万行级耗时分钟级，不可用）。
+def _bulk_insert(conn: Any, table: str, rows: list[tuple], adapter) -> None:
+    """批量插入（入库通道按引擎分发，二十一期 spec D12）。
 
+    DuckDB：pandas scan 快路径（executemany 在十万行级耗时分钟级，不可用）；
     含 NULL 的整数列需转为 pandas 可空 Int64，否则 object 列无法对齐
     DuckDB 的 INTEGER 类型；None 在 VARCHAR / TIMESTAMP 列由 DuckDB 落为 NULL。
+    MySQL：adapter.insert_dataframe（pymysql executemany 自动重组 multi-values，
+    分批 5000 行，NaN/pd.NA 统一转 None）。
     """
     if not rows:
         return
     df = pd.DataFrame(rows)
-    for idx in df.columns:
-        col = df[idx]
-        if col.dtype == object and col.map(lambda v: v is None or isinstance(v, int)).all():
-            df[idx] = col.astype("Int64")
-    conn.execute(f"INSERT INTO {table} SELECT * FROM df")
+    if adapter.name == "duckdb":
+        for idx in df.columns:
+            col = df[idx]
+            if col.dtype == object and col.map(lambda v: v is None or isinstance(v, int)).all():
+                df[idx] = col.astype("Int64")
+        conn.execute(f"INSERT INTO {table} SELECT * FROM df")
+    else:
+        adapter.insert_dataframe(conn, table, df)
 
 
 def _load_seed_rows() -> dict[str, list[list]]:
@@ -52,7 +58,7 @@ def _load_seed_rows() -> dict[str, list[list]]:
 
 
 def _convert_seed_value(column: str, value) -> object:
-    """种子行字面值 -> DuckDB 值：时间字符串转 datetime，*_id 数值串转 int。"""
+    """种子行字面值 -> 引擎值：时间字符串转 datetime，*_id 数值串转 int。"""
     if isinstance(value, str):
         if _TS_RE.match(value):
             return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
@@ -61,17 +67,23 @@ def _convert_seed_value(column: str, value) -> object:
     return value
 
 
-def _insert_seed(conn: duckdb.DuckDBPyConnection, seed_rows: dict[str, list[list]]) -> None:
+def _insert_seed(conn: Any, seed_rows: dict[str, list[list]], adapter) -> None:
+    # 占位符与执行通道随引擎：duckdb `?` + conn.executemany；
+    # pymysql `%s` 且 Connection 无 executemany（Cursor 才有，CI 实锤）。
+    ph = "?" if adapter.name == "duckdb" else "%s"
     for table, rows in seed_rows.items():
         cols = SEED_COLUMNS[table]
-        placeholders = ", ".join(["?"] * len(cols))
+        placeholders = ", ".join([ph] * len(cols))
         converted = [
             tuple(_convert_seed_value(c, v) for c, v in zip(cols, row, strict=False))
             for row in rows
         ]
-        conn.executemany(
-            f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})", converted
-        )
+        sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"
+        if adapter.name == "duckdb":
+            conn.executemany(sql, converted)
+        else:
+            with conn.cursor() as cur:
+                cur.executemany(sql, converted)
 
 
 def _build_users(rng: random.Random, asof: date) -> list[dict]:
@@ -307,12 +319,22 @@ def _status_log_rows(state: WarehouseState) -> list[tuple]:
 
 
 def build_gmall_tables(
-    conn: duckdb.DuckDBPyConnection,
+    conn: Any,
     seed: int = 42,
     applog_dir: Path | None = None,
     write_applog: bool = True,
+    adapter=None,
 ) -> dict[str, int]:
-    """在给定连接上全量构建 Gmall 测试数仓，返回各表行数。"""
+    """在给定连接上全量构建 Gmall 测试数仓，返回各表行数。
+
+    adapter 缺省按 settings.DB_BACKEND 现取（二十一期引擎化）：DuckDB 走
+    schema.py DDL + pandas scan 灌数；MySQL 走 schema_mysql 转译 DDL +
+    executemany 灌数。数据序列两引擎逐行同源（确定性三原则不变）。
+    """
+    from exec.engine import get_adapter  # 惰性导入：建仓链路晚绑定引擎
+
+    if adapter is None:
+        adapter = get_adapter()
     rng = random.Random(seed)
     asof = settings.AS_OF_DATE
     start_day = config.DOMAIN_START
@@ -320,9 +342,14 @@ def build_gmall_tables(
     day_start = datetime.combine(start_day, time(0, 0, 0))
     day_end = datetime.combine(asof, time(23, 59, 59))
 
-    schema.create_tables(conn)
+    if adapter.name == "duckdb":
+        schema.create_tables(conn)
+    else:
+        from mock.gmall.schema_mysql import create_mysql_tables
+
+        create_mysql_tables(conn)
     seed_rows = _load_seed_rows()
-    _insert_seed(conn, seed_rows)
+    _insert_seed(conn, seed_rows, adapter)
 
     catalog = SeedCatalog(seed_rows)
     state = WarehouseState()
@@ -350,26 +377,26 @@ def build_gmall_tables(
     # 埋点日志解析入仓（真实读取 JSONL，走解析链路）
     if write_applog:
         starts, views, actions, displays = parser.parse_applog_dir(applog_dir)
-        _bulk_insert(conn, "fact_start", starts)
-        _bulk_insert(conn, "fact_page_view", views)
-        _bulk_insert(conn, "fact_action", actions)
-        _bulk_insert(conn, "fact_display", displays)
+        _bulk_insert(conn, "fact_start", starts, adapter)
+        _bulk_insert(conn, "fact_page_view", views, adapter)
+        _bulk_insert(conn, "fact_action", actions, adapter)
+        _bulk_insert(conn, "fact_display", displays, adapter)
 
     # 业务行入仓
-    _bulk_insert(conn, "user_info", _user_rows(users))
-    _bulk_insert(conn, "cart_info", _cart_rows(state))
-    _bulk_insert(conn, "favor_info", _favor_rows(state))
-    _bulk_insert(conn, "coupon_use", _coupon_use_rows(state))
-    _bulk_insert(conn, "order_info", _order_rows(state))
-    _bulk_insert(conn, "order_detail", _order_detail_rows(state))
-    _bulk_insert(conn, "payment_info", _payment_rows(state))
-    _bulk_insert(conn, "order_refund_info", _refund_rows(state))
-    _bulk_insert(conn, "refund_payment", _refund_payment_rows(state))
-    _bulk_insert(conn, "comment_info", _comment_rows(state))
-    _bulk_insert(conn, "order_status_log", _status_log_rows(state))
+    _bulk_insert(conn, "user_info", _user_rows(users), adapter)
+    _bulk_insert(conn, "cart_info", _cart_rows(state), adapter)
+    _bulk_insert(conn, "favor_info", _favor_rows(state), adapter)
+    _bulk_insert(conn, "coupon_use", _coupon_use_rows(state), adapter)
+    _bulk_insert(conn, "order_info", _order_rows(state), adapter)
+    _bulk_insert(conn, "order_detail", _order_detail_rows(state), adapter)
+    _bulk_insert(conn, "payment_info", _payment_rows(state), adapter)
+    _bulk_insert(conn, "order_refund_info", _refund_rows(state), adapter)
+    _bulk_insert(conn, "refund_payment", _refund_payment_rows(state), adapter)
+    _bulk_insert(conn, "comment_info", _comment_rows(state), adapter)
+    _bulk_insert(conn, "order_status_log", _status_log_rows(state), adapter)
 
     return {
-        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        table: adapter.run_query(conn, f"SELECT COUNT(*) FROM {table}")[1][0][0]
         for table in (
             "base_province",
             "base_category1",

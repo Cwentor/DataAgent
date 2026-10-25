@@ -22,6 +22,8 @@ import math
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 
+from compiler.dialect import get_renderer
+from compiler.errors import CompileError
 from config import settings
 from semantic import catalog
 from semantic.catalog import JoinRule
@@ -48,9 +50,8 @@ from semantic.dsl_schema import (
     WindowMetric,
 )
 
-
-class CompileError(ValueError):
-    """DSL 合法但无法编译为 SQL（例如引用了未登记字段）。"""
+# CompileError 定义已迁 compiler/errors（方言层与编译器共用；本模块 re-export
+# 保 ``from compiler.sql_compiler import CompileError`` 旧路径）
 
 
 # 时间窗口锚定的时间列（由 TimeFilter.time_field 解析，白名单在 dsl_schema.TIME_FIELDS）
@@ -60,13 +61,13 @@ def _time_field_qualify(tf: TimeFilter) -> str:
 
 
 def _quote_ident(name: str) -> str:
-    """把标识符（别名/排序字段）以双引号包裹并转义内部引号，杜绝标识符注入。
+    """把标识符（别名/排序字段）经方言渲染器包裹转义，杜绝标识符注入。
 
     alias / order_by.field 虽已在 DSL 层受 IDENTIFIER_PATTERN 约束，此处是
     独立的第二道防线：即使未来出现绕过 Pydantic 校验的路径，裸拼的标识符
     也只会被当作一个整体标识符，而无法改写 SQL 结构。
     """
-    return '"' + str(name).replace('"', '""') + '"'
+    return get_renderer().quote_ident(name)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,7 +198,7 @@ def _qualify(field: str) -> str:
     meta = catalog.COLUMNS.get(field)
     if meta is None:
         raise CompileError(f"未登记的字段: {field!r}")
-    return f"{catalog.ALIASES[meta.table]}.{meta.column}"
+    return get_renderer().quote_column(catalog.ALIASES[meta.table], meta.column)
 
 
 def _check_scalar_type(value, dtype: str) -> None:
@@ -220,8 +221,9 @@ def render_literal(value, dtype: str) -> str:
     严禁消费方私有实现漂移出第二套转义路径。
     """
     _check_scalar_type(value, dtype)
+    r = get_renderer()
     if dtype == "str":
-        return "'" + str(value).replace("'", "''") + "'"
+        return r.escape_string_literal(value)
     if dtype == "int":
         return str(int(value))
     if dtype == "float":
@@ -232,9 +234,7 @@ def render_literal(value, dtype: str) -> str:
     if dtype == "bool":
         return "TRUE" if value else "FALSE"
     if dtype == "timestamp":
-        if isinstance(value, datetime):
-            return f"TIMESTAMP '{value.strftime('%Y-%m-%d %H:%M:%S')}'"
-        return f"TIMESTAMP '{value}'"
+        return r.timestamp_literal(value)
     raise CompileError(f"未知字面量类型: {dtype!r}")
 
 
@@ -242,7 +242,7 @@ def _filter_sql(f: Filter) -> str:
     meta = catalog.COLUMNS.get(f.field)
     if meta is None:
         raise CompileError(f"未登记的过滤字段: {f.field!r}")
-    col = f"{catalog.ALIASES[meta.table]}.{meta.column}"
+    col = get_renderer().quote_column(catalog.ALIASES[meta.table], meta.column)
     dtype = meta.dtype
 
     if f.operator == FilterOperator.IN:
@@ -266,9 +266,8 @@ def _filter_sql(f: Filter) -> str:
 def _time_window_sql(tf: TimeFilter) -> str:
     start, end = _resolve_window(tf)
     col = _time_field_qualify(tf)
-    s = start.strftime("%Y-%m-%d %H:%M:%S")
-    e = end.strftime("%Y-%m-%d %H:%M:%S")
-    return f"{col} >= TIMESTAMP '{s}' AND {col} < TIMESTAMP '{e}'"
+    r = get_renderer()
+    return f"{col} >= {r.timestamp_literal(start)} AND {col} < {r.timestamp_literal(end)}"
 
 
 def resolve_time_window(tf: TimeFilter) -> tuple[datetime, datetime]:
@@ -377,9 +376,9 @@ def _dimension_expr(d: Dimension, granularity: Granularity) -> tuple[str, str]:
     if meta is None:
         raise CompileError(f"未登记的维度字段: {d.field!r}")
     alias = d.alias or d.field
-    qual = f"{catalog.ALIASES[meta.table]}.{meta.column}"
+    qual = get_renderer().quote_column(catalog.ALIASES[meta.table], meta.column)
     if d.field in TIME_FIELDS:
-        expr = f"date_trunc('{granularity.value}', {qual})"
+        expr = get_renderer().date_trunc(granularity.value, qual)
     else:
         expr = qual
     return expr, alias
@@ -574,9 +573,10 @@ def _compile_with_comparison(dsl: QueryDSL) -> str:
             expr, alias = _metric_expr(m)
             select_items.append(f"{expr} AS {_quote_ident(alias)}")
         where = [_filter_sql(f) for f in dsl.filters]
-        s = start.strftime("%Y-%m-%d %H:%M:%S")
-        e = end.strftime("%Y-%m-%d %H:%M:%S")
-        where.append(f"{time_col} >= TIMESTAMP '{s}' AND {time_col} < TIMESTAMP '{e}'")
+        r = get_renderer()
+        where.append(
+            f"{time_col} >= {r.timestamp_literal(start)} AND {time_col} < {r.timestamp_literal(end)}"
+        )
         block = (
             f"{label} AS (\n"
             f"  SELECT {', '.join(select_items)}\n"
@@ -781,12 +781,8 @@ def _compile_with_fill_gaps(dsl: QueryDSL) -> str:
     start_s = start.strftime("%Y-%m-%d %H:%M:%S")
     end_incl_s = end_incl.strftime("%Y-%m-%d %H:%M:%S")
 
-    spine = (
-        f"__spine AS (\n"
-        f"  SELECT UNNEST(generate_series(TIMESTAMP '{start_s}', TIMESTAMP '{end_incl_s}', {step})) "
-        f"AS {_quote_ident(time_alias)}\n"
-        ")"
-    )
+    spine_body = get_renderer().spine_cte_sql(time_alias, start_s, end_incl_s, step)
+    spine = f"__spine AS (\n" f"  {spine_body}\n" ")"
     agg = (
         "__agg AS (\n"
         "  SELECT " + ", ".join(inner_selects) + "\n"
@@ -802,7 +798,7 @@ def _compile_with_fill_gaps(dsl: QueryDSL) -> str:
         q = _quote_ident(alias)
         outer_selects.append(f"COALESCE(a.{q}, 0) AS {q}")
 
-    sql = "WITH " + spine + ",\n" + agg
+    sql = f"{get_renderer().with_keyword()} " + spine + ",\n" + agg
     sql += "\nSELECT " + ", ".join(outer_selects)
     qt = _quote_ident(time_alias)
     sql += f"\nFROM __spine s\nLEFT JOIN __agg a ON a.{qt} = s.{qt}"

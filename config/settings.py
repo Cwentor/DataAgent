@@ -25,6 +25,21 @@ load_dotenv(PROJECT_ROOT / ".env")
 # 本地开发零成本数仓文件（模块 C 生成）
 DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 
+# 查询执行后端（二十一期）：duckdb（默认，零破坏）| mysql
+DB_BACKEND: str = os.getenv("DB_BACKEND", "duckdb")
+# SQL 方言（编译器渲染目标，二十一期）：缺省跟随 DB_BACKEND 推导；
+# 可独立覆盖（测试/排查用，如 duckdb 后端下单独产出 mysql 方言 SQL）
+SQL_DIALECT: str = os.getenv("SQL_DIALECT", "")
+
+# MySQL 执行后端连接配置（DB_BACKEND=mysql 时生效，二十一期 spec D10/§6）
+# 运行时查询用只读账号（部署要求 GRANT SELECT ON <db>.*）；建仓
+# （python -m mock.init_mysql）复用本组配置但要求账号具备 CREATE/INSERT 权限
+MYSQL_HOST: str = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))
+MYSQL_USER: str = os.getenv("MYSQL_USER", "dataagent_ro")
+MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "gmall")
+
 # 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
 WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
 

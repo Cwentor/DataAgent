@@ -384,6 +384,37 @@ def _lock_determinism() -> None:
     settings.LLM_TEMPERATURE = 0.0
 
 
+def _mysql_smoke() -> int:
+    """MySQL 后端连通性冒烟（二十一期 spec D14）：加固连接 + 白名单 + 三护栏。
+
+    golden 评测的期望 SQL 与快照锚定 DuckDB 方言，MySQL 后端不做全量比对
+    （诚实跳过而非硬跑方言错配的 golden）；MySQL 正确性回归由
+    tests/test_dual_backend_parity.py（双后端一致性）承担。
+    """
+    from exec.engine.mysql_adapter import MySqlAdapter
+    from exec.guards import execute_sql
+
+    adapter = MySqlAdapter()
+    conn = adapter.connect_readonly()
+    try:
+        result = execute_sql(
+            conn,
+            "SELECT COUNT(*) AS n FROM order_detail",
+            statement_timeout_ms=settings.QUERY_TIMEOUT_MS,
+            max_result_rows=1,
+            adapter=adapter,
+        )
+    finally:
+        conn.close()
+    print(
+        f"[eval][mysql-smoke] order_detail 行数 = {result.rows[0][0]}（连接/加固/白名单/护栏链路通）"
+    )
+    print(
+        "[eval][mysql-smoke] golden 锚定 DuckDB 方言，MySQL 正确性回归见 tests/test_dual_backend_parity.py"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """命令行入口：--pipeline 选择 oracle/agent，--skip-snapshot 快速契约回归。"""
     parser = argparse.ArgumentParser(description="DataAgent Golden Dataset 评测")
@@ -399,7 +430,16 @@ def main(argv: list[str] | None = None) -> int:
         default="oracle",
         help="run_pipeline 来源：oracle=golden 标准答案（默认，自闭环）；agent=真实 Agent（无 API Key 时启发式兜底）",
     )
+    parser.add_argument(
+        "--backend",
+        choices=["duckdb", "mysql"],
+        default="duckdb",
+        help="查询执行后端：duckdb（默认）；mysql 仅做连通性冒烟（golden 锚定 DuckDB 方言，spec D14）",
+    )
     args = parser.parse_args(argv)
+
+    if args.backend == "mysql":
+        return _mysql_smoke()
 
     if not settings.DB_PATH.exists():
         raise SystemExit(f"未找到数仓文件 {settings.DB_PATH}，请先执行: python -m mock.init_duckdb")

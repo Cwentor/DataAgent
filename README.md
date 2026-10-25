@@ -135,9 +135,42 @@ pip install -r requirements-dev.txt
 ### 三、初始化数仓
 
 ```bash
-# 幂等初始化本地 DuckDB 数仓
+# 幂等初始化本地 DuckDB 数仓（默认后端）
 python -m mock.init_duckdb
 ```
+
+**MySQL 后端（可选，二十一期）**：支持 MySQL 8.0（>= 8.0.18）作为查询执行后端。
+
+```bash
+# 1. .env 配置（建仓账号需 CREATE/INSERT 权限；运行时查询另用只读账号）
+DB_BACKEND=mysql
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=<可写账号>
+MYSQL_PASSWORD=<密码>
+MYSQL_DATABASE=gmall            # 库需预先存在
+
+# 2. 幂等初始化（DDL 由 DuckDB 版运行时转译，数据与 DuckDB 版逐行同源）
+python -m mock.init_mysql
+
+# 3. 查询账号最小权限（部署要求）
+# GRANT SELECT ON gmall.* TO dataagent_ro@'%';
+
+# 4. 连通性冒烟（golden 评测锚定 DuckDB 方言，MySQL 正确性回归见下）
+python -m eval.eval_runner --backend mysql
+```
+
+双后端一致性回归（需要本地 MySQL 测试库，未配置时自动跳过）：
+
+```bash
+MYSQL_TEST_HOST=127.0.0.1 MYSQL_TEST_USER=root MYSQL_TEST_PASSWORD=... \
+python -m pytest tests/test_dual_backend_parity.py -q
+```
+
+**版本演进跟随（重要）**：治理管道依赖引擎行为（EXPLAIN ANALYZE 输出格式、
+max_execution_time、sql_mode 默认值），MySQL 版本升级须先跑全量测试 + 双后端
+一致性回归再放行——这是多引擎支持的必然代价（详见
+`docs/plans/2026-10-25-mysql-support-spec.md` §8.1）。
 
 ### 四、配置 LLM
 

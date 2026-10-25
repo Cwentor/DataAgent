@@ -66,11 +66,12 @@ def test_scan_cap_logs_warning_when_plan_unmeasurable(big_conn, caplog, monkeypa
     parse_scan_rows 退化为 0，熔断静默失效。此处桩掉解析结果，断言护栏
     在"测不到"时仍有可采集的 warning，而非无声放行。
     """
-    import exec.guards as guards
+    import exec.engine.duckdb_adapter as duckdb_adapter
 
     # 模拟 duckdb 2.0 的计划渲染：无 "N rows" 算子行数（不可计量）+ 解析结果退化为 0
-    monkeypatch.setattr(guards, "parse_scan_rows", lambda _plan: 0)
-    monkeypatch.setattr(guards, "plan_rows_measurable", lambda _plan: False)
+    # （二十一期：解析器迁 exec.engine.plan_text，执行路径经 duckdb_adapter 消费）
+    monkeypatch.setattr(duckdb_adapter, "parse_scan_rows", lambda _plan: 0)
+    monkeypatch.setattr(duckdb_adapter, "plan_rows_measurable", lambda _plan: False)
 
     # 用与 test_scan_cap_logs_error 不同的 SQL，避免命中全局扫描行缓存（缓存命中即不走预检）
     result = execute_sql(big_conn, "SELECT count(*) FROM big", max_scan_rows=100)

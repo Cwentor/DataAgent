@@ -648,8 +648,20 @@ def run_query(
 
 
 def ensure_db() -> None:
-    """确保本地 DuckDB 数仓文件存在，缺失时幂等重建；随后重建语义目录（P0-2）
-    与权限策略（P0-3），使"新增表/字段/权限"全部走配置而非改代码。"""
+    """确保数仓可用，随后重建语义目录（P0-2）与权限策略（P0-3），
+    使"新增表/字段/权限"全部走配置而非改代码。
+
+    DuckDB：本地文件缺失时幂等重建（mock.init_duckdb）。
+    MySQL（二十一期）：建仓是显式动作（python -m mock.init_mysql，需可写
+    账号），服务启动只做目录/策略刷新；库不可用由 refresh_catalog 快速失败。
+    """
+    if settings.DB_BACKEND == "mysql":
+        from security.policy_loader import refresh_policies
+        from semantic.catalog_loader import refresh_catalog
+
+        refresh_catalog()
+        refresh_policies()
+        return
     if not settings.DB_PATH.exists():
         from mock.init_duckdb import main as init_db
 

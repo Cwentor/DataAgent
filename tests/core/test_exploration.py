@@ -31,7 +31,7 @@ def ro_conn():
 
 def test_rewrite_and_execute_equivalent_on_read_only(ro_conn, tmp_path):
     """基表 → sec_* 视图重写后执行，结果与原库直接执行一致。"""
-    from security.views import install_secure_views
+    from exec.engine.duckdb_adapter import DuckDbAdapter
 
     original_sql = (
         "SELECT SUM(split_total_amount) AS gmv FROM order_detail WHERE order_status = '1002'"
@@ -41,7 +41,7 @@ def test_rewrite_and_execute_equivalent_on_read_only(ro_conn, tmp_path):
     rewritten, rejects = rewrite_sql_to_views(original_sql, "admin")
     assert rejects == []
     assert "sec_order_detail" in rewritten
-    install_secure_views(ro_conn, "admin")  # TEMP 视图在 read_only 连接上安装
+    DuckDbAdapter().install_secure_views(ro_conn, "admin")  # TEMP 视图在 read_only 连接上安装
     via_view = ro_conn.execute(rewritten).fetchall()
     assert sorted(map(repr, direct)) == sorted(map(repr, via_view))
 
@@ -118,7 +118,7 @@ def test_exploration_risk_case_insensitive_variants():
 
 def test_rewrite_computed_cte_allowed_and_tables_rewritten(ro_conn, tmp_path):
     """计算型 CTE 在探索层合法（提升闸门的保守内联不适用此处）；CTE 体表引用照常重写。"""
-    from security.views import install_secure_views
+    from exec.engine.duckdb_adapter import DuckDbAdapter
 
     sql = (
         "WITH t AS (SELECT sku_id, SUM(1) AS c FROM order_detail GROUP BY sku_id) "
@@ -127,7 +127,7 @@ def test_rewrite_computed_cte_allowed_and_tables_rewritten(ro_conn, tmp_path):
     rewritten, rejects = rewrite_sql_to_views(sql, "admin")
     assert rejects == []
     assert "sec_order_detail" in rewritten
-    install_secure_views(ro_conn, "admin")
+    DuckDbAdapter().install_secure_views(ro_conn, "admin")
     rows = ro_conn.execute(rewritten).fetchall()
     direct = ro_conn.execute(sql).fetchall()
     assert sorted(map(repr, rows)) == sorted(map(repr, direct))
@@ -147,3 +147,36 @@ def test_execute_exploration_rejects_write_statement(ro_conn, tmp_path):
             query="写操作红线",
             conn=ro_conn,
         )
+
+
+# --------------------------------------------------------------------------- #
+# 方言化（二十一期 spec D9）：MySQL 无 TEMP VIEW -> 内联派生表重写
+# --------------------------------------------------------------------------- #
+def test_rewrite_sql_to_views_mysql_uses_derived_table(monkeypatch):
+    """MySQL 方言：表引用重写为内联派生表（投影/RLS 与视图版单一实现）。"""
+    import sqlglot
+
+    import config.settings as settings
+    from core.retrieval.exploration import rewrite_sql_to_views
+
+    monkeypatch.setattr(settings, "SQL_DIALECT", "mysql")
+    monkeypatch.setattr(settings, "DB_BACKEND", "mysql")
+    rewritten, notes = rewrite_sql_to_views(
+        "SELECT order_id FROM order_detail WHERE order_amount > 100", "analyst"
+    )
+    assert rewritten is not None and notes == []
+    assert "sec_order_detail" in rewritten  # 别名保留授权命名空间语义
+    assert rewritten.count("(SELECT") >= 1  # 派生表而非视图名引用
+    sqlglot.parse_one(rewritten, read="mysql")
+
+
+def test_rewrite_mysql_rejects_unauthorized_table(monkeypatch):
+    """MySQL 方言越权拒绝口径与 duckdb 一致（order_refund_info 对 restricted 越权）。"""
+    import config.settings as settings
+    from core.retrieval.exploration import rewrite_sql_to_views
+
+    monkeypatch.setattr(settings, "SQL_DIALECT", "mysql")
+    monkeypatch.setattr(settings, "DB_BACKEND", "mysql")
+    rewritten, notes = rewrite_sql_to_views("SELECT * FROM order_refund_info", "restricted")
+    assert rewritten is None
+    assert any("越权表" in n for n in notes)
