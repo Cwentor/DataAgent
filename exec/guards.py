@@ -166,11 +166,41 @@ _DIALECT_EXTRA_KEYWORDS: dict[str, frozenset[str]] = {
             "DUMPFILE",
         }
     ),
+    # PostgreSQL 语句族（二十二期 spec D12）：COPY 可 COPY ... TO PROGRAM 执行
+    # 宿主命令（PG 侧最危险写/执行面）；LOAD 动态加载共享库；LISTEN/NOTIFY
+    # 会话劫持面；DO 匿名代码块；VACUUM 已在通用黑名单不重复
+    "postgres": frozenset(
+        {
+            "COPY",
+            "LISTEN",
+            "NOTIFY",
+            "DO",
+            "LOAD",
+            "REINDEX",
+            "CLUSTER",
+            "GRANT",
+            "REVOKE",
+        }
+    ),
 }
 # MySQL 函数族：load_file 读服务器文件 / sleep、benchmark DoS / 锁滥用族
 _DIALECT_EXTRA_FUNC_RE: dict[str, re.Pattern[str]] = {
     "mysql": re.compile(
         r"\b(?:load_file|sleep|benchmark|get_lock|release_lock|is_used_lock|is_free_lock)\s*\(",
+        re.IGNORECASE,
+    ),
+    # PostgreSQL 函数族（二十二期 spec D12）：pg_sleep DoS / 终止与取消后端
+    # 进程 / 读服务器文件 / advisory 锁滥用 / dblink 跨库外联 / 大对象导入导出
+    "postgres": re.compile(
+        r"\b(?:"
+        r"pg_sleep|pg_sleep_for|pg_sleep_until"
+        r"|pg_terminate_backend|pg_cancel_backend"
+        r"|pg_read_file|pg_read_binary_file|pg_ls_dir"
+        r"|pg_advisory_lock|pg_advisory_xact_lock|pg_advisory_shared_lock"
+        r"|pg_advisory_unlock|pg_advisory_unlock_all"
+        r"|dblink|dblink_exec"
+        r"|lo_import|lo_export|lo_get|lo_put"
+        r")\s*\(",
         re.IGNORECASE,
     ),
 }
@@ -264,7 +294,7 @@ def _assert_read_only_structure(sql: str, dialect: str = "duckdb") -> None:
     for node in root.walk():
         if isinstance(node, exp.Into):
             raise UnsafeSqlError("拒绝 SELECT INTO 写表语句")
-        if dialect == "mysql" and isinstance(node, exp.Lock):
+        if dialect in ("mysql", "postgres") and isinstance(node, exp.Lock):
             raise UnsafeSqlError("拒绝 SELECT ... FOR UPDATE / LOCK IN SHARE MODE 锁语句")
         if isinstance(node, exp.Func):
             name = _func_name(node)

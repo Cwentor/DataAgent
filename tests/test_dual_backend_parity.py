@@ -18,51 +18,16 @@ from pathlib import Path
 
 import pytest
 
+# 共享工具自 parity_utils 导入（二十二期提取）：别名保留下划线前缀，
+# 本文件其余断言逻辑逐字不变（tests/ 为包，用包内绝对导入）
+from tests.parity_utils import abs_window_dsl as _abs_window_dsl
+from tests.parity_utils import assert_rows_equal as _assert_rows_equal
+from tests.parity_utils import compile_dsl as _compile_dsl
+from tests.parity_utils import norm_cell as _norm_cell  # noqa: F401
+
 pytestmark = pytest.mark.skipif(
     not os.getenv("MYSQL_TEST_HOST"), reason="需要本地 MySQL 测试库（MYSQL_TEST_* 环境变量）"
 )
-
-
-def _norm_cell(v):
-    """跨引擎类型归一（比对口径，非行为差异）：
-
-    - Decimal -> float：DuckDB SUM(DECIMAL) 返回 Decimal（既有行为，不动
-      adapter 以免打穿 golden 结果哈希），MySQL 侧已 normalize 为 float——
-      数值语义相同，比对时统一 float；
-    - datetime -> date：MySQL DATE() 表达式返回 DATE、DuckDB date_trunc
-      返回 TIMESTAMP(00:00:00)——按 spec D5 设计即语义等价，统一取日期面。
-    """
-    from datetime import datetime as datetime_cls
-    from decimal import Decimal
-
-    if isinstance(v, Decimal):
-        return float(v)
-    if isinstance(v, datetime_cls):
-        # datetime 是 date 的子类：date 实例不会进本分支
-        # （isinstance(date_obj, datetime) 为 False），无需额外排除
-        return v.date()
-    return v
-
-
-def _assert_rows_equal(duck_rows, mysql_rows):
-    assert len(duck_rows) == len(mysql_rows), "行数不一致"
-    duck_sorted = sorted(([_norm_cell(v) for v in r] for r in duck_rows), key=repr)
-    mysql_sorted = sorted(([_norm_cell(v) for v in r] for r in mysql_rows), key=repr)
-    for rd, rm in zip(duck_sorted, mysql_sorted, strict=True):
-        assert len(rd) == len(rm)
-        for vd, vm in zip(rd, rm, strict=True):
-            if vd is None or vm is None:
-                assert vd is vm, f"空值不一致: {vd!r} vs {vm!r}"
-                continue
-            if isinstance(vd, (int, float)) and isinstance(vm, (int, float)):
-                # 容差口径（spec §9 Decimal 精度差异）：MySQL DECIMAL 除法按
-                # div_precision_increment=4 增量 scale（结果 6 位小数）精确
-                # 十进制舍入，DuckDB 走 float 全精度——舍入差为**绝对量级**
-                # （<=5e-7，小值增长率上相对差可达 3e-5），故 abs 兜底小值、
-                # rel 覆盖大值（CI 九/十轮实测校准）
-                assert vm == pytest.approx(vd, rel=1e-5, abs=1e-6), f"数值漂移: {vd!r} vs {vm!r}"
-            else:
-                assert vm == vd, f"值不一致: {vd!r} vs {vm!r}"
 
 
 def _test_dsn() -> dict:
@@ -83,21 +48,6 @@ def mysql_conn():
     conn = MySqlAdapter(_test_dsn()).connect_readonly()
     yield conn
     conn.close()
-
-
-def _compile_dsl(dsl, dialect: str) -> str:
-    """按方言编译（dict 先过契约校验；临时切换 SQL_DIALECT 用完即还原）。"""
-    import config.settings as settings
-    from compiler.sql_compiler import compile_sql
-    from semantic.dsl_schema import QueryDSL
-
-    model = dsl if isinstance(dsl, QueryDSL) else QueryDSL.model_validate(dsl)
-    old = settings.SQL_DIALECT
-    settings.SQL_DIALECT = dialect
-    try:
-        return compile_sql(model)
-    finally:
-        settings.SQL_DIALECT = old
 
 
 def _run_dsl(dsl, duck_conn, mysql_conn):
@@ -135,31 +85,6 @@ def test_golden_dsls_parity(conn, mysql_conn):
     for dsl in dsls:
         results = _run_dsl(dsl, conn, mysql_conn)
         _assert_rows_equal(results["duckdb"].rows, results["mysql"].rows)
-
-
-def _abs_window_dsl(granularity: str, start: str, end: str, fill_gaps: bool = False) -> dict:
-    """绝对窗口 GMV 按时间分组 DSL（形态取自 golden_dataset；limit 给足以
-    覆盖 5 年 day 粒度 1826 行——契约默认 limit=100 会截断补零序列）。"""
-    dsl = {
-        "metrics": [
-            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
-        ],
-        "dimensions": [{"field": "order_time", "alias": None}],
-        "time_filter": {
-            "granularity": granularity,
-            "range_type": "absolute",
-            "relative": None,
-            "absolute": {"start": start, "end": end},
-            "comparison": "none",
-            "reference_date": None,
-            "time_field": "order_time",
-        },
-        "filters": [],
-        "limit": 2000,
-    }
-    if fill_gaps:
-        dsl["fill_gaps"] = True
-    return dsl
 
 
 def test_week_boundary_parity(conn, mysql_conn):

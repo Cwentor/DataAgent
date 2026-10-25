@@ -415,6 +415,38 @@ def _mysql_smoke() -> int:
     return 0
 
 
+def _postgres_smoke() -> int:
+    """PostgreSQL 后端连通性冒烟（二十二期 spec D16）：加固连接 + 白名单 + 三护栏。
+
+    golden 评测的期望 SQL 与快照锚定 DuckDB 方言，PostgreSQL 后端不做全量
+    比对（诚实跳过而非硬跑方言错配的 golden）；PG 正确性回归由
+    tests/test_pg_backend_parity.py（双后端一致性）承担。
+    """
+    from exec.engine.postgres_adapter import PostgresAdapter
+    from exec.guards import execute_sql
+
+    adapter = PostgresAdapter()
+    conn = adapter.connect_readonly()
+    try:
+        result = execute_sql(
+            conn,
+            "SELECT COUNT(*) AS n FROM order_detail",
+            statement_timeout_ms=settings.QUERY_TIMEOUT_MS,
+            max_result_rows=1,
+            adapter=adapter,
+        )
+    finally:
+        conn.close()
+    print(
+        f"[eval][postgres-smoke] order_detail 行数 = {result.rows[0][0]}"
+        "（连接/加固/白名单/护栏链路通）"
+    )
+    print(
+        "[eval][postgres-smoke] golden 锚定 DuckDB 方言，PG 正确性回归见 tests/test_pg_backend_parity.py"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """命令行入口：--pipeline 选择 oracle/agent，--skip-snapshot 快速契约回归。"""
     parser = argparse.ArgumentParser(description="DataAgent Golden Dataset 评测")
@@ -432,14 +464,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--backend",
-        choices=["duckdb", "mysql"],
+        choices=["duckdb", "mysql", "postgres"],
         default="duckdb",
-        help="查询执行后端：duckdb（默认）；mysql 仅做连通性冒烟（golden 锚定 DuckDB 方言，spec D14）",
+        help="查询执行后端：duckdb（默认）；mysql/postgres 仅做连通性冒烟（golden 锚定 DuckDB 方言）",
     )
     args = parser.parse_args(argv)
 
     if args.backend == "mysql":
         return _mysql_smoke()
+    if args.backend == "postgres":
+        return _postgres_smoke()
 
     if not settings.DB_PATH.exists():
         raise SystemExit(f"未找到数仓文件 {settings.DB_PATH}，请先执行: python -m mock.init_duckdb")

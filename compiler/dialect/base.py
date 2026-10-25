@@ -2,8 +2,8 @@
 
 编译器的 SQL 结构组装（FROM/JOIN/GROUP BY/窗口/CTE）引擎无关，只有
 "方言原语"（标识符引号、date_trunc、时间字面量、补零 spine、字符串
-转义）经 renderer 渲染。DuckDB 实现必须与迁移前输出逐字节一致
-（golden 锚点锁定）；MySQL 实现见 mysql.py。
+转义、时间平移）经 renderer 渲染。DuckDB 实现必须与迁移前输出逐字节一致
+（golden 锚点锁定）；MySQL 实现见 mysql.py；PostgreSQL 实现见 postgres.py。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class DialectRenderer(Protocol):
-    """SQL 方言渲染器协议（7 个原语方法）。"""
+    """SQL 方言渲染器协议（9 个原语方法）。"""
 
     name: str  # 方言名（与 sqlglot 方言名一致）
 
@@ -32,6 +32,23 @@ class DialectRenderer(Protocol):
 
     def date_trunc(self, granularity: str, expr: str) -> str:
         """时间维度截断（granularity: day/week/month/quarter）。"""
+        ...
+
+    def date_add(self, expr: str, interval: str) -> str:
+        """时间列平移（comparison 配对对齐；interval 为编译器 INTERVAL 字面量）。
+
+        spec D17：DuckDB/MySQL 有同名 date_add 函数；PostgreSQL 无，以
+        `{expr} + INTERVAL` 加法等价式实现。
+        """
+        ...
+
+    def having_metric_ref(self, alias: str, expr: str) -> str:
+        """HAVING 子句中指标别名的引用形态（spec D18）。
+
+        DuckDB/MySQL 语义允许 HAVING 引用输出别名，返回别名引用（golden
+        锚点逐字节不变）；PostgreSQL 禁止（HAVING 仅可用聚合表达式与
+        GROUP BY 列），返回底层聚合表达式重放。
+        """
         ...
 
     def spine_cte_sql(self, alias: str, start: str, end: str, step: str) -> str:

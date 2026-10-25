@@ -85,6 +85,49 @@ jobs:
           MYSQL_TEST_PASSWORD: root
           MYSQL_TEST_DATABASE: gmall
 
+  # PostgreSQL 服务级门禁（二十二期）：与 mysql-parity 同构——golden 全量 DSL
+  # 双后端一致性 + 周边界/5 年补零/comparison 配对/池复用加固。本地开发不跑 PG
+  # （POSTGRES_TEST_* 未配置自动跳过），CI 是 PG 链路首个真实执行面（spec §9 R1）。
+  postgres-parity:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: root
+          POSTGRES_USER: postgres
+          POSTGRES_DB: gmall
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Build PostgreSQL warehouse (DDL transpiled + same-source data)
+        run: python -m mock.init_postgres
+        env:
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: root
+          POSTGRES_DATABASE: gmall
+      - name: Dual-backend parity tests (golden DSLs + Review Focus)
+        run: python -m pytest tests/test_pg_backend_parity.py -q
+        env:
+          POSTGRES_TEST_HOST: 127.0.0.1
+          POSTGRES_TEST_PORT: "5432"
+          POSTGRES_TEST_USER: postgres
+          POSTGRES_TEST_PASSWORD: root
+          POSTGRES_TEST_DATABASE: gmall
+
   nightly:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest

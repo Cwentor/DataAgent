@@ -344,6 +344,10 @@ def build_gmall_tables(
 
     if adapter.name == "duckdb":
         schema.create_tables(conn)
+    elif adapter.name == "postgres":
+        from mock.gmall.schema_postgres import create_postgres_tables
+
+        create_postgres_tables(conn)
     else:
         from mock.gmall.schema_mysql import create_mysql_tables
 

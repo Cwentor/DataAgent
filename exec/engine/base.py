@@ -2,7 +2,7 @@
 
 护栏框架（exec.guards.execute_sql）引擎无关；连接创建、执行游标、
 超时取消、计划解析、异常归一、连接加固、建仓灌数等引擎差异全部
-由各 adapter 实现（duckdb / mysql）。
+由各 adapter 实现（duckdb / mysql / postgres）。
 """
 
 from __future__ import annotations
