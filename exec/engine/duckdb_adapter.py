@@ -55,13 +55,55 @@ class DuckDbAdapter:
         return None
 
     def harden(self, conn: Any) -> None:
-        # 文件级只读已由 connect(read_only=True) 保证；探索层连接加固
-        # （enable_external_access 等）在 security/views 层实现，此处无引擎级设置
-        return None
+        """连接级加固（十九期 M5 spec §3.4，迁自 security/views.harden_connection）。
+
+        封死外部访问并锁定配置。幂等：先读 current_setting，已达标则跳过
+        （lock_configuration 锁定后重复 SET 会被 DuckDB 拒绝）。fail-closed：
+        设置失败即抛 SecurityError——严禁带弱配置继续执行（弱配置连接进入
+        探索层等于治理管道整体失效）。
+        """
+        from security.errors import SecurityError
+
+        for name, expected in _HARDEN_SETTINGS:
+            try:
+                current = str(conn.execute(f"SELECT current_setting('{name}')").fetchone()[0])
+                if current.lower() == expected:
+                    continue
+                conn.execute(f"SET {name} = {expected}")
+            except SecurityError:
+                raise
+            except Exception as exc:
+                raise SecurityError(f"连接加固失败（{name} -> {expected}）: {exc}") from exc
+
+    def install_secure_views(self, conn: Any, principal: str | None) -> dict[str, str]:
+        """在连接上安装该 principal 的安全视图（迁自 security/views.install_secure_views）。
+
+        使用 **TEMP 视图**：生命周期随连接、不污染库文件，且 read_only 连接
+        （生产连接池口径）上可创建——探索层在池化只读连接上直接安装。
+        """
+        from security.views import (
+            _VIEW_DDL_PREFIX,
+            _VIEW_TEMP_DDL_PREFIX,
+            build_secure_views,
+        )
+
+        views = build_secure_views(principal)
+        for _name, ddl in views.items():
+            # DDL 前缀常量化（评审 LOW #7）：严禁依赖散落的字面量 replace 耦合，
+            # build_secure_views 改前缀时此处随常量同步失效
+            conn.execute(ddl.replace(_VIEW_DDL_PREFIX, _VIEW_TEMP_DDL_PREFIX, 1))
+        return views
 
     def insert_dataframe(self, conn: Any, table: str, df: Any) -> int:
         conn.execute(f"INSERT INTO {table} SELECT * FROM df")
         return len(df)
+
+
+# 连接加固设置（DuckDB 专属，迁自 security/views）
+_HARDEN_SETTINGS: tuple[tuple[str, str], ...] = (
+    ("enable_external_access", "false"),
+    ("lock_configuration", "true"),
+)
 
 
 __all__ = ["DuckDbAdapter"]
