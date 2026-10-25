@@ -68,7 +68,8 @@ def _convert_seed_value(column: str, value) -> object:
 
 
 def _insert_seed(conn: Any, seed_rows: dict[str, list[list]], adapter) -> None:
-    # 占位符随引擎：duckdb `?` / pymysql `%s`；种子行量小，executemany 两引擎均可用
+    # 占位符与执行通道随引擎：duckdb `?` + conn.executemany；
+    # pymysql `%s` 且 Connection 无 executemany（Cursor 才有，CI 实锤）。
     ph = "?" if adapter.name == "duckdb" else "%s"
     for table, rows in seed_rows.items():
         cols = SEED_COLUMNS[table]
@@ -77,9 +78,12 @@ def _insert_seed(conn: Any, seed_rows: dict[str, list[list]], adapter) -> None:
             tuple(_convert_seed_value(c, v) for c, v in zip(cols, row, strict=False))
             for row in rows
         ]
-        conn.executemany(
-            f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})", converted
-        )
+        sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"
+        if adapter.name == "duckdb":
+            conn.executemany(sql, converted)
+        else:
+            with conn.cursor() as cur:
+                cur.executemany(sql, converted)
 
 
 def _build_users(rng: random.Random, asof: date) -> list[dict]:
