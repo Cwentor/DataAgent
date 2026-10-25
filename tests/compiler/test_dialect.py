@@ -242,7 +242,7 @@ class TestPostgresRenderer:
             "day", "2025-01-01 00:00:00", "2025-01-03 00:00:00", "INTERVAL 1 DAY"
         )
         assert body == (
-            'SELECT gs AS "day" FROM generate_series(TIMESTAMP \'2025-01-01 00:00:00\', '
+            "SELECT gs AS \"day\" FROM generate_series(TIMESTAMP '2025-01-01 00:00:00', "
             "TIMESTAMP '2025-01-03 00:00:00', INTERVAL '1 day') AS gs"
         )
         assert r.with_keyword() == "WITH"
@@ -265,9 +265,7 @@ class TestPostgresRenderer:
 
         r = PostgresRenderer()
         assert r.date_add("f.order_time", "INTERVAL 1 YEAR") == "f.order_time + INTERVAL '1 year'"
-        assert (
-            r.date_add("f.order_time", "INTERVAL 3 MONTH") == "f.order_time + INTERVAL '3 month'"
-        )
+        assert r.date_add("f.order_time", "INTERVAL 3 MONTH") == "f.order_time + INTERVAL '3 month'"
 
 
 def test_date_add_byte_identical_on_anchored_dialects():
