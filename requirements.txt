@@ -7,3 +7,6 @@ pydantic>=2.6
 duckdb>=1.5.6,<2.0
 python-dotenv>=1.0
 sqlglot>=25.0
+# MySQL 执行后端（二十一期）：纯 Python 驱动，MIT 许可；支持区间 mysql 8.0
+# （>= 8.0.18，spec §8.1 版本演进跟随策略——升级前须跑全量回归与双后端一致性测试）
+pymysql>=1.1.1,<2
