@@ -158,10 +158,7 @@ class MySqlAdapter:
         # 对齐口径）
         import pandas as pd
 
-        data = [
-            tuple(None if pd.isna(v) else v for v in row)
-            for row in df.itertuples(index=False)
-        ]
+        data = [tuple(None if pd.isna(v) else v for v in row) for row in df.itertuples(index=False)]
         with conn.cursor() as cur:
             for i in range(0, len(data), 5000):
                 cur.executemany(sql, data[i : i + 5000])
