@@ -8,12 +8,12 @@
 
 | # | 任务 | 依赖 | 验收口径 | 状态 | 提交 |
 |---|------|------|---------|------|------|
-| T1 | 执行引擎抽象层：异常迁移 + `EngineAdapter` 协议 + DuckDB 逻辑下沉 + watchdog 通用化 | — | 全量 pytest + eval oracle 8/8 零新失败（DuckDB 行为不变） | ☐ 未开始 | |
-| T2 | 编译方言层：`DialectRenderer` 协议 + DuckDB renderer + `settings.DB_BACKEND/SQL_DIALECT` | T1 | 编译产物逐字节不变（快照/golden 全绿） | ☐ 未开始 | |
-| T3 | MySQL 执行面：PyMySQL adapter + `normalize_cell` 类型规范化 + 会话加固 + 配置/依赖 | T1 | `tests/engine/` 新增纯逻辑单测全绿；全量回归零新失败 | ☐ 未开始 | |
-| T4 | MySQL 扫描行预检：EXPLAIN ANALYZE `actual rows` 解析（样例文本锁定，不依赖服务） | T3 | 解析单测通过（max actual rows 口径 + 不可计量路径） | ☐ 未开始 | |
-| T5 | 只读白名单方言化：sqlglot `read=` 参数化 + MySQL 语句/函数增量黑名单 + FOR UPDATE 锁语句拒绝 | T1 | MySQL 危险语句 9 例全拒；duckdb 既有渗透用例不破 | ☐ 未开始 | |
-| T6 | MySQL 方言渲染器：反引号 / date_trunc 等价式 / WITH RECURSIVE spine / 反斜杠双保险 | T2 | 渲染单测 + 编译产物 sqlglot mysql 可解析；duckdb 输出不变 | ☐ 未开始 | |
+| T1 | 执行引擎抽象层：异常迁移 + `EngineAdapter` 协议 + DuckDB 逻辑下沉 + watchdog 通用化 | — | 全量 pytest + eval oracle 8/8 零新失败（DuckDB 行为不变） | ✅ 完成 | d0d8afe |
+| T2 | 编译方言层：`DialectRenderer` 协议 + DuckDB renderer + `settings.DB_BACKEND/SQL_DIALECT` | T1 | 编译产物逐字节不变（快照/golden 全绿） | ✅ 完成 | 0fdf6e7 |
+| T3 | MySQL 执行面：PyMySQL adapter + `normalize_cell` 类型规范化 + 会话加固 + 配置/依赖 | T1 | `tests/engine/` 新增纯逻辑单测全绿；全量回归零新失败 | ✅ 完成 | 4b94f11 |
+| T4 | MySQL 扫描行预检：EXPLAIN ANALYZE `actual rows` 解析（样例文本锁定，不依赖服务） | T3 | 解析单测通过（max actual rows 口径 + 不可计量路径） | ✅ 完成 | 754b467 |
+| T5 | 只读白名单方言化：sqlglot `read=` 参数化 + MySQL 语句/函数增量黑名单 + 锁语句拒绝 | T1 | MySQL 危险语句 10 例全拒；duckdb 既有渗透用例不破 | ✅ 完成 | 1899e13 |
+| T6 | MySQL 方言渲染器：反引号 / date_trunc 等价式 / WITH RECURSIVE spine / 反斜杠双保险 | T2 | 渲染单测 + 编译产物 sqlglot mysql 可解析；duckdb 输出不变 | ✅ 完成 | 43ae434 |
 | T7 | 安全面方言化：`build_secure_projection` 纯函数重构 + MySQL 内联派生表 + security 包去引擎依赖 | T1, T2 | 视图等价既有测试绿 + 派生表重写用例绿；security 不再 import duckdb | ☐ 未开始 | |
 | T8 | mock 数仓 MySQL 初始化：`schema_mysql.py` 类型映射与索引 + `init_mysql` + build 灌数分发 + web 端点 | T3 | 两方言 DDL 表/列对拍单测绿；duckdb 建仓路径回归绿 | ☐ 未开始 | |
 | T9 | catalog_loader MySQL 物理面：类型映射扩展 + table_schema 过滤 + 按后端连接 | T1 | 类型映射参数化用例 + schema 过滤用例绿 | ☐ 未开始 | |
@@ -53,6 +53,28 @@ T5/T6/T7/T9 依赖仅 T1/T2，可并行推进；T10 收口依赖全部。
   一同演进（不可避免代价），已固化至 spec §8.1 版本演进跟随策略与
   §9 风险表首条。
 - 开始执行 T1（执行引擎抽象层）。
+- T1 完成：引擎抽象层（exec/errors + exec/engine 五模块），1028 绿 +
+  oracle 全绿。计划外适配两处：test_logging_coverage 的解析桩随执行
+  路径迁至 duckdb_adapter；test_exec 的 _run_with_timeout 桩迁至
+  watchdog；settings.DB_BACKEND 自 T2 提前至 T1（get_adapter 依赖）。
+  提交 d0d8afe。
+- T2 完成：编译方言层（compiler/dialect + compiler/errors），duckdb
+  产物逐字节不变；_filter_sql/_dimension_expr 的裸拼限定列顺带统一走
+  renderer（duckdb 渲染等价裸拼、mysql 侧正确反引号化）。提交 0fdf6e7。
+- T3 完成：MySQL adapter（加固四要素/3024 超时归一/normalize_cell/
+  insert_dataframe NaN->None）+ MYSQL_* 配置 + pymysql>=1.1.1,<2。
+  提交 4b94f11。
+- T4 完成：EXPLAIN ANALYZE actual rows 解析（cost 估算不混入；样例
+  文本锁定）。提交 754b467。
+- T5 完成：白名单方言化（MySQL 语句增量 21 项 + 函数增量 + exp.Lock
+  锁语句 AST 拒绝——FOR UPDATE 与 LOCK IN SHARE MODE 双覆盖）。
+  提交 1899e13。
+- T6 完成：MySQL 渲染器（WEEKDAY 周一/CAST AS DATETIME/反斜杠翻倍/
+  WITH RECURSIVE spine）；端到端编译用例 4 例（含方言切换还原断言）。
+  提交 43ae434。累计 1069 passed + oracle 31/31。
+- 待办：T7（安全面派生表）/ T8（mock 建仓）/ T9（catalog_loader）/
+  T10（双后端一致性 + 文档收尾）；T10 服务级验证依赖本地 MySQL 环境
+  （见上方环境清单）。
 
 <!-- 后续格式：
 ### YYYY-MM-DD
