@@ -131,6 +131,59 @@ _FORBIDDEN_FUNCTION_RE = re.compile(
 # DuckDB 字符串字面量表引用（FROM '<path>'）：等价直接读取本地文件，拒绝。
 _FROM_STRING_TABLE_RE = re.compile(r"""\bFROM\s*['"]""", re.IGNORECASE)
 
+# --------------------------------------------------------------------------- #
+# 方言增量黑名单（二十一期 spec D11）：通用黑名单之外按引擎追加
+# --------------------------------------------------------------------------- #
+# MySQL 语句族：USE 切库 / SHOW 元数据 / KILL 连接 / PREPARE 家族二次注入 /
+# LOAD 数据导入 / 事务与锁语句族 / 管理语句（FLUSH/OPTIMIZE/RENAME/TRUNCATE/
+# GRANT/REVOKE/HANDLER/DO/SHUTDOWN/PURGE/HELP）；OUTFILE/DUMPFILE 为
+# SELECT ... INTO OUTFILE 写服务器文件的目标子句（AST Into 节点另有拦截）
+_DIALECT_EXTRA_KEYWORDS: dict[str, frozenset[str]] = {
+    "mysql": frozenset(
+        {
+            "USE",
+            "SHOW",
+            "KILL",
+            "PREPARE",
+            "EXECUTE",
+            "DEALLOCATE",
+            "LOAD",
+            "START",
+            "XA",
+            "FLUSH",
+            "ANALYZE",
+            "OPTIMIZE",
+            "RENAME",
+            "TRUNCATE",
+            "GRANT",
+            "REVOKE",
+            "HANDLER",
+            "DO",
+            "SHUTDOWN",
+            "PURGE",
+            "HELP",
+            "OUTFILE",
+            "DUMPFILE",
+        }
+    ),
+}
+# MySQL 函数族：load_file 读服务器文件 / sleep、benchmark DoS / 锁滥用族
+_DIALECT_EXTRA_FUNC_RE: dict[str, re.Pattern[str]] = {
+    "mysql": re.compile(
+        r"\b(?:load_file|sleep|benchmark|get_lock|release_lock|is_used_lock|is_free_lock)\s*\(",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _resolve_dialect(dialect: str | None) -> str:
+    """解析执行方言：显式传入优先，缺省取当前后端 adapter 的方言。"""
+    if dialect is not None:
+        return dialect
+    from exec.engine import get_adapter  # 惰性导入：engine 顶层不反向依赖 guards
+
+    return get_adapter().dialect
+
 
 def _strip_sql_comments(sql: str) -> str:
     """移除 SQL 注释，同时保留字符串内容，避免误判字面量。"""
@@ -187,18 +240,20 @@ def _func_name(node: exp.Func) -> str | None:
     return name.lower() if name else None
 
 
-def _assert_read_only_structure(sql: str) -> None:
+def _assert_read_only_structure(sql: str, dialect: str = "duckdb") -> None:
     """sqlglot AST 结构化只读校验（P0-1 主防线，取代纯正则黑名单）。
 
-    四个条件（全部 fail-closed）：
+    五个条件（全部 fail-closed）：
     1. 恰好解析为一条语句；
     2. 根节点必须是 SELECT / UNION（WITH 是 Select 的属性，自然覆盖）；
     3. 全树不允许出现被禁函数（read_*/parquet_*/sqlite_*/*_scan/*_query 等家族）；
     4. 全树不允许引号/字符串字面量表引用（FROM '<path>' / FROM "path"）与
-       SELECT INTO 写表语句。
+       SELECT INTO 写表语句；
+    5. MySQL 方言额外拒绝锁语句节点（FOR UPDATE / LOCK IN SHARE MODE——
+       读锁同样占用锁资源且形态非纯只读）。
     """
     try:
-        statements = sqlglot.parse(sql, read="duckdb")
+        statements = sqlglot.parse(sql, read=dialect)
     except sqlglot.errors.ParseError as exc:
         raise UnsafeSqlError(f"SQL 解析失败，拒绝执行: {exc}") from exc
     if len(statements) != 1:
@@ -209,6 +264,8 @@ def _assert_read_only_structure(sql: str) -> None:
     for node in root.walk():
         if isinstance(node, exp.Into):
             raise UnsafeSqlError("拒绝 SELECT INTO 写表语句")
+        if dialect == "mysql" and isinstance(node, exp.Lock):
+            raise UnsafeSqlError("拒绝 SELECT ... FOR UPDATE / LOCK IN SHARE MODE 锁语句")
         if isinstance(node, exp.Func):
             name = _func_name(node)
             if name and _FORBIDDEN_FUNCTION_RE.fullmatch(name):
@@ -221,18 +278,24 @@ def _assert_read_only_structure(sql: str) -> None:
                 raise UnsafeSqlError(f"拒绝字符串/引号字面量表引用: {node.sql()}")
 
 
-def assert_read_only_sql(sql: str) -> None:
-    """硬断言 SQL 是单条只读 SELECT/WITH（P0-1 加固）。
+def assert_read_only_sql(sql: str, dialect: str | None = None) -> None:
+    """硬断言 SQL 是单条只读 SELECT/WITH（P0-1 加固；方言感知，spec D11）。
+
+    参数 dialect 缺省取当前后端 adapter 的方言（测试可显式指定）。
 
     四层防线（全部 fail-closed）：
     1. 语句形态：仅 SELECT/WITH 开头、无分号堆叠；
-    2. 语句级黑名单：DDL/DML/COPY/EXPORT/IMPORT/INSTALL/LOAD 等外部资源语句；
+    2. 语句级黑名单：DDL/DML/COPY/EXPORT/IMPORT/INSTALL/LOAD 等外部资源语句
+       （叠加方言增量：MySQL 的 USE/SHOW/KILL/PREPARE/OUTFILE 等）；
     3. 函数调用级黑名单：read_* / *_scan / *_query / parquet_* / glob / query 等
        可读取任意本地文件或外部数据源的表函数（渗透测试已实锤 read_csv 可外泄文件），
        以及 FROM '<path>' 字符串字面量表引用（DuckDB 等价直接读文件）；
-    4. sqlglot AST 结构性校验：根节点必须为 SELECT，全树拒绝被禁函数家族、
-       引号字符串表引用与 SELECT INTO（取代纯正则黑名单，杜绝引号/别名/嵌套绕过）。
+       MySQL 增量 load_file/sleep/benchmark/锁族；
+    4. sqlglot AST 结构性校验（按方言解析）：根节点必须为 SELECT，全树拒绝
+       被禁函数家族、引号字符串表引用、SELECT INTO 与（MySQL）锁语句
+       （取代纯正则黑名单，杜绝引号/别名/嵌套绕过）。
     """
+    dialect = _resolve_dialect(dialect)
     code = _sql_code_without_literals(_strip_sql_comments(sql))
     tokens = code.strip().split()
     if not tokens or tokens[0].upper() not in {"SELECT", "WITH"}:
@@ -240,16 +303,19 @@ def assert_read_only_sql(sql: str) -> None:
     if ";" in code:
         raise UnsafeSqlError("拒绝执行多语句 SQL")
     upper = code.upper()
-    for keyword in _FORBIDDEN_SQL_KEYWORDS:
+    for keyword in _FORBIDDEN_SQL_KEYWORDS | _DIALECT_EXTRA_KEYWORDS.get(dialect, frozenset()):
         if re.search(rf"\b{keyword}\b", upper):
             raise UnsafeSqlError(f"检测到被禁止的 SQL 关键字: {keyword}")
-    if _FORBIDDEN_FUNCTION_CALL_RE.search(code):
+    extra_func = _DIALECT_EXTRA_FUNC_RE.get(dialect)
+    if _FORBIDDEN_FUNCTION_CALL_RE.search(code) or (
+        extra_func is not None and extra_func.search(code)
+    ):
         raise UnsafeSqlError(
             "检测到被禁止的表函数调用（read_*/ *_scan/glob/query 可读取外部文件，已拒绝）"
         )
     if _FROM_STRING_TABLE_RE.search(_strip_sql_comments(sql)):
         raise UnsafeSqlError("拒绝字符串字面量表引用（FROM '<path>' 等价直接读取本地文件）")
-    _assert_read_only_structure(sql)
+    _assert_read_only_structure(sql, dialect=dialect)
 
 
 # --------------------------------------------------------------------------- #
@@ -353,7 +419,7 @@ def execute_sql(
 
         adapter = get_adapter()
     try:
-        assert_read_only_sql(sql)
+        assert_read_only_sql(sql, dialect=adapter.dialect)
     except UnsafeSqlError:
         # 高危拦截（P0 防线）：必须留痕供安全审计，不改变异常传播
         logger.exception("只读白名单拦截非只读/高危 SQL")
@@ -363,7 +429,7 @@ def execute_sql(
     from exec.audit import GuardrailRejected, assert_guardrails
 
     try:
-        guard_warnings = [f.to_dict() for f in assert_guardrails(sql)]
+        guard_warnings = [f.to_dict() for f in assert_guardrails(sql, dialect=adapter.dialect)]
     except GuardrailRejected as exc:
         logger.error("执行前审计拒绝（笛卡尔积/只读结构违规）", extra={"error": str(exc)[:500]})
         raise

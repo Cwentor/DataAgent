@@ -103,15 +103,18 @@ def _is_scalar_aggregate(root: exp.Expression) -> bool:
     return False
 
 
-def audit_compiled_sql(sql: str) -> list[GuardrailFinding]:
+def audit_compiled_sql(sql: str, dialect: str | None = None) -> list[GuardrailFinding]:
     """对编译产物 SQL 做执行前静态审计，返回全部发现（空列表 = APPROVED）。
 
-    只读结构校验复用 sqlglot AST 主防线（fail-closed：解析失败按 REJECTED
-    处理）；笛卡尔积与无界输出为增量检查。
+    只读结构校验复用 sqlglot AST 主防线（按 dialect 解析，fail-closed：
+    解析失败按 REJECTED 处理）；笛卡尔积与无界输出为增量检查。
     """
+    from exec.guards import _resolve_dialect
+
+    dialect = _resolve_dialect(dialect)
     findings: list[GuardrailFinding] = []
     try:
-        statements = sqlglot.parse(sql, read="duckdb")
+        statements = sqlglot.parse(sql, read=dialect)
     except sqlglot.errors.ParseError as exc:
         return [
             GuardrailFinding(
@@ -134,7 +137,7 @@ def audit_compiled_sql(sql: str) -> list[GuardrailFinding]:
 
     # 1) 只读结构（与 exec.guards._assert_read_only_structure 同源，冗余防御）
     try:
-        _assert_read_only_structure(sql)
+        _assert_read_only_structure(sql, dialect=dialect)
     except UnsafeSqlError as exc:
         findings.append(
             GuardrailFinding("readonly_structure", "rejected", str(exc), "改写为合法只读 SELECT")
@@ -183,13 +186,13 @@ def audit_compiled_sql(sql: str) -> list[GuardrailFinding]:
     return findings
 
 
-def assert_guardrails(sql: str) -> list[GuardrailFinding]:
+def assert_guardrails(sql: str, dialect: str | None = None) -> list[GuardrailFinding]:
     """执行前审计门：REJECTED 级发现即抛 GuardrailRejected；返回 WARNING 级发现。
 
     供 ``exec.guards.execute_sql`` 在只读断言后调用——REJECTED 语义与
     MaxRowsScannedExceeded 一致（执行前熔断、错误可自愈）。
     """
-    findings = audit_compiled_sql(sql)
+    findings = audit_compiled_sql(sql, dialect=dialect)
     rejected = [f for f in findings if f.severity == "rejected"]
     if rejected:
         detail = "；".join(f"[{f.check}] {f.message}" for f in rejected)

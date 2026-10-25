@@ -343,3 +343,58 @@ def test_scan_cache_capacity_from_settings(monkeypatch):
     cache_scan_rows("SELECT 3", 3)  # 第 4 条写入超出容量 3，触发清空
     for i in range(4):
         assert cached_scan_rows(f"SELECT {i}") is None
+
+
+# --------------------------------------------------------------------------- #
+# 只读白名单方言化（二十一期 spec D11）：MySQL 增量黑名单
+# --------------------------------------------------------------------------- #
+
+
+class TestMysqlReadonlyBlacklist:
+    """MySQL 方言增量黑名单：语句族 / 函数族 / 锁语句各拦一路。"""
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT * FROM order_detail FOR UPDATE",
+            "SELECT * FROM order_detail LOCK IN SHARE MODE",
+            "SHOW TABLES",
+            "USE information_schema",
+            "KILL QUERY 42",
+            "PREPARE stmt FROM 'SELECT 1'",
+            "SELECT SLEEP(10)",
+            "SELECT BENCHMARK(1000000, MD5('x'))",
+            "SELECT LOAD_FILE('/etc/passwd')",
+            "SELECT GET_LOCK('a', 10)",
+        ],
+    )
+    def test_mysql_dangerous_rejected(self, sql):
+        from exec.guards import UnsafeSqlError, assert_read_only_sql
+
+        with pytest.raises(UnsafeSqlError):
+            assert_read_only_sql(sql, dialect="mysql")
+
+    def test_plain_select_accepted_in_both_dialects(self):
+        """方言化不破坏既有口径：普通 SELECT 在两方言都放行。"""
+        from exec.guards import assert_read_only_sql
+
+        assert_read_only_sql("SELECT 1 AS x", dialect="mysql")
+        assert_read_only_sql("SELECT 1 AS x", dialect="duckdb")
+
+    def test_mysql_only_blacklist_not_leaking_to_duckdb(self):
+        """方言增量只作用于 mysql：SHOW 等语句在 duckdb 白名单下仍走通用拦截路径
+        （duckdb 解析 SHOW 会因非 SELECT 根节点被拒——防线四兜底）。"""
+        from exec.guards import UnsafeSqlError, assert_read_only_sql
+
+        with pytest.raises(UnsafeSqlError):
+            # duckdb 方言下 SHOW 解析失败/非 SELECT 根节点，同样 fail-closed
+            assert_read_only_sql("SHOW TABLES", dialect="duckdb")
+
+    def test_default_dialect_follows_backend(self, monkeypatch):
+        """dialect 缺省取当前后端 adapter（DB_BACKEND=mysql 时 SLEEP 被拦）。"""
+        import config.settings as settings
+        from exec.guards import UnsafeSqlError, assert_read_only_sql
+
+        monkeypatch.setattr(settings, "DB_BACKEND", "mysql")
+        with pytest.raises(UnsafeSqlError):
+            assert_read_only_sql("SELECT SLEEP(1)")
