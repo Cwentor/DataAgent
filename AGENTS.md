@@ -72,12 +72,19 @@ ruff check --fix .
 # 重建本地数仓（幂等，Gmall 电商模型：业务表 + 埋点日志解析入仓）
 python -m mock.init_duckdb
 
+# 重建 MySQL 版数仓（二十一期可选后端：DDL 运行时转译 + 同源数据；
+# 需 .env 配置 MYSQL_* 与可写账号，库需预先存在）
+python -m mock.init_mysql
+
 # 重建埋点日志解析链路的种子数据（仅种子变更时需要，需 mock/gmall/upstream/gmall.sql）
 python -m mock.gmall.seed_extract
 
-# 评测（oracle / agent 双模式）
+# 评测（oracle / agent 双模式；--backend mysql 仅做连通性冒烟——golden 锚定 DuckDB 方言）
 python -m eval.eval_runner
 python -m eval.eval_runner --pipeline agent
+
+# 双后端一致性回归（需 MYSQL_TEST_* 指向已 init_mysql 的测试库，未配置自动跳过）
+python -m pytest tests/test_dual_backend_parity.py -q
 
 # 启动 Web 可视化 UI（默认 8000）
 python -m web.server 8000
@@ -90,7 +97,9 @@ semantic/   语义目录 + DSL 契约（Single Source of Truth）
 compiler/   DSL -> SQL 确定性编译器
 agent/      NL -> DSL Agent（LLM + 启发式兜底 + 意图路由 + 多轮记忆 + 多工具调度）
 exec/       SQL 执行层（P0/P1 资源治理：执行前审计门 / 超时取消 / 扫描行数熔断 / LIMIT 硬上限 /
-            只读连接池 / 查询结果缓存）
+            只读连接池 / 查询结果缓存；二十一期 engine/ 执行引擎抽象层：EngineAdapter
+            协议 + duckdb/mysql 双 adapter——连接/取消/计划解析/异常归一/加固按引擎下沉，
+            护栏框架引擎无关）
 core/retrieval/ 追加（十九期）：sql_lift.py 提升闸门（LLM SQL -> DSL 转译，
             拒升精确清单喂回自愈）；exploration.py 探索执行器（审批门 + 安全
             视图受治理执行）；二者构成三层同心圆取数架构的 L2/L3 层
@@ -177,6 +186,18 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas +
   跨域查询 CompileError，流量域 time_field 用 page_view_time/action_time 等）。确定性三原则不变：
   种子 42、锚点 AS_OF_DATE=2025-12-31（数据域 2021-01-01 ~ 2025-12-31）、单 rng 顺序消费——改生成器逻辑须先跑
   行数/指纹对照并重固化 golden（eval/rebuild_golden.py）。
+
+- MySQL 执行后端（二十一期，2026-10）：`DB_BACKEND=duckdb|mysql`（默认 duckdb 零破坏）；
+  执行引擎抽象层 `exec/engine/`（EngineAdapter：连接/取消/计划解析/异常归一/加固）与
+  编译方言层 `compiler/dialect/`（DialectRenderer：quote/date_trunc/时间字面量/spine/转义）
+  承载引擎差异，消费方零改动；MySQL 侧只读三防线 = 只读账号 + `SET SESSION TRANSACTION
+  READ ONLY` + 方言增量黑名单（USE/SHOW/KILL/PREPARE/OUTFILE/sleep/benchmark/load_file 等
+  + exp.Lock 锁语句）；超时 = 服务端 max_execution_time（3024 归一）；扫描熔断 =
+  EXPLAIN ANALYZE actual rows（cost 估算不混入）；探索层 sec_* 安全面在 MySQL 为
+  **内联派生表**（无 TEMP VIEW，投影/RLS 与视图版同一 build_secure_projection）；
+  反斜杠双保险（NO_BACKSLASH_ESCAPES 会话 + 转义翻倍）；week 口径 WEEKDAY 周一对齐
+  （禁用 WEEK()/YEARWEEK）；MySQL 版本演进须跟随回归（spec §8.1，升级先跑全量 +
+  tests/test_dual_backend_parity.py）；golden 评测锚定 DuckDB 方言不随引擎切换。
 
 - 提交前确保 `black --check .`、`ruff check .`、`python -m pytest -q` 全绿。
 
