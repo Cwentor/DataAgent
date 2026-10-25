@@ -27,12 +27,12 @@
 7. `eval --backend clickhouse` 连通性冒烟接线。
 
 **交付结构（用户已确认）**：两期两分支两 PR。本期 = ClickHouse（二十三期，
-当前分支）；Hive = 二十四期（届时另开分支，其结构性差异清单见 §11 预研纪要，
+当前分支）；Hive = 二十四期（届时另开分支，其结构性差异清单见 §12 预研纪要，
 不混入本期契约）。
 
 **非目标（本期不做）**：
 
-- 不做 ClickHouse 23.8 以下兼容（基线 >= 23.8 LTS，见 §8）；
+- 不做 ClickHouse 23.8 以下兼容（基线 >= 23.8 LTS，见 §9）；
 - 不做运行期多后端混查（一次进程一个后端，由配置决定）；
 - 不做 golden 评测集的 ClickHouse 方言重写（golden 锚定 DuckDB 方言不变，
   正确性由 parity 测试承担）；
@@ -91,13 +91,92 @@ DB_BACKEND=clickhouse
     `SETTINGS max_rows_to_read=0` 子句架空预算；profile 承载 + readonly=1
     更强且零新增抽象。
 
-## 4. 关键决策（D1-D13）
+## 4. 技术栈选型对比（选型矩阵与否决理由）
+
+> 本节是 §5 关键决策（D1-D13）的选型依据矩阵：每个决策点列出全部实质候选
+> （≥3）、多维对比与否决理由。**既定要求（用户 2026-10-26 确认）**：本项目
+> 后续各期设计文档（含二十四期 Hive）必须沿用本节格式输出选型对比表，
+> 作为规格的固定章节。
+
+### S1 驱动选型（对应 D2）
+
+| 候选 | 协议/形态 | 维护与生态 | 取消语义 | 灌数通道 | 结论 |
+|------|----------|-----------|---------|---------|------|
+| **clickhouse-connect（选定）** | HTTP(S) 8123，官方主推客户端 | 官方重心所在，活跃 | `client.cancel()` 尽力 + 服务端自限 | `insert_df` 走 Arrow 批量 | ✅ wheel 全平台免编译；运维穿透性好；低查询频次下握手开销可忽略 |
+| clickhouse-driver | 原生 TCP 9000 | 维护缓慢（官方重心已转移） | 需自验 | executemany 手写循环 | ❌ 灌数与取消两处成本高，无对冲优势 |
+| clickhouse-cpp（Python 绑定） | 原生 C++ | Python 绑定非官方一等公民，成熟度低 | 自验 | 手写 | ❌ 成熟度不足以进生产契约 |
+| 间接通道（DuckDB httpfs / MySQL 线协议） | 不新增驱动 | — | 无原生取消 | 不可控 | ❌ 方言/加固/护栏隔层，与 adapter 模式不匹配 |
+
+### S2 扫描行熔断承载（对应 D3）
+
+| 候选 | 时点/强度 | 可篡改性 | 与既有铁律 | 结论 |
+|------|----------|---------|-----------|------|
+| **profile `max_rows_to_read` 服务端硬熔断（选定）** | 执行中实时计数，超限即杀（错误码 131 归一） | readonly=1 下客户端不可改 | 预算值 `MAX_SCAN_ROWS` 直通 | ✅ 预算语义从"执行前预检"升级为"执行中硬限"；口径为多表读取总和、比既有各算子最大值口径更严（fail-safe 方向） |
+| per-query SETTINGS 注入 + readonly=2 | 执行中 | **可被探索 SQL 携带的 SETTINGS 子句架空**（readonly=2 允许客户端改 settings） | — | ❌ 用户文本直达执行面的唯一路径即被攻破 |
+| EXPLAIN ESTIMATE 预检 | 执行前（估算值） | — | **"cost 估算不混入"铁律**（二十一/二十二期教训） | ❌ 估算值非 actual，违反既有铁律 |
+| 仅 LIMIT 硬上限兜底 + warning 留痕 | 无扫描预算 | — | — | ❌ 全表扫完才截断返回，护栏强度显著弱于其他三后端 |
+
+### S3 只读承载与加固方式（对应 D4）
+
+| 候选 | 强度 | fail-closed 校验 | 结论 |
+|------|------|-----------------|------|
+| **profile readonly=1 + 验证式 harden（选定）** | 强（服务端拒绝非读请求，客户端不可篡改） | 查 `system.settings` 校验 readonly/预算与应用配置一致，不符抛 `SecurityError` | ✅ 加固从"改"变"验"；顺带捕获 profile 与应用预算的部署漂移 |
+| 会话级 SET readonly（MySQL 式） | — | — | ❌ 方案不成立：readonly=1 会话内客户端无权 SET，CH 无 MySQL `SET SESSION TRANSACTION READ ONLY` 等价物 |
+| 纯账号授权（无 profile/无验证） | 弱 | 无 | ❌ 无 fail-closed，弱配置连接可进管道 |
+| readonly=2 + settings constraints（部署约束） | 中 | 复杂 | ❌ 约束正确性依赖部署面、探索 SQL 仍可试探约束边界，复杂度不值 |
+
+### S4 spine（fill_gaps）实现（对应 D7）
+
+| 候选 | 版本安全 | 语义确定性 | 结论 |
+|------|---------|-----------|------|
+| **numbers(N) + dateAdd（选定）** | `numbers()` 远古可用 | N 由渲染器纯 Python 计算（day/week 按秒、month/quarter 手写月历算术），未知形态显式 `CompileError` | ✅ 无递归深度问题；5 年 day 粒度 1826 行量级天然承载 |
+| generateSeries 表函数 | 较新版本能力（版本赌注） | — | ❌ 兼容基线 >= 23.8 不保证覆盖 |
+| 递归 CTE（WITH RECURSIVE） | 实验态（allow_experimental_analyzer 依赖） | — | ❌ 实验特性严禁进生产契约 |
+| arrayJoin(range(...)) | 可用 | range 仅整数步长，month/quarter 步长不均匀 | ❌ 月/季步长语义破 |
+
+### S5 探索层 sec_* 安全面路线（对应 D8）
+
+| 候选 | 权限要求 | 治理语义 | 结论 |
+|------|---------|---------|------|
+| **内联派生表（复用 MySQL 路线）（选定）** | 零 DDL | 与视图版同走 `build_secure_projection`（投影/RLS/禁列同一实现） | ✅ 方法存在性分发自动落位；readonly=1 防线不放宽 |
+| TEMPORARY TABLE AS SELECT | 需 readonly=2 + allow_ddl | 物化（Memory 引擎内存占用） | ❌ 放宽只读防线 + 物化成本 |
+| 普通视图 + 专用库 | 需建库/建视图权限 | 按 principal 命名与生命周期管理 | ❌ 权限面与运维负担双增 |
+
+### S6 建仓 DDL 通道（对应 D9）
+
+| 候选 | 单一来源 | 维护成本 | 结论 |
+|------|---------|---------|------|
+| **sqlglot 运行时转译 + MergeTree/Nullable 后处理（选定）** | `schema.py` 单一事实源 | 仅后处理规则需维护 | ✅ 对拍单测锁定；与 schema_mysql/schema_postgres 同构 |
+| 手写第二份 CH DDL | ❌ 双份表结构 | 双份维护 | ❌ 违反单一事实源铁律（既有约定明令禁止） |
+| 建仓期一次性生成代码入库 | 生成物即第二份 | schema 变更需重新生成 | ❌ 漂移延后而非消除 |
+
+### S7 建仓灌数通道（对应 D10）
+
+| 候选 | 吞吐 | 复杂度 | 结论 |
+|------|------|--------|------|
+| **client.insert_df（Arrow 批量）（选定）** | 高（列式批量） | 低 | ✅ 空值清洗后语义与 MySQL/PG 通道对齐 |
+| cursor().executemany | 低 | — | ❌ **协议事实否决**：clickhouse-connect 无 cursor 协议（C8 实锤缺口） |
+| CSV 落盘 + INSERT FROM FILE | 高 | 高（临时文件编排与清理） | ❌ 本数仓规模不值；二十四期 Hive 因协议限制重新评估（§12） |
+
+### S8 时区确定性承载（对应 D13）
+
+| 候选 | 侵入面 | 结论 |
+|------|--------|------|
+| **容器/部署 TZ=UTC（选定主承载）** | 零（不进编译产物） | ✅ 部署清单固化（§9） |
+| session_timezone setting | 连接参数级 | ✅ 双保险；readonly=1 下可用性实现期验证（列入 Review Focus） |
+| 编译产物显式 toTimeZone 包裹 | 侵入全部时间表达式 | ❌ 编译产物与 golden 复杂化，语义风险大 |
+
+## 5. 关键决策（D1-D13）
+
+> 选型依据矩阵见 §4（S1-S8 与 D2/D3/D4/D7/D8/D9/D10/D13 一一对应）；本节
+> 记录决策本身与不可比对的工程裁决（D1 交付结构、D5 超时取消、D6 九原语、
+> D11/D12 配置与 CI）。
 
 ### D1 交付结构：两期两分支两 PR
 
 ClickHouse 二十三期（当前分支）；Hive 二十四期另开分支。Hive 存在四处
 结构性差异（无递归 CTE、无 EXPLAIN actual rows、HiveServer2 取消封装弱、
-建仓灌数性能），独立立项决策，规格与回归边界不与本期混淆（§11）。
+建仓灌数性能），独立立项决策，规格与回归边界不与本期混淆（§12）。
 
 ### D2 驱动选型：clickhouse-connect（HTTP 协议）
 
@@ -132,7 +211,7 @@ ClickHouse 二十三期（当前分支）；Hive 二十四期另开分支。Hive
 
 与二十一/二十二期同构，承载方式按 ClickHouse 语义调整：
 
-1. **运行时账号 profile `readonly=1`**（部署要求 §8）：只允许读请求，
+1. **运行时账号 profile `readonly=1`**（部署要求 §9）：只允许读请求，
    不可改 settings、不可 DDL——预算值随 profile 下发，客户端无法篡改；
 2. **验证式加固 `harden()`**：ClickHouse 下客户端无法在 readonly=1 会话内
    SET（加固从"改"变"验"）——连接建立后查询 `system.settings` 校验
@@ -140,7 +219,7 @@ ClickHouse 二十三期（当前分支）；Hive 二十四期另开分支。Hive
    `settings.MAX_SCAN_ROWS`/`QUERY_TIMEOUT_MS` 一致，任何不符抛
    `SecurityError`（严禁弱配置连接进管道；同时捕获 profile 与应用预算的
    部署漂移）；
-3. **方言增量黑名单**（C3，见 §4-D6 后的增量清单）：`SYSTEM`（SYSTEM
+3. **方言增量黑名单**（C3，见 §5-D6 后的增量清单）：`SYSTEM`（SYSTEM
    SHUTDOWN/RELOAD 等）、`KILL`、`TRUNCATE`、`OPTIMIZE`、`SETTINGS`、
    `INTO OUTFILE` 关键词 + 表函数 `url/file/s3/azure/hdfs/jdbc/odbc/mysql/
    postgresql/mongodb/remote/remoteSecure/cluster/clusterAllReplicas/input/
@@ -248,12 +327,12 @@ dialect 单测 + golden 双保险锁定）。
 ### D13 时区确定性
 
 - 列类型 DateTime 无时区语义，字面量 `toDateTime('...')` 按服务器时区解释
-  → CI 容器与部署要求统一 **TZ=UTC**（写入 §8 部署清单）。
+  → CI 容器与部署要求统一 **TZ=UTC**（写入 §9 部署清单）。
 - `session_timezone` setting（CH 23.4+）作为会话级双保险：实现期验证其在
   readonly=1 下可经连接参数生效后登记（列入 Review Focus；验证不过则仅
   依赖 TZ=UTC，诚实记录）。
 
-## 5. 安全模型对照（治理管道等价性）
+## 6. 安全模型对照（治理管道等价性）
 
 | 防线 | duckdb | mysql | postgres | **clickhouse（本期）** |
 |------|--------|-------|----------|----------------------|
@@ -267,11 +346,11 @@ dialect 单测 + golden 双保险锁定）。
 治理管道语义（LLM SQL 永不直接执行 / 只读 / RLS / 敏感数据保护 / 资源上限）
 四后端等价；差异仅在承载机制，全部 fail-closed。
 
-## 6. 配置设计
+## 7. 配置设计
 
 ```bash
 # .env 增量（CLICKHOUSE_* 组，运行时查询用 readonly profile 账号；
-# 建仓 python -m mock.init_clickhouse 复用本组但要求账号可写，两账号分离见 §8）
+# 建仓 python -m mock.init_clickhouse 复用本组但要求账号可写，两账号分离见 §9）
 CLICKHOUSE_HOST=127.0.0.1
 CLICKHOUSE_PORT=8123          # HTTP 协议口
 CLICKHOUSE_USER=dataagent_ro
@@ -288,7 +367,7 @@ CLICKHOUSE_TEST_DATABASE=gmall
 
 adapter DSN 可注入（parity 测试指向独立实例）；缺省读 settings。
 
-## 7. 确定性与可复现
+## 8. 确定性与可复现
 
 - 种子 42、`AS_OF_DATE=2025-12-31`、单 rng 顺序消费不变；`init_clickhouse`
   与 `init_duckdb` 消费同一 `build_gmall_tables` 的同一 DataFrame/rows 序列
@@ -297,7 +376,7 @@ adapter DSN 可注入（parity 测试指向独立实例）；缺省读 settings�
 - parity 比对口径复用 `tests/parity_utils.py`（rel=1e-5/abs=1e-6、行序
   无关、datetime 取日期面），勿改。
 
-## 8. 版本基线与部署要求
+## 9. 版本基线与部署要求
 
 - **兼容基线**：ClickHouse >= 23.8（LTS）；CI 锚定 >= 基线的具体 LTS tag。
   版本演进跟随策略沿二十一/二十二期 §8.1。
@@ -310,7 +389,7 @@ adapter DSN 可注入（parity 测试指向独立实例）；缺省读 settings�
 - **部署要求（建仓账号）**：CREATE/INSERT/DROP ON gmall.*（与运行时账号
   分离）。
 
-## 9. 风险与开放问题
+## 10. 风险与开放问题
 
 | # | 风险 | 处置 |
 |---|------|------|
@@ -321,7 +400,7 @@ adapter DSN 可注入（parity 测试指向独立实例）；缺省读 settings�
 | R5 | HTTP 通道大结果集内存 | LIMIT 硬上限既有护栏承担（返回行数熔断引擎无关） |
 | R6 | 反引号标识符内翻倍转义语义 | 实现期单测锁定（D6）；标识符源为 catalog 白名单 + 编译器内部别名，无注入面 |
 
-## 10. 成功标准
+## 11. 成功标准
 
 1. 本地 `black --check .`、`ruff check .`、`python -m pytest -q` 全绿
    （clickhouse parity 未配置自动跳过）；
@@ -335,7 +414,10 @@ adapter DSN 可注入（parity 测试指向独立实例）；缺省读 settings�
 6. 文档三件套齐全（本 spec + plan + tasks），AGENTS.md 增 ClickHouse 契约
    小节。
 
-## 11. 附：Hive 第二期预研纪要（仅记录差异，不定契约）
+## 12. 附：Hive 第二期预研纪要（仅记录差异，不定契约）
+
+> 既定要求（用户 2026-10-26 确认）：二十四期规格必须沿用本期 §4 格式，对
+> 驱动、spine 承载、CI 形态等每个决策点输出 ≥3 候选的选型对比表与否决理由。
 
 Hive 相对既有四后端的结构性差异，二十四期规格决策：
 
