@@ -51,6 +51,10 @@ class MySqlRenderer:
 
         raise CompileError(f"不支持的 granularity: {granularity!r}")
 
+    def date_add(self, expr: str, interval: str) -> str:
+        # MySQL DATE_ADD 同名兼容；小写渲染与迁移前内联产物逐字节一致（golden 锚点）
+        return f"date_add({expr}, {interval})"
+
     def spine_cte_sql(self, alias: str, start: str, end: str, step: str) -> str:
         # 递归 CTE：锚点行 UNION ALL 自引用递增，终点闭区间（与 DuckDB
         # generate_series 端点口径一致）；深度由连接加固 cte_max_recursion_depth 承载

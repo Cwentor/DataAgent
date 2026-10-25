@@ -193,3 +193,132 @@ class TestCompileMysqlDialect:
         after = _compile_dsl(_month_gmv_dsl(), "duckdb")
         assert before == after
         assert "date_trunc('month'" in before
+
+
+# --------------------------------------------------------------------------- #
+# PostgreSQL 方言渲染器（二十二期 spec D7/D8/D17）
+# --------------------------------------------------------------------------- #
+
+
+class TestPostgresRenderer:
+    def test_quotes_are_double_quotes(self):
+        from compiler.dialect.postgres import PostgresRenderer
+
+        r = PostgresRenderer()
+        assert r.quote_ident("gmv") == '"gmv"'
+        assert r.quote_ident('a"b') == '"a""b"'
+        assert r.quote_column("f", "order_id") == "f.order_id"
+
+    def test_backslash_not_doubled_in_string_escape(self):
+        """spec D7：PG 在 standard_conforming_strings=on 下反斜杠即字面量，翻倍反而引入多余字符。"""
+        from compiler.dialect.postgres import PostgresRenderer
+
+        r = PostgresRenderer()
+        assert r.escape_string_literal("a\\b") == "'a\\b'"
+        assert r.escape_string_literal("a'b") == "'a''b'"
+
+    def test_timestamp_literal_native(self):
+        from compiler.dialect.postgres import PostgresRenderer
+
+        r = PostgresRenderer()
+        assert (
+            r.timestamp_literal(datetime(2025, 1, 1, 0, 0, 0)) == "TIMESTAMP '2025-01-01 00:00:00'"
+        )
+        assert r.timestamp_literal("2025-01-01") == "TIMESTAMP '2025-01-01'"
+
+    def test_date_trunc_native_all_granularities(self):
+        from compiler.dialect.postgres import PostgresRenderer
+
+        r = PostgresRenderer()
+        for g in ("day", "week", "month", "quarter"):
+            assert r.date_trunc(g, "f.order_time") == f"date_trunc('{g}', f.order_time)"
+
+    def test_spine_uses_generate_series_with_pg_interval(self):
+        """spec D8：generate_series 原生集合函数，步长转译为 PG INTERVAL 字面量。"""
+        from compiler.dialect.postgres import PostgresRenderer
+
+        r = PostgresRenderer()
+        body = r.spine_cte_sql(
+            "day", "2025-01-01 00:00:00", "2025-01-03 00:00:00", "INTERVAL 1 DAY"
+        )
+        assert body == (
+            'SELECT gs AS "day" FROM generate_series(TIMESTAMP \'2025-01-01 00:00:00\', '
+            "TIMESTAMP '2025-01-03 00:00:00', INTERVAL '1 day') AS gs"
+        )
+        assert r.with_keyword() == "WITH"
+
+    def test_spine_rejects_unknown_interval_form(self):
+        """Review Focus #4：步长字面量超出编译器枚举形态即 CompileError，严禁静默拼接。"""
+        import pytest
+
+        from compiler.dialect.postgres import PostgresRenderer
+        from compiler.errors import CompileError
+
+        with pytest.raises(CompileError, match="INTERVAL"):
+            PostgresRenderer().spine_cte_sql(
+                "day", "2025-01-01 00:00:00", "2025-01-03 00:00:00", "INTERVAL 2 FORTNIGHT"
+            )
+
+    def test_date_add_additive_form(self):
+        """spec D17：PG 无 date_add 函数，以加法等价 + INTERVAL 字面量转译。"""
+        from compiler.dialect.postgres import PostgresRenderer
+
+        r = PostgresRenderer()
+        assert r.date_add("f.order_time", "INTERVAL 1 YEAR") == "f.order_time + INTERVAL '1 year'"
+        assert (
+            r.date_add("f.order_time", "INTERVAL 3 MONTH") == "f.order_time + INTERVAL '3 month'"
+        )
+
+
+def test_date_add_byte_identical_on_anchored_dialects():
+    """golden 锚点保护：DuckDB/MySQL 的 date_add 渲染与迁移前内联产物逐字节一致。"""
+    from compiler.dialect.duckdb import DuckDbRenderer
+    from compiler.dialect.mysql import MySqlRenderer
+
+    assert DuckDbRenderer().date_add("d.ts", "INTERVAL 1 YEAR") == "date_add(d.ts, INTERVAL 1 YEAR)"
+    assert (
+        MySqlRenderer().date_add("d.ts", "INTERVAL 1 MONTH") == "date_add(d.ts, INTERVAL 1 MONTH)"
+    )
+
+
+def test_get_renderer_supports_postgres():
+    """注册表化后 postgres 取得 PostgresRenderer（name 与 sqlglot 方言名一致）。"""
+    import config.settings as settings
+
+    old = settings.SQL_DIALECT
+    settings.SQL_DIALECT = "postgres"
+    try:
+        assert get_renderer().name == "postgres"
+    finally:
+        settings.SQL_DIALECT = old
+
+
+class TestCompilePostgresDialect:
+    """端到端：PostgreSQL 方言编译产物结构断言（sqlglot postgres 可解析即语法合法）。"""
+
+    def test_month_groupby_uses_native_date_trunc(self):
+        import sqlglot
+
+        sql = _compile_dsl(_month_gmv_dsl(), "postgres")
+        assert "date_trunc('month'" in sql
+        sqlglot.parse_one(sql, read="postgres")
+
+    def test_fill_gaps_compiles_to_generate_series(self):
+        import sqlglot
+
+        sql = _compile_dsl(_fill_gaps_dsl(), "postgres")
+        assert sql.startswith("WITH __spine")
+        assert "generate_series" in sql
+        assert "INTERVAL '1 day'" in sql
+        sqlglot.parse_one(sql, read="postgres")
+
+    def test_comparison_uses_additive_date_shift(self):
+        """comparison 配对在 PG 走加法平移（无 date_add 函数依赖，spec D17）。"""
+        import sqlglot
+
+        dsl = _month_gmv_dsl()
+        dsl["time_filter"]["comparison"] = "yoy"
+        sql = _compile_dsl(dsl, "postgres")
+        assert "date_add(" not in sql
+        assert "+ INTERVAL '1 year'" in sql
+        sqlglot.parse_one(sql, read="postgres")

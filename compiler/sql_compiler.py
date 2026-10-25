@@ -548,7 +548,7 @@ def _compile_with_comparison(dsl: QueryDSL) -> str:
     if time_dim is not None:
         trunc_expr = _dimension_expr(time_dim, granularity)[0]  # date_trunc(g, col)
         time_expr_cur = trunc_expr
-        time_expr_prev = f"date_add({trunc_expr}, {align_interval})"
+        time_expr_prev = get_renderer().date_add(trunc_expr, align_interval)
 
     # 维度表达式与别名（cur/prev 两 CTE 共用，保证可配对）
     dim_exprs: list[str] = []

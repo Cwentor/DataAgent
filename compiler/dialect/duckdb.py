@@ -30,6 +30,10 @@ class DuckDbRenderer:
     def date_trunc(self, granularity: str, expr: str) -> str:
         return f"date_trunc('{granularity}', {expr})"
 
+    def date_add(self, expr: str, interval: str) -> str:
+        # DuckDB 原生 date_add(timestamp, interval)——与迁移前内联渲染逐字节一致（golden 锚点）
+        return f"date_add({expr}, {interval})"
+
     def spine_cte_sql(self, alias: str, start: str, end: str, step: str) -> str:
         return (
             f"SELECT UNNEST(generate_series(TIMESTAMP '{start}', TIMESTAMP '{end}', {step})) "
