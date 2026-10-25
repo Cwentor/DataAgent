@@ -40,6 +40,15 @@ MYSQL_USER: str = os.getenv("MYSQL_USER", "dataagent_ro")
 MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "")
 MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "gmall")
 
+# PostgreSQL 执行后端连接配置（DB_BACKEND=postgres 时生效，二十二期 spec §6）
+# 运行时查询用只读账号（部署要求 GRANT SELECT ON ALL TABLES IN SCHEMA public）；
+# 建仓（python -m mock.init_postgres）复用本组配置但要求账号具备 CREATE/INSERT/DROP 权限
+POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "127.0.0.1")
+POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
+POSTGRES_USER: str = os.getenv("POSTGRES_USER", "dataagent_ro")
+POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "")
+POSTGRES_DATABASE: str = os.getenv("POSTGRES_DATABASE", "gmall")
+
 # 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
 WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
 

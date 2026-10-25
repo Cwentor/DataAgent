@@ -10,3 +10,8 @@ sqlglot>=25.0
 # MySQL 执行后端（二十一期）：纯 Python 驱动，MIT 许可；支持区间 mysql 8.0
 # （>= 8.0.18，spec §8.1 版本演进跟随策略——升级前须跑全量回归与双后端一致性测试）
 pymysql>=1.1.1,<2
+# PostgreSQL 执行后端（二十二期）：psycopg3 生态标准驱动（psycopg2 已进入仅维护
+# 模式）；二进制 wheel 全平台免编译，核心保留纯 Python 回退；按 SQLSTATE 解析异常
+# （spec D1/D4）。兼容基线 PostgreSQL >= 13（spec §8.1 版本演进跟随策略——升级前
+# 须跑全量回归与 tests/test_pg_backend_parity.py）
+psycopg[binary]>=3.2,<4
