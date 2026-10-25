@@ -14,10 +14,10 @@
 | T4 | MySQL 扫描行预检：EXPLAIN ANALYZE `actual rows` 解析（样例文本锁定，不依赖服务） | T3 | 解析单测通过（max actual rows 口径 + 不可计量路径） | ✅ 完成 | 754b467 |
 | T5 | 只读白名单方言化：sqlglot `read=` 参数化 + MySQL 语句/函数增量黑名单 + 锁语句拒绝 | T1 | MySQL 危险语句 10 例全拒；duckdb 既有渗透用例不破 | ✅ 完成 | 1899e13 |
 | T6 | MySQL 方言渲染器：反引号 / date_trunc 等价式 / WITH RECURSIVE spine / 反斜杠双保险 | T2 | 渲染单测 + 编译产物 sqlglot mysql 可解析；duckdb 输出不变 | ✅ 完成 | 43ae434 |
-| T7 | 安全面方言化：`build_secure_projection` 纯函数重构 + MySQL 内联派生表 + security 包去引擎依赖 | T1, T2 | 视图等价既有测试绿 + 派生表重写用例绿；security 不再 import duckdb | ☐ 未开始 | |
-| T8 | mock 数仓 MySQL 初始化：`schema_mysql.py` 类型映射与索引 + `init_mysql` + build 灌数分发 + web 端点 | T3 | 两方言 DDL 表/列对拍单测绿；duckdb 建仓路径回归绿 | ☐ 未开始 | |
-| T9 | catalog_loader MySQL 物理面：类型映射扩展 + table_schema 过滤 + 按后端连接 | T1 | 类型映射参数化用例 + schema 过滤用例绿 | ☐ 未开始 | |
-| T10 | 双后端一致性测试 + `eval --backend` 透传 + README/AGENTS/.env.example 收尾 | T1-T9 | 三件套 + eval oracle 全绿；有 MySQL 环境时一致性用例全过 | ☐ 未开始 | |
+| T7 | 安全面方言化：`build_secure_projection` 纯函数重构 + MySQL 内联派生表 + security 包去引擎依赖 | T1, T2 | 视图等价既有测试绿 + 派生表重写用例绿；security 不再 import duckdb | ✅ 完成 | dbee26c |
+| T8 | mock 数仓 MySQL 初始化：`schema_mysql.py` 类型映射与索引 + `init_mysql` + build 灌数分发 + web 端点 | T3 | 两方言 DDL 表/列对拍单测绿；duckdb 建仓路径回归绿 | ✅ 完成 | 45221e0 |
+| T9 | catalog_loader MySQL 物理面：类型映射扩展 + table_schema 过滤 + 按后端连接 | T1 | 类型映射参数化用例 + schema 过滤用例绿 | ✅ 完成 | 979db6e |
+| T10 | 双后端一致性测试 + `eval --backend` 透传 + README/AGENTS/.env.example 收尾 | T1-T9 | 三件套 + eval oracle 全绿；有 MySQL 环境时一致性用例全过 | ✅ 完成（服务级验证待 MySQL 环境） | 73daa69 |
 
 依赖关系：T1、T2 为地基（先后顺序固定）；T3→T4、T3→T8 为硬依赖；
 T5/T6/T7/T9 依赖仅 T1/T2，可并行推进；T10 收口依赖全部。
@@ -72,9 +72,28 @@ T5/T6/T7/T9 依赖仅 T1/T2，可并行推进；T10 收口依赖全部。
 - T6 完成：MySQL 渲染器（WEEKDAY 周一/CAST AS DATETIME/反斜杠翻倍/
   WITH RECURSIVE spine）；端到端编译用例 4 例（含方言切换还原断言）。
   提交 43ae434。累计 1069 passed + oracle 31/31。
-- 待办：T7（安全面派生表）/ T8（mock 建仓）/ T9（catalog_loader）/
-  T10（双后端一致性 + 文档收尾）；T10 服务级验证依赖本地 MySQL 环境
-  （见上方环境清单）。
+- T7 完成：投影纯函数 build_secure_projection（renderer 渲染；视图 DDL 与
+  派生表单一实现）；install/harden 迁 DuckDbAdapter，security 包零引擎依赖；
+  exploration 按方言产出（mysql 内联派生表，越权/未登记口径一致）。
+  提交 dbee26c。计划偏差：视图列引用由 `f."col"` 变 renderer 裸拼
+  `f.col`（DuckDB 语义等价，既有测试为行为断言不受影响）。
+- T8 完成：DDL 由 sqlglot 运行时转译（duckdb→mysql，TIMESTAMP→DATETIME/
+  DECIMAL 保真/VARCHAR→TEXT）替代计划中的手写 schema_mysql——对拍测试
+  锁定表/列一致且免 29 张表手工漂移风险；二级索引覆盖事实表时间轴；
+  build_gmall_tables 引擎化（DDL/灌数/行数统计按 adapter 分发）。
+  提交 45221e0。
+- T9 完成：类型映射扩展（MySQL 族；发现既有表已含 DATETIME 键去重）、
+  table_schema 过滤（MySQL 实例级 information_schema 防污染）、_fetch_all
+  双连接兼容、维度成员查询标识符方言化、build_catalog 按后端连接。
+  提交 979db6e。
+- T10 完成：tests/test_dual_backend_parity.py（golden 全量 + 周边界/5 年
+  递归/comparison 配对/池复用加固专项；数值容差 rel=1e-6、行序无关比对）；
+  eval --backend mysql 诚实冒烟（golden 锚定 DuckDB 方言不硬跑，较计划的
+  agent 管道注入收缩——双模式都以 golden SQL 执行为锚，方言错配必炸，
+  完整回归由一致性测试承担）；README/AGENTS/.env.example 收尾。
+  提交 73daa69。终态：1098 passed + 7 skipped（一致性 5 例待 MySQL 环境）
+  + oracle 31/31。
+- **全部 T1-T10 完成**。剩余服务级验证清单见上方（需本地 MySQL 8.0.18+）。
 
 <!-- 后续格式：
 ### YYYY-MM-DD
