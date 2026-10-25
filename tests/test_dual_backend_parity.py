@@ -32,13 +32,14 @@ def _norm_cell(v):
     - datetime -> date：MySQL DATE() 表达式返回 DATE、DuckDB date_trunc
       返回 TIMESTAMP(00:00:00)——按 spec D5 设计即语义等价，统一取日期面。
     """
-    from datetime import date as date_cls
     from datetime import datetime as datetime_cls
     from decimal import Decimal
 
     if isinstance(v, Decimal):
         return float(v)
-    if isinstance(v, datetime_cls) and not isinstance(v, date_cls):
+    if isinstance(v, datetime_cls):
+        # datetime 是 date 的子类：date 实例不会进本分支
+        # （isinstance(date_obj, datetime) 为 False），无需额外排除
         return v.date()
     return v
 
