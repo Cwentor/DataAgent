@@ -23,10 +23,30 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _norm_cell(v):
+    """跨引擎类型归一（比对口径，非行为差异）：
+
+    - Decimal -> float：DuckDB SUM(DECIMAL) 返回 Decimal（既有行为，不动
+      adapter 以免打穿 golden 结果哈希），MySQL 侧已 normalize 为 float——
+      数值语义相同，比对时统一 float；
+    - datetime -> date：MySQL DATE() 表达式返回 DATE、DuckDB date_trunc
+      返回 TIMESTAMP(00:00:00)——按 spec D5 设计即语义等价，统一取日期面。
+    """
+    from datetime import date as date_cls
+    from datetime import datetime as datetime_cls
+    from decimal import Decimal
+
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, datetime_cls) and not isinstance(v, date_cls):
+        return v.date()
+    return v
+
+
 def _assert_rows_equal(duck_rows, mysql_rows):
     assert len(duck_rows) == len(mysql_rows), "行数不一致"
-    duck_sorted = sorted(duck_rows, key=repr)
-    mysql_sorted = sorted(mysql_rows, key=repr)
+    duck_sorted = sorted(([_norm_cell(v) for v in r] for r in duck_rows), key=repr)
+    mysql_sorted = sorted(([_norm_cell(v) for v in r] for r in mysql_rows), key=repr)
     for rd, rm in zip(duck_sorted, mysql_sorted, strict=True):
         assert len(rd) == len(rm)
         for vd, vm in zip(rd, rm, strict=True):
@@ -107,7 +127,8 @@ def test_golden_dsls_parity(conn, mysql_conn):
 
 
 def _abs_window_dsl(granularity: str, start: str, end: str, fill_gaps: bool = False) -> dict:
-    """绝对窗口 GMV 按时间分组 DSL（形态取自 golden_dataset）。"""
+    """绝对窗口 GMV 按时间分组 DSL（形态取自 golden_dataset；limit 给足以
+    覆盖 5 年 day 粒度 1826 行——契约默认 limit=100 会截断补零序列）。"""
     dsl = {
         "metrics": [
             {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
@@ -123,6 +144,7 @@ def _abs_window_dsl(granularity: str, start: str, end: str, fill_gaps: bool = Fa
             "time_field": "order_time",
         },
         "filters": [],
+        "limit": 2000,
     }
     if fill_gaps:
         dsl["fill_gaps"] = True
