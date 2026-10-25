@@ -142,3 +142,37 @@ def test_parse_mysql_scan_rows_not_measurable_without_actual():
 
     rows, measurable = parse_mysql_scan_rows(_MYSQL_PLAN_NO_ACTUAL)
     assert rows == 0 and measurable is False
+
+
+def test_insert_dataframe_positional_mode_for_unnamed_df():
+    """无列名 DataFrame（元组行构造，columns=0..n）：位置对应 INSERT 无列子句。
+
+    DuckDB 的 INSERT INTO t SELECT * FROM df 位置对应同语义；带列子句会拼出
+    Unknown column '0'（CI mysql-parity 实锤）。具名 DataFrame 仍显式拼列。
+    """
+    import pandas as pd
+
+    captured: dict[str, object] = {}
+
+    class _Cur:
+        def executemany(self, sql, data):
+            captured["sql"] = sql
+            captured["data"] = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    unnamed = pd.DataFrame([(1, "x"), (2, "y")])  # columns: 0, 1
+    MySqlAdapter().insert_dataframe(_Conn(), "t", unnamed)
+    assert captured["sql"] == "INSERT INTO `t` VALUES (%s, %s)"
+
+    named = pd.DataFrame({"a": [1], "b": ["x"]})
+    MySqlAdapter().insert_dataframe(_Conn(), "t", named)
+    assert captured["sql"] == "INSERT INTO `t` (`a`, `b`) VALUES (%s, %s)"

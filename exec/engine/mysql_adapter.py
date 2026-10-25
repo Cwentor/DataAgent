@@ -143,9 +143,16 @@ class MySqlAdapter:
         return parse_mysql_scan_rows(plan_text)
 
     def insert_dataframe(self, conn, table: str, df) -> int:
-        cols = list(df.columns)
+        cols = [str(c) for c in df.columns]
         placeholders = ", ".join(["%s"] * len(cols))
-        sql = f"INSERT INTO `{table}` ({', '.join(f'`{c}`' for c in cols)}) VALUES ({placeholders})"
+        # 无列名 DataFrame（元组行构造，columns 为 0..n 整数）：按位置对应
+        # 灌入（与 DuckDB `INSERT INTO t SELECT * FROM df` 同语义；物理表
+        # 列名全为字母/下划线，纯数字列名即无列名形态——CI 实锤拼进列子句
+        # 报 Unknown column '0'）；具名 DataFrame 仍显式拼列。
+        if all(c.isdigit() for c in cols):
+            sql = f"INSERT INTO `{table}` VALUES ({placeholders})"
+        else:
+            sql = f"INSERT INTO `{table}` ({', '.join(f'`{c}`' for c in cols)}) VALUES ({placeholders})"
         # NaN/pd.NA -> None：pandas 空值直插 DECIMAL 列会报错（DuckDB 隐式
         # 转 NULL，对齐口径）；nullable Int64 列的 itertuples 产出 pd.NA
         import pandas as pd
