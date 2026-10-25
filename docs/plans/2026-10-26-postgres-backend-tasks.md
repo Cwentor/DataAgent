@@ -24,21 +24,21 @@ T7 独立（纯测试重构，可穿插）；T8 汇聚 T2/T3/T6/T7；T9 依赖 T
 
 ## 服务级验证清单（CI postgres-parity job 承担，本地不执行）
 
-- [ ] CI `postgres-parity` job 首绿 = PG 链路首次真实验证通过（本地开发不跑 PG，用户已确认）
-- [ ] `mock.init_postgres` 建仓成功（postgres:16 服务容器，init 失败须携带原始 DDL 自诊断）
-- [ ] golden 全量 DSL duckdb↔postgres 结果集一致（行数对照 + diff 明细）
-- [ ] 周边界 / 5 年补零 1826 行 / comparison yoy 配对 / 池复用只读 四专项通过
-- [ ] `test / mysql-parity` 两既有 job 结果不变绿（零破坏红线）
+- [x] CI `postgres-parity` job 首绿 = PG 链路首次真实验证通过（2026-10-26，PR #17 第二轮）
+- [x] `mock.init_postgres` 建仓成功（postgres:16 服务容器，首跑即通——DDL 转译与同源灌数无 R3 风险暴露）
+- [x] golden 全量 DSL duckdb↔postgres 结果集一致（行数对照 + diff 明细）
+- [x] 周边界 / 5 年补零 1826 行 / comparison yoy 配对 / 池复用只读 四专项通过
+- [x] `test / mysql-parity` 两既有 job 结果不变绿（零破坏红线）
 
 ## Review Focus 专项核对（T10 收尾时逐条打勾）
 
 | # | 失效模式 | 覆盖用例 | 结果 |
 |---|---------|---------|------|
-| 1 | statement_timeout 触发未归一（SQLSTATE 57014 裸抛） | T3 test_engine_error_timeout_57014 + CI 服务级 | ☐ |
-| 2 | PG EXPLAIN 文本漂移致不可计量被静默放行 | T3 test_parse_pg_scan_rows_not_measurable_without_actual | ☐ |
-| 3 | standard_conforming_strings 被关闭致转义口径漂移 | T3 加固基线断言 + T2 反斜杠不翻倍单测 | ☐ |
-| 4 | spine/comparison 步长字面量新形态静默拼接非法 SQL | T2 test_spine_rejects_unknown_interval_form | ☐ |
-| 5 | 无列名 DataFrame / NaN/NaT 打穿灌数通道 | T3 灌数三用例（位置模式/NaN/NaT） | ☐ |
+| 1 | statement_timeout 触发未归一（SQLSTATE 57014 裸抛） | T3 test_engine_error_timeout_57014 + CI 服务级 | ✅ |
+| 2 | PG EXPLAIN 文本漂移致不可计量被静默放行 | T3 test_parse_pg_scan_rows_not_measurable_without_actual | ✅ |
+| 3 | standard_conforming_strings 被关闭致转义口径漂移 | T3 加固基线断言 + T2 反斜杠不翻倍单测 | ✅ |
+| 4 | spine/comparison 步长字面量新形态静默拼接非法 SQL | T2 test_spine_rejects_unknown_interval_form | ✅ |
+| 5 | 无列名 DataFrame / NaN/NaT 打穿灌数通道 | T3 灌数三用例（位置模式/NaN/NaT） | ✅ |
 
 ## 执行日志（按日期追加）
 
@@ -56,3 +56,16 @@ T7 独立（纯测试重构，可穿插）；T8 汇聚 T2/T3/T6/T7；T9 依赖 T
   R4 FOR UPDATE 实际由通用关键字层拦截（AST 扩展保留兜底）/
   R5 parity_utils 用包内绝对导入（tests/ 为包）。
 - 终审：本会话作者自审（inline 模式无独立评审代理），详见台账 Final 节。
+
+### 2026-10-26（CI 门禁轮）
+
+- PR #17 首轮 CI：lint / test / mysql-parity 全绿（既有链路零破坏；
+  `Build PostgreSQL warehouse` 步骤首跑即通——DDL 转译无 R3 风险暴露）；
+  postgres-parity 4/5 通过、golden 全量用例失败。
+- **D18 规格补遗（CI 实证发现）**：HAVING 聚合后过滤产出 `HAVING "gmv" > …`
+  引用输出别名——DuckDB/MySQL 允许、PG 禁止（UndefinedColumn）。新增第 9
+  方言原语 `having_metric_ref`：DuckDB/MySQL 返回别名引用（golden 逐字节
+  不变），PG 借编译器两遍渲染机制（alias_expr）重放底层聚合表达式。
+  spec 已回写；TDD 修复（3 RED → 修 → 方言 59 绿 + 全量 1163 绿）。
+- 第二轮 CI：lint / test / mysql-parity / **postgres-parity 全绿**
+  （parity 5/5，PG 链路首次真实验证通过）。
