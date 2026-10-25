@@ -155,9 +155,11 @@ def execute_exploration_query(
         conn = default_pool().acquire()
     try:
         adapter.harden(conn)
-        if adapter.name == "duckdb":
-            # MySQL 路径安全面已内联在重写产物（派生表），无需安装
-            adapter.install_secure_views(conn, principal)
+        installer = getattr(adapter, "install_secure_views", None)
+        if installer is not None:
+            # 按方法存在性分发（spec D10）：DuckDB/PostgreSQL 走 TEMP 视图安装；
+            # MySQL 路径安全面已内联在重写产物（派生表），adapter 无此方法
+            installer(conn, principal)
         exec_result = execute_sql(
             conn,
             rewritten,

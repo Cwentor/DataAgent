@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import duckdb
 import pytest
 
@@ -180,3 +182,64 @@ def test_rewrite_mysql_rejects_unauthorized_table(monkeypatch):
     rewritten, notes = rewrite_sql_to_views("SELECT * FROM order_refund_info", "restricted")
     assert rewritten is None
     assert any("越权表" in n for n in notes)
+
+
+# --------------------------------------------------------------------------- #
+# 视图安装钩子方法存在性分发（二十二期 spec D10）：DuckDB/PG TEMP 视图同路
+# --------------------------------------------------------------------------- #
+
+
+class _StubAdapter:
+    """安装钩子分发行为验证桩（不连服务、不执行真实 SQL）。"""
+
+    name = "stub"
+    dialect = "duckdb"
+
+    def __init__(self, with_install: bool) -> None:
+        self.installed: list[str | None] = []
+        self.hardened = False
+        if with_install:
+            self.install_secure_views = self._install
+
+    def _install(self, conn, principal):
+        self.installed.append(principal)
+
+    def harden(self, conn) -> None:
+        self.hardened = True
+
+
+class _StubResult:
+    columns: ClassVar[list[str]] = ["n"]
+    rows: ClassVar[list[list[int]]] = [[1]]
+    findings: ClassVar[list[object]] = []
+
+
+def _run_with_stub(monkeypatch, adapter):
+    import core.retrieval.exploration as exploration_mod
+
+    monkeypatch.setattr("exec.engine.get_adapter", lambda: adapter)
+    monkeypatch.setattr("exec.guards.execute_sql", lambda *a, **k: _StubResult())
+    monkeypatch.setattr("core.retrieval.export.export_to_parquet", lambda *a, **k: object())
+    return exploration_mod.execute_exploration_query(
+        "SELECT order_id FROM order_detail",
+        principal="admin",
+        workspace="unused",
+        name="t",
+        conn=object(),  # 传入外部连接：不触连接池
+    )
+
+
+def test_install_hook_called_for_adapters_with_method(monkeypatch):
+    """有 install_secure_views 的 adapter（DuckDB/PostgreSQL）即调用安装钩子。"""
+    adapter = _StubAdapter(with_install=True)
+    _run_with_stub(monkeypatch, adapter)
+    assert adapter.installed == ["admin"]
+    assert adapter.hardened is True
+
+
+def test_install_hook_skipped_for_adapters_without_method(monkeypatch):
+    """无方法的 adapter（MySQL 内联派生表）不调用安装钩子、加固照常执行。"""
+    adapter = _StubAdapter(with_install=False)
+    _run_with_stub(monkeypatch, adapter)
+    assert adapter.installed == []
+    assert adapter.hardened is True
