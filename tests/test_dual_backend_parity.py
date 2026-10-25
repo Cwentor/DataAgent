@@ -39,31 +39,37 @@ def _assert_rows_equal(duck_rows, mysql_rows):
                 assert vm == vd, f"值不一致: {vd!r} vs {vm!r}"
 
 
-@pytest.fixture(scope="module")
-def mysql_conn():
-    from exec.engine.mysql_adapter import MySqlAdapter
-
-    dsn = {
+def _test_dsn() -> dict:
+    """测试库连接参数（MYSQL_TEST_* 环境变量；独立于运行时 MYSQL_* 配置）。"""
+    return {
         "host": os.environ["MYSQL_TEST_HOST"],
         "port": int(os.getenv("MYSQL_TEST_PORT", "3306")),
         "user": os.getenv("MYSQL_TEST_USER", "root"),
         "password": os.getenv("MYSQL_TEST_PASSWORD", ""),
         "database": os.getenv("MYSQL_TEST_DATABASE", "gmall"),
     }
-    conn = MySqlAdapter(dsn).connect_readonly()
+
+
+@pytest.fixture(scope="module")
+def mysql_conn():
+    from exec.engine.mysql_adapter import MySqlAdapter
+
+    conn = MySqlAdapter(_test_dsn()).connect_readonly()
     yield conn
     conn.close()
 
 
 def _compile_dsl(dsl, dialect: str) -> str:
-    """按方言编译（临时切换 settings.SQL_DIALECT，用完即还原）。"""
+    """按方言编译（dict 先过契约校验；临时切换 SQL_DIALECT 用完即还原）。"""
     import config.settings as settings
     from compiler.sql_compiler import compile_sql
+    from semantic.dsl_schema import QueryDSL
 
+    model = dsl if isinstance(dsl, QueryDSL) else QueryDSL.model_validate(dsl)
     old = settings.SQL_DIALECT
     settings.SQL_DIALECT = dialect
     try:
-        return compile_sql(dsl)
+        return compile_sql(model)
     finally:
         settings.SQL_DIALECT = old
 
@@ -84,7 +90,7 @@ def _run_dsl(dsl, duck_conn, mysql_conn):
         "mysql": execute_sql(
             mysql_conn,
             _compile_dsl(dsl, "mysql"),
-            adapter=MySqlAdapter(),
+            adapter=MySqlAdapter(_test_dsn()),
             max_result_rows=20000,
         ),
     }
@@ -162,7 +168,7 @@ def test_pool_reuse_session_still_readonly():
     from exec.engine.mysql_adapter import MySqlAdapter
     from exec.pool import ReadOnlyConnectionPool
 
-    adapter = MySqlAdapter()
+    adapter = MySqlAdapter(_test_dsn())
     pool = ReadOnlyConnectionPool(adapter, max_connections=1)
     conn = pool.acquire()
     conn2 = None
