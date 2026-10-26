@@ -52,7 +52,7 @@
 **Interfaces:**
 - Produces: `settings.CLICKHOUSE_HOST/PORT/USER/PASSWORD/DATABASE`（Task 3 adapter 缺省 DSN、Task 6 建仓消费）；clickhouse-connect 可导入（Task 3/6 消费）。
 
-- [ ] **Step 1: settings.py 增加 CLICKHOUSE_* 配置组**
+- [x] **Step 1: settings.py 增加 CLICKHOUSE_* 配置组**
 
 在 `POSTGRES_DATABASE` 行（settings.py:50）之后插入：
 
@@ -69,7 +69,7 @@ CLICKHOUSE_PASSWORD: str = os.getenv("CLICKHOUSE_PASSWORD", "")
 CLICKHOUSE_DATABASE: str = os.getenv("CLICKHOUSE_DATABASE", "gmall")
 ```
 
-- [ ] **Step 2: .env.example 增量**
+- [x] **Step 2: .env.example 增量**
 
 在 POSTGRES 组之后插入：
 
@@ -84,7 +84,7 @@ CLICKHOUSE_PASSWORD=
 CLICKHOUSE_DATABASE=gmall
 ```
 
-- [ ] **Step 3: requirements.txt 追加依赖（文件末尾）**
+- [x] **Step 3: requirements.txt 追加依赖（文件末尾）**
 
 ```text
 # ClickHouse 执行后端（二十三期）：官方主推 HTTP 客户端（选型对比 spec §4 S1——
@@ -94,7 +94,7 @@ CLICKHOUSE_DATABASE=gmall
 clickhouse-connect>=0.7,<1.0
 ```
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
 Run: `conda run -n dataagent --no-capture-output python -c "from config import settings; print(settings.CLICKHOUSE_HOST, settings.CLICKHOUSE_PORT, settings.CLICKHOUSE_DATABASE)"`
 Expected: `127.0.0.1 8123 gmall`
@@ -102,7 +102,7 @@ Expected: `127.0.0.1 8123 gmall`
 Run: `conda run -n dataagent --no-capture-output python -c "import clickhouse_connect; print(clickhouse_connect.__version__.__version__ if hasattr(clickhouse_connect.__version__, '__version__') else 'ok')"`
 Expected: 打印版本号（>= 0.7），无 ImportError
 
-- [ ] **Step 5: 质量门 + Commit**
+- [x] **Step 5: 质量门 + Commit**
 
 Run: `conda run -n dataagent --no-capture-output black --check . && conda run -n dataagent --no-capture-output ruff check .`
 Expected: 全绿
@@ -125,7 +125,7 @@ git commit -m "feat: ClickHouse 后端配置组与 clickhouse-connect 依赖基�
 - Consumes: `DialectRenderer` 协议（compiler/dialect/base.py 九原语）；`CompileError`（compiler/errors.py）。
 - Produces: `ClickHouseRenderer`（`name="clickhouse"`）、`parse_interval_step(step) -> tuple[int, str]`；`get_renderer()` 在 `settings.SQL_DIALECT="clickhouse"` 或 `DB_BACKEND="clickhouse"` 下返回 `ClickHouseRenderer` 实例（Task 3/6/7 消费）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `tests/compiler/test_dialect.py` 末尾追加（函数名英文、断言精确到字符串）：
 
@@ -258,12 +258,12 @@ def test_three_existing_renderers_unchanged_byte_wise():
         settings.SQL_DIALECT = old
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/compiler/test_dialect.py -q -k ClickHouse`
 Expected: FAIL/ERROR（`ModuleNotFoundError: compiler.dialect.clickhouse`）
 
-- [ ] **Step 3: 实现 `compiler/dialect/clickhouse.py`**
+- [x] **Step 3: 实现 `compiler/dialect/clickhouse.py`**
 
 ```python
 """ClickHouse 方言渲染器（二十三期 spec D6/D7）。
@@ -407,7 +407,7 @@ class ClickHouseRenderer:
 __all__ = ["ClickHouseRenderer", "parse_interval_step"]
 ```
 
-- [ ] **Step 4: 方言注册表登记（`compiler/dialect/__init__.py`）**
+- [x] **Step 4: 方言注册表登记（`compiler/dialect/__init__.py`）**
 
 `_RENDERER_FACTORIES` 的 `"postgres"` 行之后加：
 
@@ -417,12 +417,12 @@ __all__ = ["ClickHouseRenderer", "parse_interval_step"]
 
 同时更新 `get_renderer` 的 docstring 中"取当前方言渲染器（duckdb / mysql / postgres）"为四值枚举。
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/compiler/test_dialect.py tests/compiler -q`
 Expected: 全 PASS（含既有 duckdb/mysql/postgres 用例——三 renderer 逐字节不变回归）
 
-- [ ] **Step 6: 质量门 + Commit**
+- [x] **Step 6: 质量门 + Commit**
 
 Run: `conda run -n dataagent --no-capture-output black --check . && conda run -n dataagent --no-capture-output ruff check .`
 Expected: 全绿
@@ -445,7 +445,7 @@ git commit -m "feat: ClickHouse 方言渲染器九原语 + numbers spine 桶数�
 - Consumes: `EngineAdapter` 协议（exec/engine/base.py）；`normalize_cell`（exec/engine/normalize.py）；`QueryTimeoutError`/`SqlExecutionError`（exec/errors.py）；`settings.CLICKHOUSE_*`（Task 1）。
 - Produces: `ClickHouseAdapter`（`name="clickhouse"`、`dialect="clickhouse"`）、`parse_ch_error_code(message) -> int | None`、`HARDEN_REQUIRED_SETTINGS() -> dict[str, int]`、`CH_TIMEOUT_ERROR_CODE=159`、`CH_SCAN_LIMIT_ERROR_CODE=131`；`get_adapter("clickhouse")` 可用（Task 4/5/6/7/8 消费）。adapter **不实现** `install_secure_views`（方法存在性分发自动落内联派生表路线，spec D8）。
 
-- [ ] **Step 1: 写失败测试（tests/engine/test_clickhouse_adapter.py）**
+- [x] **Step 1: 写失败测试（tests/engine/test_clickhouse_adapter.py）**
 
 ```python
 """ClickHouse adapter 纯逻辑单测（二十三期 spec D2-D5）。
@@ -640,12 +640,12 @@ def test_timeout_and_scan_limit_constants():
     assert CH_SCAN_LIMIT_ERROR_CODE == 131
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/engine/test_clickhouse_adapter.py -q`
 Expected: FAIL/ERROR（`ModuleNotFoundError: exec.engine.clickhouse_adapter`）
 
-- [ ] **Step 3: 实现 `exec/engine/clickhouse_adapter.py`**
+- [x] **Step 3: 实现 `exec/engine/clickhouse_adapter.py`**
 
 ```python
 """ClickHouse 适配器（二十三期 spec D2-D5）：clickhouse-connect HTTP 只读执行面。
@@ -843,7 +843,7 @@ __all__ = [
 ]
 ```
 
-- [ ] **Step 4: 引擎注册表登记（`exec/engine/__init__.py`）**
+- [x] **Step 4: 引擎注册表登记（`exec/engine/__init__.py`）**
 
 `_ADAPTER_FACTORIES` 的 `"postgres"` 行之后加：
 
@@ -851,12 +851,12 @@ __all__ = [
     "clickhouse": _lazy_factory("exec.engine.clickhouse_adapter", "ClickHouseAdapter"),
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/engine -q`
 Expected: 全 PASS（既有 mysql/postgres adapter 用例零变化）
 
-- [ ] **Step 6: 质量门 + Commit**
+- [x] **Step 6: 质量门 + Commit**
 
 Run: `conda run -n dataagent --no-capture-output black --check . && conda run -n dataagent --no-capture-output ruff check .`
 Expected: 全绿
@@ -878,7 +878,7 @@ git commit -m "feat: ClickHouseAdapter 引擎适配器（验证式加固/错误�
 - Consumes: 既有四层 fail-closed 结构（语句级关键词 `\b<kw>\b` 词边界匹配 + 函数正则 + AST 结构校验）。
 - Produces: `assert_read_only_sql(sql, dialect="clickhouse")` 拒绝 SYSTEM/KILL/TRUNCATE/OPTIMIZE/SETTINGS/OUTFILE 与外部源表函数族（Task 7 parity 与生产链路隐式消费）。
 
-- [ ] **Step 1: 写失败测试（tests/exec/test_guards_clickhouse.py）**
+- [x] **Step 1: 写失败测试（tests/exec/test_guards_clickhouse.py）**
 
 ```python
 """ClickHouse 方言护栏测试（二十三期 spec D4）：增量黑名单与 AST 结构拒绝。
@@ -941,12 +941,12 @@ def test_clickhouse_normal_select_allowed():
     assert_read_only_sql("SELECT count() FROM order_detail WHERE dt = '2025-12-31'", dialect="clickhouse")
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/exec/test_guards_clickhouse.py -q`
 Expected: FAIL（clickhouse 键不存在，语句不被拒绝）
 
-- [ ] **Step 3: 实现（exec/guards.py 两处登记）**
+- [x] **Step 3: 实现（exec/guards.py 两处登记）**
 
 `_DIALECT_EXTRA_KEYWORDS` 的 `"postgres"` 键之后加：
 
@@ -993,12 +993,12 @@ Expected: FAIL（clickhouse 键不存在，语句不被拒绝）
     ),
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/exec -q`
 Expected: 全 PASS（既有护栏用例零变化）
 
-- [ ] **Step 5: 质量门 + Commit**
+- [x] **Step 5: 质量门 + Commit**
 
 ```bash
 git add exec/guards.py tests/exec/test_guards_clickhouse.py
@@ -1017,7 +1017,7 @@ git commit -m "feat: 护栏方言增量黑名单 clickhouse 键（SYSTEM/SETTING
 - Consumes: `get_renderer().name == "clickhouse"`（Task 2）；`build_secure_projection`（security/views.py，引擎无关）。
 - Produces: clickhouse 方言下探索 SQL 的表引用重写为内联派生表（与 MySQL 同一分支体，spec D8）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `tests/core/test_exploration.py` 的 `test_rewrite_sql_to_views_mysql_uses_derived_table` 之后追加（monkeypatch 模式同源，sqlglot read=clickhouse 解析锁定）：
 
@@ -1042,12 +1042,12 @@ def test_rewrite_sql_to_views_clickhouse_uses_derived_table(monkeypatch):
 
 （`rewrite_sql_to_views` / `"analyst"` 主体名以该测试文件既有 mysql 用例的实际导入与主体为准——同文件内复制其导入区与主体参数，仅改方言两处 monkeypatch 值与断言中 `read="clickhouse"`。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/core/test_exploration.py -q -k clickhouse`
 Expected: FAIL（clickhouse 方言当前走视图名引用分支，`FROM order_detail` 未被内联替换）
 
-- [ ] **Step 3: 实现（exploration.py:79）**
+- [x] **Step 3: 实现（exploration.py:79）**
 
 ```python
         if dialect in ("mysql", "clickhouse"):
@@ -1055,12 +1055,12 @@ Expected: FAIL（clickhouse 方言当前走视图名引用分支，`FROM order_d
 
 并把该分支上方注释更新为：`# MySQL 无 TEMP VIEW、ClickHouse readonly=1 下无 DDL 权限（均无临时视图能力）：基表替换为内联派生表（spec D8/D9）——投影/RLS/禁列物理缺席与视图版单一实现，无 DDL 权限要求`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/core -q`
 Expected: 全 PASS（DuckDB/MySQL 两既有路径行为不变）
 
-- [ ] **Step 5: 质量门 + Commit**
+- [x] **Step 5: 质量门 + Commit**
 
 ```bash
 git add core/retrieval/exploration.py tests/core/test_exploration.py
@@ -1081,7 +1081,7 @@ git commit -m "feat: 探索层内联派生表路线纳入 clickhouse 方言（�
 - Consumes: `DDL_STATEMENTS`（mock/gmall/schema.py 单一来源）；`ClickHouseAdapter.insert_dataframe`（Task 3）；`build_gmall_tables(conn, seed, adapter=...)`（既有）。
 - Produces: `clickhouse_ddl() -> list[str]`、`clickhouse_table_names() -> list[str]`、`create_clickhouse_tables(conn)`；`python -m mock.init_clickhouse` 入口（Task 7 parity 前置、Task 9 CI 消费）。
 
-- [ ] **Step 1: 转译形态探针（确定性后处理的输入事实）**
+- [x] **Step 1: 转译形态探针（确定性后处理的输入事实）**
 
 ```bash
 cat > /tmp/ch_ddl_probe.py <<'EOF'
@@ -1095,7 +1095,7 @@ conda run -n dataagent --no-capture-output python /tmp/ch_ddl_probe.py
 
 记录首表（base_province）产物的类型 token 形态（如 `Int32` / `String` / `DateTime` / `Decimal(38, 9)`）与是否携带 `PRIMARY KEY` 列约束——Step 2 的类型正则与 PRIMARY KEY 剥离以此为输入事实；若产物形态与本计划假设不符（如类型名不同），以实测形态修正 `_TYPE_RE` 枚举后继续。
 
-- [ ] **Step 2: 写失败测试（tests/mock/test_schema_clickhouse.py）**
+- [x] **Step 2: 写失败测试（tests/mock/test_schema_clickhouse.py）**
 
 ```python
 """ClickHouse 建仓 DDL 对拍（二十三期 spec D9）：转译 + 后处理确定性锁定。
@@ -1180,7 +1180,7 @@ def test_init_module_importable_without_side_effects(module_name):
 
 （首表快照的期望文本以 Step 1 探针实测产物 + Step 3 后处理规则为准——先按本文本写入跑红，再按**实际确定性输出**修正快照常量后跑绿，并在提交信息注明"快照锁定"。）
 
-- [ ] **Step 3: 实现 `mock/gmall/schema_clickhouse.py`**
+- [x] **Step 3: 实现 `mock/gmall/schema_clickhouse.py`**
 
 ```python
 """ClickHouse 版 Gmall 建仓 DDL（二十三期 spec D9）：DuckDB DDL 运行时转译。
@@ -1275,7 +1275,7 @@ def create_clickhouse_tables(conn) -> None:
 __all__ = ["create_clickhouse_tables", "clickhouse_ddl", "clickhouse_table_names"]
 ```
 
-- [ ] **Step 4: build.py 两处分支**
+- [x] **Step 4: build.py 两处分支**
 
 `build_gmall_tables` 建表分支（:345-352）在 `elif adapter.name == "postgres":` 块之后插入：
 
@@ -1308,12 +1308,12 @@ def _insert_seed(conn: Any, seed_rows: dict[str, list[list]], adapter) -> None:
     # ……（后续既有代码不变）
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [x] **Step 5: 跑测试确认通过**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/mock -q`
 Expected: 全 PASS（既有 mysql/postgres schema 用例零变化；首表快照按实测锁定后绿）
 
-- [ ] **Step 6: 实现 `mock/init_clickhouse.py`**
+- [x] **Step 6: 实现 `mock/init_clickhouse.py`**
 
 ```python
 """ClickHouse 版 mock 数仓初始化（二十三期 spec §6/D10）。
@@ -1411,7 +1411,7 @@ if __name__ == "__main__":
 
 （`build_gmall_tables(client, seed=SEED)` 不传 adapter——缺省按 `settings.DB_BACKEND` 现取；执行时以 `DB_BACKEND=clickhouse conda run -n dataagent python -m mock.init_clickhouse` 调用，或在 CI env 中显式 `DB_BACKEND: clickhouse`。）
 
-- [ ] **Step 7: 质量门 + Commit**
+- [x] **Step 7: 质量门 + Commit**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/mock tests/engine -q && conda run -n dataagent --no-capture-output black --check . && conda run -n dataagent --no-capture-output ruff check .`
 Expected: 全绿
@@ -1432,7 +1432,7 @@ git commit -m "feat: ClickHouse 建仓链路（DDL 转译+MergeTree/Nullable 后
 - Consumes: `tests/parity_utils.py` 共享工具（比对口径勿改）；`ClickHouseAdapter`/`get_adapter`（Task 3）；编译器（Task 2）；建仓（Task 6）。
 - Produces: 本地 skip 生效、CI 真实执行的回归面（Task 9 CI job 调用）。
 
-- [ ] **Step 1: 实现测试文件**
+- [x] **Step 1: 实现测试文件**
 
 ```python
 """ClickHouse 双后端一致性测试（二十三期 spec §6）：同一 DSL 两后端编译+执行，结果必须一致。
@@ -1585,17 +1585,17 @@ def test_pool_reuse_session_still_readonly():
         pool.close()
 ```
 
-- [ ] **Step 2: 本地收集 + skip 验证**
+- [x] **Step 2: 本地收集 + skip 验证**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/test_clickhouse_backend_parity.py -q`
 Expected: `6 skipped`（CLICKHOUSE_TEST_HOST 未配置；收集无错误）
 
-- [ ] **Step 3: 全量回归（确认零破坏）**
+- [x] **Step 3: 全量回归（确认零破坏）**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/engine tests/compiler tests/exec tests/core tests/mock -q`
 Expected: 全 PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/test_clickhouse_backend_parity.py
@@ -1613,7 +1613,7 @@ git commit -m "test: ClickHouse 双后端一致性测试（golden 全量 + 熔�
 - Consumes: `ClickHouseAdapter` + `execute_sql`（Task 3）。
 - Produces: `python -m eval.eval_runner --backend clickhouse` 冒烟入口（golden 锚定 DuckDB 不变，spec §1 目标 7）。
 
-- [ ] **Step 1: 实现（镜像 `_postgres_smoke`）**
+- [x] **Step 1: 实现（镜像 `_postgres_smoke`）**
 
 在 `_postgres_smoke` 之后追加：
 
@@ -1657,12 +1657,12 @@ def _clickhouse_smoke() -> int:
         return _clickhouse_smoke()
 ```
 
-- [ ] **Step 2: 验证（oracle 契约回归不破）**
+- [x] **Step 2: 验证（oracle 契约回归不破）**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/eval -q && conda run -n dataagent --no-capture-output python -m eval.eval_runner --skip-snapshot`
 Expected: 全 PASS；oracle 31/31 契约绿（未配置 CH 时 `--backend clickhouse` 仅在 CI 验证）
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add eval/eval_runner.py
@@ -1682,7 +1682,7 @@ git commit -m "feat: eval --backend clickhouse 连通性冒烟接线（二十三
 - Consumes: Task 6 `python -m mock.init_clickhouse`、Task 7 parity 文件。
 - Produces: CI 真实执行面（CH 链路首次真实验证）。
 
-- [ ] **Step 1: users.d 只读账号配置入库**
+- [x] **Step 1: users.d 只读账号配置入库**
 
 `.github/clickhouse/users.d/dataagent_ro.xml`（CI service 容器以 volume 挂载；密码为 CI 演示口径，与 mysql root/root 先例同级别，禁止复用到生产）：
 
@@ -1715,7 +1715,7 @@ git commit -m "feat: eval --backend clickhouse 连通性冒烟接线（二十三
 </clickhouse>
 ```
 
-- [ ] **Step 2: CI job（postgres-parity 之后追加）**
+- [x] **Step 2: CI job（postgres-parity 之后追加）**
 
 ```yaml
   # ClickHouse 服务级门禁（二十三期）：与 postgres-parity 同构——golden 全量 DSL
@@ -1764,7 +1764,7 @@ git commit -m "feat: eval --backend clickhouse 连通性冒烟接线（二十三
           CLICKHOUSE_TEST_DATABASE: gmall
 ```
 
-- [ ] **Step 3: AGENTS.md 契约小节（MySQL/PG 小节之后）**
+- [x] **Step 3: AGENTS.md 契约小节（MySQL/PG 小节之后）**
 
 ```markdown
 - ClickHouse 执行后端（二十三期，2026-10）：`DB_BACKEND` 四值
@@ -1782,12 +1782,12 @@ git commit -m "feat: eval --backend clickhouse 连通性冒烟接线（二十三
   >= 23.8、CI 锚定 24.8；golden 评测锚定 DuckDB 方言不随引擎切换。
 ```
 
-- [ ] **Step 4: 验证（workflow 语法与本地 skip）**
+- [x] **Step 4: 验证（workflow 语法与本地 skip）**
 
 Run: `conda run -n dataagent --no-capture-output python -m pytest tests/test_clickhouse_backend_parity.py -q`
 Expected: 6 skipped（本地不受 CI 变更影响）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add .github/clickhouse/users.d/dataagent_ro.xml .github/workflows/ci.yml AGENTS.md
@@ -1801,14 +1801,14 @@ git commit -m "feat: CI clickhouse-parity 门禁（users.d 只读 profile 入库
 **Files:**
 - Modify: `docs/tasks/2026-10-26-clickhouse-backend-tasks.md`（状态/执行日志/核对表收口）
 
-- [ ] **Step 1: 全量质量门**
+- [x] **Step 1: 全量质量门**
 
 Run: `conda run -n dataagent --no-capture-output black --check . && conda run -n dataagent --no-capture-output ruff check . && conda run -n dataagent --no-capture-output python -m pytest -q`
 Expected: 全绿（CH parity 6 skipped；1163+ 全过）
 
-- [ ] **Step 2: Review Focus 五条逐项核对**（结果登记 tasks 文档核对表）
+- [x] **Step 2: Review Focus 五条逐项核对**（结果登记 tasks 文档核对表）
 
-- [ ] **Step 3: tasks 文档收口**（任务总览状态、服务级验证清单勾选 CI 观察项留待推送后）
+- [x] **Step 3: tasks 文档收口**（任务总览状态、服务级验证清单勾选 CI 观察项留待推送后）
 
 - [ ] **Step 4: Commit + 推送**
 
