@@ -651,23 +651,23 @@ def ensure_db() -> None:
     """确保数仓可用，随后重建语义目录（P0-2）与权限策略（P0-3），
     使"新增表/字段/权限"全部走配置而非改代码。
 
-    DuckDB：本地文件缺失时幂等重建（mock.init_duckdb）。
-    MySQL（二十一期）：建仓是显式动作（python -m mock.init_mysql，需可写
-    账号），服务启动只做目录/策略刷新；库不可用由 refresh_catalog 快速失败。
+    按后端显式分派（二十四期 D5）——**只有 duckdb 会在启动期建仓**：
+
+    - duckdb：本地文件缺失时幂等重建（mock.init_duckdb），再按该文件刷新目录；
+    - mysql / postgres / clickhouse：建仓是显式运维动作（`python -m
+      mock.init_mysql` / `init_postgres` / `init_clickhouse`，需可写账号），
+      服务启动只刷新目录与策略，**不碰** `settings.DB_PATH`（否则会误建一个
+      无关的 DuckDB 文件）；库不可用由 refresh_catalog 快速失败（D7 不回退）。
     """
-    if settings.DB_BACKEND == "mysql":
-        from security.policy_loader import refresh_policies
-        from semantic.catalog_loader import refresh_catalog
-
-        refresh_catalog()
-        refresh_policies()
-        return
-    if not settings.DB_PATH.exists():
-        from mock.init_duckdb import main as init_db
-
-        init_db()
     from security.policy_loader import refresh_policies
     from semantic.catalog_loader import refresh_catalog
 
-    refresh_catalog(db_path=settings.DB_PATH)
+    if settings.DB_BACKEND == "duckdb":
+        if not settings.DB_PATH.exists():
+            from mock.init_duckdb import main as init_db
+
+            init_db()
+        refresh_catalog(db_path=settings.DB_PATH)
+    else:
+        refresh_catalog()
     refresh_policies()
