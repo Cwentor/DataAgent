@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from config import settings
+from exec.engine.base import physical_from_rows
 from exec.engine.normalize import normalize_cell
 from exec.errors import QueryTimeoutError, SqlExecutionError
 
@@ -163,6 +164,35 @@ class MySqlAdapter:
             for i in range(0, len(data), 5000):
                 cur.executemany(sql, data[i : i + 5000])
         return len(data)
+
+    def physical_columns(self, conn=None) -> dict[str, dict[str, str]]:
+        """MySQL 物理列（二十四期 spec D1/D3/D4）：按当前库过滤 information_schema。
+
+        实例级 `information_schema.columns` 含全部库的列，必须按
+        `settings.MYSQL_DATABASE` 过滤（否则目录被其他库污染，二十一期 §9 隐患）。
+
+        占位符为 `%s`（pymysql 参数风格）：`execute(sql, args)` 内部走
+        `query % escaped_args`，若沿用 DuckDB 的 `?` 会抛
+        `TypeError: not all arguments converted during string formatting`
+        ——该分支自二十一期起只被 fake 连接单测覆盖，从未在真实驱动上执行过，
+        二十四期修正并加"参数风格断言"用例锁定。
+        """
+        sql = (
+            "SELECT table_name, column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = %s ORDER BY table_name, ordinal_position"
+        )
+        own = None
+        if conn is None:
+            own = self.connect_readonly()
+            conn = own
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (settings.MYSQL_DATABASE,))
+                rows = cur.fetchall()
+        finally:
+            if own is not None:
+                own.close()
+        return physical_from_rows(rows)
 
 
 __all__ = ["ER_QUERY_TIMEOUT", "HARDEN_STATEMENTS", "MySqlAdapter"]
