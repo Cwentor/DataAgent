@@ -25,7 +25,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 # 本地开发零成本数仓文件（模块 C 生成）
 DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 
-# 查询执行后端（二十一期）：duckdb（默认，零破坏）| mysql
+# 查询执行后端（二十一期起，二十三期四值）：duckdb（默认，零破坏）| mysql |
+# postgres | clickhouse
 DB_BACKEND: str = os.getenv("DB_BACKEND", "duckdb")
 # SQL 方言（编译器渲染目标，二十一期）：缺省跟随 DB_BACKEND 推导；
 # 可独立覆盖（测试/排查用，如 duckdb 后端下单独产出 mysql 方言 SQL）
@@ -48,6 +49,17 @@ POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
 POSTGRES_USER: str = os.getenv("POSTGRES_USER", "dataagent_ro")
 POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "")
 POSTGRES_DATABASE: str = os.getenv("POSTGRES_DATABASE", "gmall")
+
+# ClickHouse 执行后端连接配置（二十三期 spec §6，DB_BACKEND=clickhouse 时生效）
+# 运行时查询用 readonly profile 账号（部署要求 readonly=1 + max_rows_to_read /
+# max_execution_time 与 MAX_SCAN_ROWS / QUERY_TIMEOUT_MS 一致，harden 验证式
+# fail-closed 校验）；建仓（python -m mock.init_clickhouse）复用本组配置但要求
+# 账号具备 CREATE/INSERT/DROP 权限（两账号分离见 spec §9）
+CLICKHOUSE_HOST: str = os.getenv("CLICKHOUSE_HOST", "127.0.0.1")
+CLICKHOUSE_PORT: int = int(os.getenv("CLICKHOUSE_PORT", "8123"))
+CLICKHOUSE_USER: str = os.getenv("CLICKHOUSE_USER", "dataagent_ro")
+CLICKHOUSE_PASSWORD: str = os.getenv("CLICKHOUSE_PASSWORD", "")
+CLICKHOUSE_DATABASE: str = os.getenv("CLICKHOUSE_DATABASE", "gmall")
 
 # 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
 WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
