@@ -1,14 +1,17 @@
-"""语义目录加载器（P0-2）：从 DuckDB 元数据 + 配置覆写重建受控目录。
+"""语义目录加载器（P0-2）：从数仓元数据 + 配置覆写重建受控目录。
 
 背景（审计 P0-2）：semantic/catalog.py 的 COLUMNS/JOIN_RULES 原是模块常量硬编码，
 项目自己的 _field_metadata/_table_metadata 元数据表完全不被消费——新增表/字段必须
 改 Python 代码。本模块把目录改为"数据驱动"：
 
-- 物理面：读取 DuckDB information_schema.columns（表/列/类型），保证目录与库内一致；
+- 物理面：经 `EngineAdapter.physical_columns()` 读取（二十四期下沉；DuckDB/MySQL/
+  PostgreSQL 走 information_schema.columns，ClickHouse 走 system.columns），
+  保证目录与库内一致；本模块不再感知任何后端类型差异与占位符方言；
 - 逻辑面：读取 config/semantic.json 覆写（可选，JSON 零依赖；.yaml 在装有 PyYAML
   时同样支持）：声明哪些物理列暴露为逻辑字段、逻辑字段名、类型覆写、表别名、
   事实表锚点与受控连接声明（JoinRule，不再裸拼 SQL）；
-- 无覆写文件时回退到 catalog.py 内置默认目录（但若库可用，仍会与物理元数据校验）。
+- 无覆写文件时回退到 catalog.py 内置默认目录（duckdb 且库不可用时允许离线回退；
+  非 duckdb 后端读不到物理元数据即报错，严禁静默降级，spec D7）。
 
 用法：
 - 服务启动：web.service.ensure_db() 建库后调用 refresh_catalog()，目录即与库同步；
@@ -27,6 +30,7 @@ from typing import Any
 import duckdb
 
 from config import settings
+from exec.engine.duckdb_adapter import DuckDbAdapter
 from semantic import catalog
 from semantic.catalog import FieldMeta, JoinRule
 
@@ -71,41 +75,6 @@ _DIMENSION_MEMBER_CAP = 512
 # 默认覆写文件（项目根 config/ 下）
 DEFAULT_OVERLAY_PATH: Path = settings.PROJECT_ROOT / "config" / "semantic.json"
 
-# DuckDB data_type -> 目录 dtype（字面量安全转义用）
-_DTYPE_MAP: dict[str, str] = {
-    "INTEGER": "int",
-    "BIGINT": "int",
-    "SMALLINT": "int",
-    "TINYINT": "int",
-    "HUGEINT": "int",
-    "UBIGINT": "int",
-    "UINTEGER": "int",
-    "USMALLINT": "int",
-    "UTINYINT": "int",
-    "DOUBLE": "float",
-    "REAL": "float",
-    "FLOAT": "float",
-    "DECIMAL": "float",
-    "VARCHAR": "str",
-    "TEXT": "str",
-    "UUID": "str",
-    "TIMESTAMP": "timestamp",
-    "TIMESTAMP WITH TIME ZONE": "timestamp",
-    "DATE": "timestamp",
-    # ClickHouse 侧 DATE 列按 Date32 建（CH Date 只覆盖 1970..2149）
-    "DATE32": "timestamp",
-    # MySQL 类型族（二十一期 spec：physical 面按后端读取 information_schema）
-    "INT": "int",
-    "MEDIUMINT": "int",
-    "NUMERIC": "float",
-    "CHAR": "str",
-    "TINYTEXT": "str",
-    "MEDIUMTEXT": "str",
-    "LONGTEXT": "str",
-    "DATETIME": "timestamp",
-    "BOOLEAN": "bool",
-}
-
 
 @dataclass(frozen=True)
 class Catalog:
@@ -139,18 +108,6 @@ class Catalog:
 # --------------------------------------------------------------------------- #
 # 物理元数据
 # --------------------------------------------------------------------------- #
-def _fetch_all(conn, sql: str, params: tuple | None = None) -> list[tuple]:
-    """执行只读元数据查询并 fetchall（duckdb / pymysql 连接双兼容）。
-
-    DuckDB 连接有 execute 直用；pymysql 连接无 execute、走显式 cursor。
-    """
-    if hasattr(conn, "execute"):
-        return conn.execute(sql, list(params or ())).fetchall()
-    with conn.cursor() as cur:
-        cur.execute(sql, params or ())
-        return cur.fetchall()
-
-
 def _quote(name: str) -> str:
     """元数据查询标识符按当前方言渲染（duckdb 双引号 / mysql 反引号）。"""
     from compiler.dialect import get_renderer
@@ -158,45 +115,18 @@ def _quote(name: str) -> str:
     return get_renderer().quote_ident(name)
 
 
-def _map_dtype(duckdb_type: str) -> str:
-    # 带精度/刻度的类型（DECIMAL(16,2) 等）取括号前的基类型映射
-    base = str(duckdb_type).upper().strip().split("(")[0].strip()
-    mapped = _DTYPE_MAP.get(base)
-    if mapped is None:
-        raise ValueError(f"未支持的数据库类型: {duckdb_type!r}，请在 catalog_loader 中登记")
-    return mapped
-
-
-def _physical_columns(conn, schema: str | None = None) -> dict[str, dict[str, str]]:
-    """table -> {column: dtype}；跳过下划线前缀的元数据表（_field_metadata 等）。
-
-    schema 过滤（二十一期）：MySQL 的 information_schema.columns 含实例内
-    全部库的列，必须按当前库过滤（spec §9 隐患）；DuckDB 单库无妨（None
-    保持现状无过滤）。
-    """
-    sql = "SELECT table_name, column_name, data_type " "FROM information_schema.columns"
-    params: tuple[str, ...] = ()
-    if schema is not None:
-        sql += " WHERE table_schema = ?"
-        params = (schema,)
-    sql += " ORDER BY table_name, ordinal_position"
-    rows = _fetch_all(conn, sql, params)
-    out: dict[str, dict[str, str]] = {}
-    for table, column, dtype in rows:
-        if str(table).startswith("_"):
-            continue
-        out.setdefault(str(table), {})[str(column)] = _map_dtype(str(dtype))
-    return out
-
-
 def _load_dimension_members(
-    conn: duckdb.DuckDBPyConnection, columns: dict[str, FieldMeta], member_fields: tuple[str, ...]
+    adapter, conn, columns: dict[str, FieldMeta], member_fields: tuple[str, ...]
 ) -> dict[str, tuple[str, ...]]:
     """从数仓读取配置白名单内 str 维度字段的 distinct 成员值（数据驱动词汇表）。
 
     字段范围由 DIMENSION_MEMBER_FIELDS（或 overlay 的 dimension_member_fields）
-    声明，新增维度字段无需改代码；表名/列名来自目录白名单（非用户输入），
-    每字段 distinct 值按 _DIMENSION_MEMBER_CAP 截断防御高基数异常表。
+    声明，新增维度字段无需改代码；表名/列名来自目录白名单（非用户输入，经方言
+    渲染器引号包裹），每字段 distinct 值按 _DIMENSION_MEMBER_CAP 截断防御高基数
+    异常表。
+
+    执行通道为 `adapter.run_query(conn, sql)`（二十四期 D6）：SQL 内无参数，
+    与执行层统一签名天然匹配，四后端通用。
     """
     members: dict[str, tuple[str, ...]] = {}
     for name in member_fields:
@@ -204,7 +134,7 @@ def _load_dimension_members(
         if meta is None or meta.dtype != "str":
             continue
         col_q, table_q = _quote(meta.column), _quote(meta.table)
-        rows = _fetch_all(
+        _, rows = adapter.run_query(
             conn,
             f"SELECT DISTINCT {col_q} FROM {table_q} "
             f"WHERE {col_q} IS NOT NULL ORDER BY 1 LIMIT {_DIMENSION_MEMBER_CAP}",
@@ -342,8 +272,11 @@ def _build_from_overlay(
                 raise ValueError(f"覆写字段 {name!r} 指向的表 {table!r} 不在数据库中")
             if column not in tbl:
                 raise ValueError(f"覆写字段 {name!r} 指向的列 {table}.{column} 不在数据库中")
+        # 未显式声明 dtype 时取物理列类型——`physical` 已由
+        # `EngineAdapter.physical_columns()` 归一为目录 dtype（二十四期 D1），
+        # 此处无需再映射一次
         dtype = str(spec.get("dtype", "")) or (
-            _map_dtype(physical[table][column]) if physical is not None else "str"
+            physical[table][column] if physical is not None else "str"
         )
         # 中文标签：覆写显式声明优先；缺省（或显式 null）回退内置默认文案，
         # 内置目录也未登记的新字段为 None（消费方回退物理列名）。
@@ -465,32 +398,58 @@ def build_catalog(
     db_path: Path | str | None = None,
     conn: duckdb.DuckDBPyConnection | None = None,
     overlay_path: Path | str | None = None,
+    adapter: Any | None = None,
 ) -> Catalog:
     """构建语义目录（纯函数，不改全局）。
 
     参数：
     - db_path：只读打开的 DuckDB 文件（物理元数据来源）；与 conn 二选一；
     - conn：已打开连接（物理元数据来源，测试用内存库）；
-    - overlay_path：覆写配置文件；默认 config/semantic.json，缺失则用内置默认。
+    - overlay_path：覆写配置文件；默认 config/semantic.json，缺失则用内置默认；
+    - adapter：引擎适配器（二十四期 spec D1）；缺省按 `settings.DB_BACKEND`
+      取 `exec.engine.get_adapter()`。物理元数据一律由
+      `adapter.physical_columns()` 提供——元数据源与占位符方言由各 adapter
+      自持，本模块不再感知任何后端类型差异。
+
+    失败语义（spec D7）：
+    - 非 duckdb 后端读不到物理元数据 → 直接抛错，**不**回退内置默认目录
+      （目录与库不一致比启动失败更危险）；
+    - duckdb 后端库文件缺失 → 回退内置默认（保留离线开发能力）。
     """
+    if adapter is None:
+        from exec.engine import get_adapter
+
+        adapter = get_adapter()
+    backend = getattr(adapter, "name", None)
+    if db_path is not None and backend != "duckdb":
+        raise ValueError(
+            f"--db 仅对 duckdb 后端有意义（当前 DB_BACKEND={backend}）；"
+            "其他后端的库地址请通过 DSN / 环境变量配置"
+        )
+
     physical: dict[str, dict[str, str]] | None = None
     own_conn = None
     try:
         if conn is not None:
-            physical = _physical_columns(conn)
+            physical = adapter.physical_columns(conn)
         elif db_path is not None and Path(db_path).is_file():
-            own_conn = duckdb.connect(str(db_path), read_only=True)
-            physical = _physical_columns(own_conn)
-        elif settings.DB_BACKEND == "mysql":
-            # MySQL（二十一期）：按配置连接并按当前库过滤 information_schema
-            # （实例级 information_schema 含全部库，不过滤即污染目录）
-            from exec.engine.mysql_adapter import MySqlAdapter
-
-            own_conn = MySqlAdapter().connect_readonly()
-            physical = _physical_columns(own_conn, schema=settings.MYSQL_DATABASE)
+            # db_path 指向非默认库文件：物理元数据必须取自该文件，故按路径
+            # 重建 adapter（adapter 无状态，构造开销可忽略）
+            adapter = DuckDbAdapter(db_path)
+            own_conn = adapter.connect_readonly()
+            physical = adapter.physical_columns(own_conn)
+        elif backend != "duckdb":
+            # 非 duckdb：adapter 自建只读连接读元数据（并负责关闭）
+            physical = adapter.physical_columns()
+            if not physical:
+                raise ValueError(
+                    f"后端 {backend} 未读到任何物理元数据，拒绝回退内置默认目录；"
+                    "请确认库已建表且连接配置（DSN / 库名 / schema）正确"
+                )
         elif settings.DB_PATH.is_file():
-            own_conn = duckdb.connect(str(settings.DB_PATH), read_only=True)
-            physical = _physical_columns(own_conn)
+            own_conn = adapter.connect_readonly()
+            physical = adapter.physical_columns(own_conn)
+        # duckdb 且库文件缺失：physical 保持 None → 回退内置默认（离线开发保留）
 
         overlay = _read_overlay(overlay_path)
         if overlay is not None:
@@ -500,9 +459,22 @@ def build_catalog(
 
         # 维度成员词汇表：库可用时按配置白名单从 distinct 值加载（数据驱动），
         # 不可用时保留内置默认回退（离线可运行）。
-        member_conn = conn if conn is not None else own_conn
-        if member_conn is not None and cat.dimension_member_fields:
-            members = _load_dimension_members(member_conn, cat.columns, cat.dimension_member_fields)
+        if cat.dimension_member_fields and physical is not None:
+            member_conn = conn if conn is not None else own_conn
+            member_own = None
+            if member_conn is None:
+                # 物理面可用但无外部连接（adapter 已自建并关闭）：另开一次只读
+                # 连接。D6 取舍——两次握手换"连接生命周期不跨函数传递"，
+                # 启动期各一次，可接受。
+                member_conn = adapter.connect_readonly()
+                member_own = member_conn
+            try:
+                members = _load_dimension_members(
+                    adapter, member_conn, cat.columns, cat.dimension_member_fields
+                )
+            finally:
+                if member_own is not None:
+                    member_own.close()
             return replace(cat, dimension_members=members)
         return cat
     finally:
@@ -514,6 +486,7 @@ def refresh_catalog(
     db_path: Path | str | None = None,
     conn: duckdb.DuckDBPyConnection | None = None,
     overlay_path: Path | str | None = None,
+    adapter: Any | None = None,
 ) -> Catalog:
     """重建并安装语义目录到 semantic.catalog 全局（服务启动时调用）。
 
@@ -525,7 +498,7 @@ def refresh_catalog(
     region_province_mapping/dimension_member_fields）同步覆写全局——
     消费方一律 catalog.XXX 动态读取，refresh 后严禁 stale（M-P0 活缺陷 #3）。
     """
-    cat = build_catalog(db_path, conn, overlay_path)
+    cat = build_catalog(db_path, conn, overlay_path, adapter)
     catalog.COLUMNS.clear()
     catalog.COLUMNS.update(cat.columns)
     catalog.ALIASES.clear()

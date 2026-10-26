@@ -201,3 +201,103 @@ def test_insert_dataframe_nat_to_none():
     df = pd.DataFrame({"t": [pd.Timestamp("2025-01-01"), pd.NaT]})
     MySqlAdapter().insert_dataframe(_Conn(), "t", df)
     assert captured["data"][1][0] is None
+
+
+# --------------------------------------------------------------------------- #
+# 物理列读取（二十四期 T3，spec D1/D3/D4）
+# --------------------------------------------------------------------------- #
+class _Cursor:
+    """pymysql cursor 形态：execute(sql, params) + fetchall + 上下文管理。"""
+
+    def __init__(self, rows, captured):
+        self._rows = rows
+        self._captured = captured
+
+    def execute(self, sql, params=None):
+        self._captured["sql"] = sql
+        self._captured["params"] = params
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+class _Conn:
+    def __init__(self, rows):
+        self._rows = rows
+        self.captured: dict[str, object] = {}
+        self.closed = False
+
+    def cursor(self):
+        return _Cursor(self._rows, self.captured)
+
+    def close(self):
+        self.closed = True
+
+
+def test_physical_columns_uses_percent_placeholder(monkeypatch):
+    """占位符必须是 `%s`（pymysql 参数风格）——`?` 在真实驱动上必抛 TypeError。
+
+    二十一期起该分支用 `?`，只被 fake 连接单测覆盖，从未在真库执行；本用例
+    锁定参数风格（Review Focus 4）与"库名取自 dsn"（注入独立库时自洽）。
+    """
+    conn = _Conn([])
+    adapter = MySqlAdapter({"database": "gmall_test"})
+    adapter.physical_columns(conn)
+    sql = str(conn.captured["sql"])
+    assert "table_schema = %s" in sql
+    assert "?" not in sql
+    assert conn.captured["params"] == ("gmall_test",)
+
+
+def test_physical_columns_maps_types_and_skips_meta_tables():
+    conn = _Conn(
+        [
+            ("order_detail", "order_id", "bigint"),
+            ("order_detail", "split_total_amount", "decimal"),
+            ("order_detail", "order_time", "datetime"),
+            ("order_detail", "note", "text"),
+            ("_field_metadata", "field", "varchar"),
+        ]
+    )
+    out = MySqlAdapter().physical_columns(conn)
+    assert out == {
+        "order_detail": {
+            "order_id": "int",
+            "split_total_amount": "float",
+            "order_time": "timestamp",
+            "note": "str",
+        }
+    }
+
+
+def test_physical_columns_closes_own_connection(monkeypatch):
+    conn = _Conn([])
+    adapter = MySqlAdapter()
+    monkeypatch.setattr(adapter, "connect_readonly", lambda: conn)
+    assert adapter.physical_columns() == {}
+    assert conn.closed is True
+
+
+def test_physical_columns_keeps_injected_connection_open():
+    conn = _Conn([])
+    MySqlAdapter().physical_columns(conn)
+    assert conn.closed is False
+
+
+def test_question_mark_placeholder_breaks_percent_formatting():
+    """根因锚：pymysql 的 execute 内部走 `query % escaped_args`。
+
+    SQL 里没有 `%s` 却传了 args → Python `%` 抛
+    `TypeError: not all arguments converted during string formatting`。
+    这解释了二十一期 `?` 分支为何在真库上必失败（CI 从未执行该路径）。
+    """
+    # 用变量承载 SQL：避免 ruff 把"故意为之的 % 格式化"判成笔误（F507/UP031）
+    sql = "SELECT 1 FROM information_schema.columns WHERE table_schema = ?"
+    with pytest.raises(TypeError, match="not all arguments converted"):
+        _ = sql % ("gmall",)

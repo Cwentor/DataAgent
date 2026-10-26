@@ -467,90 +467,106 @@ def test_builtin_catalog_missing_section_fails_fast(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# MySQL 物理面兼容（二十一期 spec：类型映射 / schema 过滤 / 标识符方言化）
+# 物理面改道 EngineAdapter（二十四期 T6）
 # --------------------------------------------------------------------------- #
+class _FakeAdapter:
+    """最小 adapter 替身：只提供 build_catalog 消费的成员。"""
+
+    def __init__(self, name: str = "mysql", physical=None) -> None:
+        self.name = name
+        self.dialect = name
+        self._physical = physical if physical is not None else {}
+        self.physical_calls: list[object] = []
+        self.connect_calls = 0
+
+    def physical_columns(self, conn=None):
+        self.physical_calls.append(conn)
+        return self._physical
+
+    def connect_readonly(self):
+        self.connect_calls += 1
+        return _NoopConn()
+
+    def run_query(self, conn, sql):
+        return [], []
 
 
-class TestMapDtypeMysql:
-    @pytest.mark.parametrize(
-        "mysql_type,expected",
-        [
-            ("int", "int"),
-            ("bigint", "int"),
-            ("smallint", "int"),
-            ("tinyint", "int"),
-            ("mediumint", "int"),
-            ("decimal", "float"),
-            ("numeric", "float"),
-            ("double", "float"),
-            ("float", "float"),
-            ("datetime", "timestamp"),
-            ("timestamp", "timestamp"),
-            ("date", "timestamp"),
-            ("varchar", "str"),
-            ("char", "str"),
-            ("text", "str"),
-            ("longtext", "str"),
-        ],
+class _NoopConn:
+    def close(self) -> None:
+        pass
+
+
+def _adapter_physical_for_overlay() -> dict[str, dict[str, str]]:
+    """覆盖 `_overlay()` 声明的全部 (table, column) 的物理面。"""
+    return {
+        "order_detail": {
+            "order_id": "int",
+            "split_total_amount": "float",
+            "order_time": "timestamp",
+        },
+        "base_province": {"province_name": "str"},
+        "user_info": {"gender": "str"},
+    }
+
+
+def test_build_catalog_uses_backend_adapter(conn, tmp_path):
+    """物理列来自注入的 adapter（而非模块内自读 information_schema）。"""
+    from semantic import catalog_loader
+
+    fake = _FakeAdapter(physical=_adapter_physical_for_overlay())
+    overlay = _overlay(
+        tmp_path,
+        extra_fields={
+            "gross_amount": {"table": "order_detail", "column": "split_total_amount"},
+        },
     )
-    def test_mysql_types(self, mysql_type, expected):
-        from semantic.catalog_loader import _map_dtype
+    cat = catalog_loader.build_catalog(conn=conn, overlay_path=overlay, adapter=fake)
 
-        assert _map_dtype(mysql_type) == expected
-
-    def test_mysql_decimal_with_precision(self):
-        from semantic.catalog_loader import _map_dtype
-
-        assert _map_dtype("decimal(16,2)") == "float"
+    assert fake.physical_calls == [conn]  # 复用注入连接，不自建
+    # dtype 缺省取 adapter 归一结果（不再二次映射）
+    assert cat.columns["gross_amount"].dtype == "float"
+    assert cat.columns["province"].dtype == "str"
 
 
-def test_physical_columns_filters_schema(monkeypatch):
-    """MySQL information_schema 含全部库——必须按当前库过滤（spec §9 隐患）。"""
+def test_build_catalog_rejects_field_missing_in_adapter_physical(conn, tmp_path):
+    """物理面校验以 adapter 返回值为准：fake 缺列即报错（证明未读真实库）。"""
     from semantic import catalog_loader
 
-    captured: dict[str, object] = {}
-
-    class _Cur:
-        def execute(self, sql, params=None):
-            captured["sql"] = sql
-            captured["params"] = params
-
-        def fetchall(self):
-            return []
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
-            return False
-
-    class _Conn:  # pymysql 形态：无 execute、走 cursor
-        def cursor(self):
-            return _Cur()
-
-    catalog_loader._physical_columns(_Conn(), schema="gmall")
-    assert "table_schema" in str(captured["sql"])
-    assert "gmall" in (captured["params"] or ())
+    fake = _FakeAdapter(physical={"order_detail": {"order_id": "int"}})
+    overlay = _overlay(tmp_path)
+    with pytest.raises(ValueError, match="不在数据库中"):
+        catalog_loader.build_catalog(conn=conn, overlay_path=overlay, adapter=fake)
 
 
-def test_physical_columns_duckdb_keeps_legacy_path():
-    """DuckDB 路径（schema=None）保持无过滤现状（回归保护）。"""
+def test_build_catalog_opens_own_connection_when_no_conn(tmp_path):
+    """无注入连接时：物理面由 adapter 自建并关闭，成员读取另开一次（D6 取舍）。"""
     from semantic import catalog_loader
 
-    captured: dict[str, object] = {}
+    fake = _FakeAdapter(name="postgres", physical=_adapter_physical_for_overlay())
+    cat = catalog_loader.build_catalog(overlay_path=_overlay(tmp_path), adapter=fake)
 
-    class _Cur:
-        def fetchall(self):
-            return [("order_detail", "order_id", "BIGINT")]
+    assert fake.physical_calls == [None]  # 未传连接 → adapter 自建
+    assert fake.connect_calls == 1  # 成员读取另建一次只读连接
+    assert cat.columns["order_id"].dtype == "int"
 
-    class _Conn:  # duckdb 形态：有 execute（执行即记录）
-        def execute(self, sql, params=None):
-            captured["sql"] = sql
-            return _Cur()
 
-    out = catalog_loader._physical_columns(_Conn())
-    assert "table_schema" not in str(captured["sql"])
-    assert out == {"order_detail": {"order_id": "int"}}
+def test_non_duckdb_empty_physical_raises():
+    """非 duckdb 后端读不到物理元数据 → 报错，严禁回退内置默认（spec D7）。"""
+    from semantic import catalog_loader
+
+    fake = _FakeAdapter(name="clickhouse", physical={})
+    with pytest.raises(ValueError, match="clickhouse"):
+        catalog_loader.build_catalog(adapter=fake)
+
+
+def test_db_path_rejected_for_non_duckdb(tmp_path):
+    """--db 只对 duckdb 有意义：非 duckdb 后端显式拒绝，避免误以为切了库。"""
+    from semantic import catalog_loader
+
+    fake = _FakeAdapter(name="postgres", physical={"t": {"c": "str"}})
+    with pytest.raises(ValueError, match="仅对 duckdb"):
+        catalog_loader.build_catalog(db_path=tmp_path / "x.duckdb", adapter=fake)
+    assert fake.physical_calls == []  # 拒绝发生在读元数据之前
 
 
 def test_dimension_members_mysql_quoted_identifiers(monkeypatch):
@@ -572,8 +588,12 @@ def test_dimension_members_mysql_quoted_identifiers(monkeypatch):
             captured["sql"] = sql
             return _Cur()
 
+    class _Adapter:
+        def run_query(self, conn, sql):
+            return [], [list(r) for r in conn.execute(sql).fetchall()]
+
     columns = {"province": FieldMeta(table="base_province", column="province_name", dtype="str")}
-    members = catalog_loader._load_dimension_members(_Conn(), columns, ("province",))
+    members = catalog_loader._load_dimension_members(_Adapter(), _Conn(), columns, ("province",))
     assert members["province"] == ("广东", "浙江")
     assert "`province_name`" in str(captured["sql"]) and "`base_province`" in str(captured["sql"])
     assert '"' not in str(captured["sql"])

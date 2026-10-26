@@ -19,6 +19,7 @@ import re
 from typing import Any
 
 from config import settings
+from exec.engine.base import physical_from_rows
 from exec.engine.normalize import normalize_cell
 from exec.errors import QueryTimeoutError, SqlExecutionError
 
@@ -190,6 +191,32 @@ class PostgresAdapter:
             for i in range(0, len(data), 5000):
                 cur.executemany(sql, data[i : i + 5000])
         return len(data)
+
+    def physical_columns(self, conn=None) -> dict[str, dict[str, str]]:
+        """PostgreSQL 物理列（二十四期 spec D1/D3/D4）：按 `POSTGRES_SCHEMA` 过滤。
+
+        不过滤会把 `pg_catalog` / `information_schema` 自身等系统 schema 一并
+        读进目录（与二十一期 MySQL 实例级污染同型）；多 schema 同名表也无法
+        用单层 `{表: {列}}` 表达，故按配置的单一 schema 读取。
+
+        占位符 `%s`（psycopg 参数风格），与执行层 SQL（无参数）分属不同通道。
+        """
+        sql = (
+            "SELECT table_name, column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = %s ORDER BY table_name, ordinal_position"
+        )
+        own = None
+        if conn is None:
+            own = self.connect_readonly()
+            conn = own
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, (settings.POSTGRES_SCHEMA,))
+                rows = cur.fetchall()
+        finally:
+            if own is not None:
+                own.close()
+        return physical_from_rows(rows)
 
 
 __all__ = [

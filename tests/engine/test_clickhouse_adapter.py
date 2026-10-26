@@ -293,3 +293,76 @@ def test_registry_clickhouse():
 def test_timeout_and_scan_limit_constants():
     assert CH_TIMEOUT_ERROR_CODE == 159
     assert CH_SCAN_LIMIT_ERROR_CODE == 131
+
+
+# --------------------------------------------------------------------------- #
+# 物理列读取（二十四期 T5，spec D1/D3）
+# --------------------------------------------------------------------------- #
+class _PhysicalResult:
+    def __init__(self, rows):
+        self.result_rows = rows
+
+
+class _PhysicalClient:
+    """只回放 system.columns 查询的假客户端（捕获 SQL 与参数）。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.captured: dict[str, object] = {}
+        self.closed = False
+
+    def query(self, sql, parameters=None, **kw):
+        self.captured["sql"] = sql
+        self.captured["parameters"] = parameters
+        return _PhysicalResult(self._rows)
+
+    def close(self):
+        self.closed = True
+
+
+def test_physical_columns_queries_system_columns():
+    """CH 无 information_schema——元数据源必须是 system.columns + {db:String} 绑定。"""
+    client = _PhysicalClient([])
+    ClickHouseAdapter({"database": "gmall_test"}).physical_columns(client)
+    sql = str(client.captured["sql"])
+    assert "system.columns" in sql
+    assert "database = {db:String}" in sql
+    assert client.captured["parameters"] == {"db": "gmall_test"}
+
+
+def test_physical_columns_ch_wrapped_types():
+    """CH 报带包装的类型：Nullable/LowCardinality 由 type_map 剥壳。"""
+    client = _PhysicalClient(
+        [
+            ("order_detail", "order_id", "Nullable(Int64)"),
+            ("order_detail", "split_total_amount", "Nullable(Decimal(16, 2))"),
+            ("order_detail", "order_time", "Nullable(DateTime)"),
+            ("order_detail", "note", "LowCardinality(Nullable(String))"),
+            ("order_detail", "birthday", "Nullable(Date32)"),
+            ("_field_metadata", "field", "Nullable(String)"),
+        ]
+    )
+    out = ClickHouseAdapter().physical_columns(client)
+    assert out == {
+        "order_detail": {
+            "order_id": "int",
+            "split_total_amount": "float",
+            "order_time": "timestamp",
+            "note": "str",
+            "birthday": "timestamp",
+        }
+    }
+
+
+def test_physical_columns_closes_own_connection(monkeypatch):
+    client = _PhysicalClient([])
+    adapter = ClickHouseAdapter()
+    monkeypatch.setattr(adapter, "connect_readonly", lambda: client)
+    assert adapter.physical_columns() == {}
+    assert client.closed is True
+
+
+def test_physical_columns_keeps_injected_connection_open():
+    client = _PhysicalClient([])
+    ClickHouseAdapter().physical_columns(client)
+    assert client.closed is False

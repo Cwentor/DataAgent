@@ -179,6 +179,14 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas +
 ## 关键约定
 
 - 所有新增逻辑字段必须登记在 `semantic/catalog.py` 的 `COLUMNS` 白名单，否则编译器拒绝；
+- 物理元数据面（二十四期）：语义目录的物理列一律经 `EngineAdapter.physical_columns()`
+  读取——DuckDB/MySQL/PostgreSQL 走 `information_schema.columns`（库名/schema 名由各
+  adapter 以驱动原生参数绑定注入，禁止字符串拼接），ClickHouse 走 `system.columns`；
+  物理类型归一统一走 `exec/engine/type_map.map_dtype`（未知类型 fail-closed 抛错，
+  **严禁静默降级为 `str`**——降级会让字面量转义走错分支）。`semantic/catalog_loader`
+  不再自带任何后端类型判断：新增后端只登记 adapter 与 `type_map` 类型清单，**禁止**在
+  catalog_loader 里加 `if backend == ...` 分支；非 duckdb 后端读不到物理元数据时必须
+  报错，不得回退内置默认目录（duckdb 保留离线回退）。
 - DSL 模型一律 `extra="forbid"`，Agent 只能产出契约内字段；
 - 评测锚点 `AS_OF_DATE = 2025-12-31`（数据域 2021-01-01 ~ 2025-12-31）、随机种子 42，保证确定性可复现；
 - DSL 进阶语义：窗口指标 `WindowMetric`（cumsum/moving_avg，需时间维度）、日期补零 `fill_gaps`（需时间维度+明确时间窗口，支持 day/week/month/quarter）、分组 `TopN`（ROW_NUMBER 分区过滤）；编译器对 comparison / top_n / fill_gaps / window 的互斥组合显式抛 `CompileError`；

@@ -49,6 +49,10 @@ POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
 POSTGRES_USER: str = os.getenv("POSTGRES_USER", "dataagent_ro")
 POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "")
 POSTGRES_DATABASE: str = os.getenv("POSTGRES_DATABASE", "gmall")
+# 元数据 schema 过滤（二十四期 spec D4）：语义目录的物理列按该 schema 读取，
+# 与建仓口径（mock/gmall/schema_postgres.py 写 public）一致；不过滤会把
+# pg_catalog 等系统 schema 一并读进目录
+POSTGRES_SCHEMA: str = os.getenv("POSTGRES_SCHEMA", "public")
 
 # ClickHouse 执行后端连接配置（二十三期 spec §6，DB_BACKEND=clickhouse 时生效）
 # 运行时查询用 readonly profile 账号（部署要求 readonly=1 + max_rows_to_read /
