@@ -237,7 +237,7 @@ ClickHouse 二十三期（当前分支）；Hive 二十四期另开分支。Hive
   clickhouse-connect 版本行为不符则退化为空操作，与服务端自限兜底同
   MySQL/PG 先例——服务端 max_execution_time 终止查询）。
 
-### D6 方言九原语口径（`compiler/dialect/clickhouse.py`）
+### D6 方言十原语口径（`compiler/dialect/clickhouse.py`）
 
 | 原语 | ClickHouse 口径 |
 |------|------|
@@ -246,13 +246,16 @@ ClickHouse 二十三期（当前分支）；Hive 二十四期另开分支。Hive
 | `timestamp_literal` | `toDateTime('...')`（datetime 完整格式化；date/str 原样字符串化，与既有 renderer 分支口径一致） |
 | `date_trunc` | 全原生四档：day→`toStartOfDay`、week→`toMonday`（周一锚定，与 DuckDB `date_trunc('week')` 口径一致，规避 `toStartOfWeek` 的周起始 mode 歧义）、month→`toStartOfMonth`、quarter→`toStartOfQuarter` |
 | `date_add` | `{expr} + {INTERVAL 字面量}` 透传拼接——编译器 `INTERVAL 1 DAY` 形态在 CH 合法（无需 PG 式转译） |
+| `divide` | `toFloat64(num) / NULLIF(toFloat64(den), 0)`——Decimal 除法 `S = S1` 截断问题（见 D14，CI 首轮实锤后补入） |
 | `having_metric_ref` | 返回别名引用（CH 支持别名复用，同 MySQL 路线） |
 | `spine_cte_sql` | `SELECT dateAdd(unit, number, toDateTime(start)) AS {alias} FROM numbers(N)`（见 D7） |
 | `with_keyword` | `WITH`（非递归） |
 | `escape_string_literal` | 反斜杠转义系：`\` 翻倍 + `'` 写作 `\'`（CH 字符串字面量以反斜杠转义为标准语义，与 MySQL `''` 口径不同——CH 侧不使用引号翻倍） |
 
 golden 红线：`duckdb/mysql/postgres` 三 renderer 输出逐字节不变（既有
-dialect 单测 + golden 双保险锁定）。
+dialect 单测 + golden 双保险锁定）。`divide` 原语在锚点三方言上返回
+`{num} / NULLIF({den}, 0)`（不加外层括号，外层括号由调用点按原形态保留），
+35 条 golden `sql` 锚点（`eval_runner` 的 `sql_ok`）逐字节复核 0 漂移。
 
 ### D7 spine（fill_gaps）实现：numbers(N) + 纯 Python 桶数计算
 
@@ -332,6 +335,30 @@ dialect 单测 + golden 双保险锁定）。
 - `session_timezone` setting（CH 23.4+）作为会话级双保险：实现期验证其在
   readonly=1 下可经连接参数生效后登记（列入 Review Focus；验证不过则仅
   依赖 TZ=UTC，诚实记录）。
+
+### D14 除法精度：`divide` 原语（CI 首轮 parity 实锤后补入）
+
+- **事实**：CH 的 Decimal 除法规则是 `divide: S = S1`（结果 scale 取**第一
+  操作数**的 scale，多余小数**截断不舍入**，官方 Decimal 文档
+  "Operations and Result Type"）。本仓金额列 `DECIMAL(16,2)` →
+  `(cur.gmv - prev.gmv) / prev.gmv` 的 S1=2，增长率退化为 2 位小数
+  （`0.252180` → `0.25`）；DuckDB 的 Decimal 除法返回 DOUBLE（全精度），
+  二者语义不等价——CI `test_comparison_time_dim_parity` 实测
+  `数值漂移: 0.25218036741510486 vs 0.25`。
+- **裁决**：新增第 10 个方言原语 `divide(num, den)`，把"除零口径 + 精度口径"
+  收敛到方言层；CH 侧渲染 `toFloat64(num) / NULLIF(toFloat64(den), 0)` 对齐
+  DOUBLE 口径，其余三方言渲染裸形态 `{num} / NULLIF({den}, 0)`。
+- **括号归属**：外层括号仍由调用点按原形态保留（表达式指标 `(a / NULLIF(b,0))`、
+  比率指标与 comparison 增长率不加外层括号）——保证 35 条 golden `sql` 锚点
+  逐字节不变（`sql_ok` 是零数据依赖的契约门）。
+- **覆盖范围**：三处除法生成点全部改道（表达式 `div` / 比率指标 /
+  comparison 增长率列），任一遗漏都会在 CH 上静默截断。
+- **副产物（审计误报）**：`FROM cur, prev` 的 AST 形态随解析器而异——
+  ClickHouse 解析器把逗号 FROM 归一化为 `kind='CROSS'`（DuckDB/MySQL/PG 为
+  空 kind），`exec/audit.py` 的"标量聚合 CTE 放行"写在"无 ON"分支内 → CH
+  下被误判为显式 CROSS JOIN 而 REJECTED（golden Q11/Q12/Q15 中断）。放行
+  判定前置到 kind 分支之前；真实表 CROSS JOIN 仍拒（放行条件是"全部引用
+  均为标量聚合 CTE"，与 JOIN 写法无关）。
 
 ## 6. 安全模型对照（治理管道等价性）
 

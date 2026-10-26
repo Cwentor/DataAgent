@@ -102,3 +102,49 @@ T7 汇聚 T2/T3/T6；T8 依赖 T3；T9 汇聚全部；T10 收口。
 - 服务级验证清单（CI clickhouse-parity 首绿 / 建仓成功 / golden 双后端一致 /
   四专项 / 熔断专项 / 三既有 job 零破坏）**留待推送后观察**——本地无 CH 服务
   （Docker daemon 未运行），不虚勾。
+
+#### CI 首轮观察与修复（PR #18，clickhouse-parity 九轮收敛）
+
+> 本地无 CH 服务，`clickhouse-parity` 是该链路**唯一真实执行面**：每轮红灯
+> 都暴露一个只在真实 CH 上才成立的差异，逐轮修复后回写本节（诚实记录，不
+> 静默跳过用例）。
+
+1. **容器起不来**（`/entrypoint.sh: users.d/default-user.xml: Read-only file
+   system`）：整目录 `:ro` 挂载阻断了 entrypoint 写默认用户文件 → default
+   用户网络访问被禁用、健康检查超时。改为**单文件挂载** + 显式
+   `CLICKHOUSE_USER/CLICKHOUSE_PASSWORD`。
+2. **`Code: 81. Database gmall does not exist`**：官方镜像无 `MYSQL_DATABASE`
+   类初始化变量 → 增 `CREATE DATABASE IF NOT EXISTS gmall` 步骤。
+3. **`DataError: Unable to create Python array for source column birthday`**：
+   `insert_df` 经驱动的 `_convert_pandas` 走 pandas dtype 快路径，CI
+   pandas 3.1.0 下 Nullable(Date) 被转成越界整数（`struct.error: 'H' format
+   requires 0 <= number <= 65535`；本地 3.0.6 不复现）→ 改
+   `insert(column_oriented=True)` 原生列式通道 + 按 CH 类型定向转换时序列。
+4. **`ValueError: NaTType does not support timestamp`**（`coupon_info.expire_time`）：
+   `df[col] = [datetime, None]` 让 pandas 重新推断为 datetime64、None 变 NaT，
+   驱动 `if x else 0` 判 NaT 为真后调 `.timestamp()` → 赋列改
+   `pd.Series(..., dtype=object)` + `_is_null` 统一判空。
+5. **`birthday` 仍报 `struct.error`**（数据本身全是 `datetime.date`）：用真实
+   rng 序列在 DuckDB 建仓核对——3087 用户中 **79 条生日早于 1970**（最早
+   1967-02-21），而 CH `Date` 是 uint16 天数（仅 1970-01-01~2149-06-06）→
+   规范化为 `Date32`（4 字节，1900~2299）；`_DTYPE_MAP` 同步补 `DATE32`。
+6. **`Code: 497. ... without grant option`**：建号/授权权限不足 → 开
+   `CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1`。
+7. **`Code: 495. Cannot update user dataagent_ro in users_xml because this
+   storage is readonly`**：`users.d` 定义的用户落 `users_xml` 存储、对 GRANT
+   只读 → **XML 只留 profile**（readonly/预算仍由服务端承载、客户端不可篡改），
+   用户改由 SQL `CREATE USER ... SETTINGS PROFILE 'ch_ro_profile'` 创建（落
+   `local_directory`）后 `GRANT SELECT ON *.*`。
+8. **golden Q11/Q12/Q15 被审计拒绝**（`[cartesian_product] 检测到 CROSS JOIN`）：
+   同一句 `FROM cur, prev` 在 CH 解析器下归一化为 `kind='CROSS'`（DuckDB/
+   MySQL/PG 为空 kind），而"标量聚合 CTE 放行"写在"无 ON"分支内 → 误判。
+   放行判定**前置到 kind 分支之前**（真实表 CROSS JOIN 仍拒），spec D14 记录。
+9. **comparison yoy 数值漂移**（`0.25218036741510486 vs 0.25`）：CH Decimal
+   除法 `S = S1` 截断不舍入（金额列 `DECIMAL(16,2)` → 增长率退化为 2 位
+   小数），DuckDB Decimal 除法返回 DOUBLE → 新增第 10 个方言原语
+   `divide`，CH 侧 `toFloat64` 浮点除法对齐；三处除法生成点全改道，
+   35 条 golden `sql` 锚点逐字节复核 **0 漂移**（spec D14）。
+
+修复后本地质量门：`black --check .` / `ruff check .` 全绿；
+`pytest -q` → **1241 passed, 18 skipped**（新增 divide 原语 3 用例 +
+审计方言维度用例）。
