@@ -25,13 +25,16 @@
 > 本期首次把"目录构建"纳入服务级验证——此前三个 parity job 只跑
 > `tests/test_*_backend_parity.py`，`ensure_db()` / `refresh_catalog()` 在
 > PG/CH 上从未被执行过（设计 §1.3 第 3 条）。
+>
+> 结果：CI run **40354266404**（PR #19）全绿——lint 44s / test 3m29s /
+> mysql-parity 1m48s / postgres-parity 1m58s / clickhouse-parity 1m12s。
 
-- [ ] `postgres-parity` 新增 `Catalog refresh smoke` 步骤通过（`DB_BACKEND=postgres`
+- [x] `postgres-parity` 新增 `Catalog refresh smoke` 步骤通过（`DB_BACKEND=postgres`
       下 `python -m semantic.catalog_loader` 输出 `fact_table=order_detail`）
-- [ ] `clickhouse-parity` 新增同名步骤通过（同时实锤只读账号可读 `system.columns`，设计 §10 R1）
-- [ ] `mysql-parity` 新增同名步骤通过（实锤 `%s` 参数化在真实 pymysql 上生效，Review Focus 4）
-- [ ] `lint` / `test` / 三 parity job 结果全绿（零破坏红线）
-- [ ] 全量 `pytest -q` 在 CI 上绿（新增用例随 `test` job 跑）
+- [x] `clickhouse-parity` 新增同名步骤通过（同时实锤只读账号可读 `system.columns`，设计 §10 R1）
+- [x] `mysql-parity` 新增同名步骤通过（实锤 `%s` 参数化在真实 pymysql 上生效，Review Focus 4）
+- [x] `lint` / `test` / 三 parity job 结果全绿（零破坏红线）
+- [x] 全量 `pytest -q` 在 CI 上绿（新增用例随 `test` job 跑）
 
 ## Review Focus 专项核对（T8 收尾时逐条打勾）
 
@@ -92,3 +95,14 @@
 > `_clean_env` 刻意剥掉 `APPDATA` → 子进程看不到用户 site。切回项目环境
 > `C:\Users\<user>\.conda\envs\dataagent`（AGENTS.md §运行环境 指定的环境名
 > `dataagent`）后全绿。**执行任何命令前先确认激活 `dataagent`**，不要用 base。
+
+**CI（PR #19，run 40354266404）**：lint / test / mysql-parity / postgres-parity /
+clickhouse-parity 全绿。三个 `Catalog refresh smoke` 步骤实测输出
+`fact_table=order_detail`（CH 侧 60 个逻辑字段，只读账号 `dataagent_ro` 读
+`system.columns` 成功）——这是目录构建首次在真实 PG/CH 上跑通。
+
+### 收口状态
+
+- 8 个任务全部完成并单独提交；分支 `feat/physical-columns-adapter` 已推送，
+  PR **#19**（base `master`）等待评审。
+- 未合并：按流程等评审通过后再 squash。
