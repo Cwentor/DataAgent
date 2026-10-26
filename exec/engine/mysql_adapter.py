@@ -176,6 +176,9 @@ class MySqlAdapter:
         `TypeError: not all arguments converted during string formatting`
         ——该分支自二十一期起只被 fake 连接单测覆盖，从未在真实驱动上执行过，
         二十四期修正并加"参数风格断言"用例锁定。
+
+        库名取 `self._dsn["database"]`：dsn 可注入（parity 测试指向独立库），
+        与连接配置自洽。
         """
         sql = (
             "SELECT table_name, column_name, data_type FROM information_schema.columns "
@@ -187,7 +190,7 @@ class MySqlAdapter:
             conn = own
         try:
             with conn.cursor() as cur:
-                cur.execute(sql, (settings.MYSQL_DATABASE,))
+                cur.execute(sql, (self._dsn["database"],))
                 rows = cur.fetchall()
         finally:
             if own is not None:

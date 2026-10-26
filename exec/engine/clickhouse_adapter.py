@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from config import settings
+from exec.engine.base import physical_from_rows
 from exec.engine.normalize import normalize_cell
 from exec.errors import QueryTimeoutError, SqlExecutionError
 
@@ -173,6 +174,35 @@ class ClickHouseAdapter:
         columns = list(result.column_names)
         rows = [[normalize_cell(v) for v in row] for row in result.result_rows]
         return columns, rows
+
+    def physical_columns(self, conn=None) -> dict[str, dict[str, str]]:
+        """ClickHouse 物理列（二十四期 spec D1/D3）：读 `system.columns`。
+
+        CH 无 `information_schema`，元数据源是 `system.columns`
+        （列 `database/table/name/type/position`）。`type` 报的是带包装的形态
+        （`Nullable(Decimal(16, 2))`、`LowCardinality(String)`），由
+        `exec.engine.type_map` 剥壳归一。
+
+        参数化用驱动原生 `{db:String}` 绑定（clickhouse-connect 的服务端参数
+        语法），与执行层 `run_query`（无参数通道）分属两条路径（spec D3）。
+        库名取 `self._dsn["database"]`：dsn 可注入（parity 测试指向独立实例），
+        与连接配置自洽。
+        """
+        sql = (
+            "SELECT `table`, `name`, `type` FROM system.columns "
+            "WHERE database = {db:String} ORDER BY `table`, `position`"
+        )
+        own = None
+        if conn is None:
+            own = self.connect_readonly()
+            conn = own
+        try:
+            result = conn.query(sql, parameters={"db": self._dsn["database"]})
+            rows = [tuple(row) for row in result.result_rows]
+        finally:
+            if own is not None:
+                own.close()
+        return physical_from_rows(rows)
 
     def cancel(self, conn) -> None:
         # 驱动实测无 cancel 方法（spec D5 退化路径落定）：看门狗回调空操作，

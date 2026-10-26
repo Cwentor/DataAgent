@@ -244,17 +244,15 @@ def test_physical_columns_uses_percent_placeholder(monkeypatch):
     """占位符必须是 `%s`（pymysql 参数风格）——`?` 在真实驱动上必抛 TypeError。
 
     二十一期起该分支用 `?`，只被 fake 连接单测覆盖，从未在真库执行；本用例
-    锁定参数风格（Review Focus 4）。
+    锁定参数风格（Review Focus 4）与"库名取自 dsn"（注入独立库时自洽）。
     """
-    import config.settings as settings
-
-    monkeypatch.setattr(settings, "MYSQL_DATABASE", "gmall")
     conn = _Conn([])
-    MySqlAdapter().physical_columns(conn)
+    adapter = MySqlAdapter({"database": "gmall_test"})
+    adapter.physical_columns(conn)
     sql = str(conn.captured["sql"])
     assert "table_schema = %s" in sql
     assert "?" not in sql
-    assert conn.captured["params"] == ("gmall",)
+    assert conn.captured["params"] == ("gmall_test",)
 
 
 def test_physical_columns_maps_types_and_skips_meta_tables():
