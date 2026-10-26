@@ -7,7 +7,8 @@
    链路存在 NULL datetime 值——MySQL CI 实锤先例；本数仓规模开销可忽略）。
    **转译器已自行包裹 Nullable**（计划期实测 sqlglot 25.x：`INTEGER` ->
    `Nullable(Int32)`、`DATE` -> `Nullable(DATE)`），故本步实现为"先剥壳再统一
-   包裹"的幂等归一，同时把大写 `DATE` 归一为 `Date`；
+   包裹"的幂等归一，同时把大写 `DATE` 归一为 `Date32`（CH 的 Date 只覆盖
+   1970..2149，本数仓 birthday 含 1967 年数据，Date 会负天数越界）；
 3. 追加 ENGINE = MergeTree 子句（sqlglot 不覆盖表引擎）：时间主轴表按
    _ORDER_BY_KEYS 设 ORDER BY (主时间列)——CH 主键序存储 + 稀疏索引对齐
    MySQL 二级索引动机（spec D9）；其余表 ORDER BY tuple()。全列 Nullable 与
@@ -45,8 +46,9 @@ _ORDER_BY_KEYS: dict[str, str] = {
 
 # 转译产物类型 token（计划期实测：DateTime/String/Int32/Int64/Decimal(P, S)/DATE）。
 # 尾部用 (?![A-Za-z0-9_]) 而非 \b：Decimal(P, S) 以右括号结尾，\b 在其后不成立。
+# Date32 须排在 Date 之前（同一位置优先匹配更长的形态）。
 _TYPE_RE = re.compile(
-    r"\b(Decimal\(\d+,\s*\d+\)|DateTime|Date|String|Float64|Float32"
+    r"\b(Decimal\(\d+,\s*\d+\)|DateTime|Date32|Date|String|Float64|Float32"
     r"|UInt64|UInt32|UInt16|UInt8|Int64|Int32|Int16|Int8)(?![A-Za-z0-9_])",
     re.IGNORECASE,
 )
@@ -54,8 +56,12 @@ _TYPE_RE = re.compile(
 # 已包裹的 Nullable(X) 剥壳正则（X 允许一层内嵌括号，覆盖 Decimal(16, 2)）
 _NULLABLE_SHELL_RE = re.compile(r"Nullable\(([^()]*(?:\([^()]*\))?[^()]*)\)")
 
-# 类型名归一（转译器输出大写 DATE，CH 虽大小写不敏感，仍统一为文档形态）
-_TYPE_CANON = {"date": "Date"}
+# 类型名归一（转译器输出大写 DATE）：Date -> Date32。
+# CH 的 Date 为 uint16 天数，仅覆盖 1970-01-01 ~ 2149-06-06；本数仓 birthday
+# 最早为 1967-02-21（3083 用户中 79 条早于 1970），用 Date 会负天数越界、
+# 驱动报 `struct.error: 'H' format requires 0 <= number <= 65535`（CI 实锤）。
+# Date32 为 4 字节，覆盖 1900-01-01 ~ 2299-12-31，语义一致、开销可忽略。
+_TYPE_CANON = {"date": "Date32"}
 
 
 def _canon_type(token: str) -> str:

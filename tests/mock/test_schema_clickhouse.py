@@ -83,11 +83,33 @@ def test_first_table_snapshot():
     )
 
 
-def test_date_type_canonicalized():
-    """转译器输出大写 DATE -> 归一为 Date（CH 文档形态）。"""
+def test_date_type_canonicalized_to_date32():
+    """大写 DATE -> Date32（CH 的 Date 仅覆盖 1970..2149，真实数据含 1967 生日）。
+
+    回归：用 Date 会算出负天数，驱动 pack('H') 抛
+    `struct.error: 'H' format requires 0 <= number <= 65535`（CI 建仓实锤）。
+    """
     ddl = next(d for d in clickhouse_ddl() if _table_of(d) == "user_info")
-    assert "Nullable(Date)" in ddl
+    assert "birthday Nullable(Date32)" in ddl
+    assert "Nullable(Date)" not in ddl.replace("Nullable(Date32)", "")
     assert "Nullable(DATE)" not in ddl
+
+
+def test_birthday_range_needs_date32():
+    """数据侧锚定：真实生成器产出的生日确实早于 1970（Date 会越界）。"""
+    import duckdb
+
+    from mock.gmall.build import build_gmall_tables
+
+    conn = duckdb.connect()
+    try:
+        build_gmall_tables(conn, seed=42, write_applog=False)
+        early = conn.execute(
+            "SELECT count(*) FROM user_info WHERE birthday < DATE '1970-01-01'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert early > 0
 
 
 @pytest.mark.parametrize("module_name", ["mock.init_clickhouse"])

@@ -271,22 +271,12 @@ class ClickHouseAdapter:
             # .timestamp() 抛 ValueError: NaTType does not support timestamp）
             data[col] = pd.Series(values, index=data.index, dtype=object)
         columns = list(data.columns)
-        try:
-            conn.insert(
-                table,
-                [data[col].tolist() for col in columns],
-                columns,
-                column_oriented=True,
-            )
-        except Exception:
-            for name in columns:
-                sample = data[name].tolist()[:3]
-                print(
-                    f"[ch-insert-fail] {name} {types.get(name)!r} -> "
-                    f"{[(type(v).__name__, repr(v)) for v in sample]}",
-                    flush=True,
-                )
-            raise
+        conn.insert(
+            table,
+            [data[col].tolist() for col in columns],
+            columns,
+            column_oriented=True,
+        )
         return len(data)
 
     def quote_ident(self, name: str) -> str:
