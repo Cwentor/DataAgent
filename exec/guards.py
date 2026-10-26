@@ -182,6 +182,21 @@ _DIALECT_EXTRA_KEYWORDS: dict[str, frozenset[str]] = {
             "REVOKE",
         }
     ),
+    # ClickHouse 语句族（二十三期 spec D4）：SYSTEM 管理语句族（SHUTDOWN/
+    # RELOAD/DROP CACHE 等，CH 侧最危险面）；KILL 查询与变更；TRUNCATE 清表；
+    # OPTIMIZE 合并管理；SETTINGS 子句（SELECT ... SETTINGS 改设置面——
+    # readonly=1 下服务端本会拒绝，黑名单为纵深防御，Review Focus #3）；
+    # OUTFILE 为 SELECT ... INTO OUTFILE 写服务器文件的目标子句
+    "clickhouse": frozenset(
+        {
+            "SYSTEM",
+            "KILL",
+            "TRUNCATE",
+            "OPTIMIZE",
+            "SETTINGS",
+            "OUTFILE",
+        }
+    ),
 }
 # MySQL 函数族：load_file 读服务器文件 / sleep、benchmark DoS / 锁滥用族
 _DIALECT_EXTRA_FUNC_RE: dict[str, re.Pattern[str]] = {
@@ -200,6 +215,26 @@ _DIALECT_EXTRA_FUNC_RE: dict[str, re.Pattern[str]] = {
         r"|pg_advisory_unlock|pg_advisory_unlock_all"
         r"|dblink|dblink_exec"
         r"|lo_import|lo_export|lo_get|lo_put"
+        r")\s*\(",
+        re.IGNORECASE,
+    ),
+    # ClickHouse 表函数族（二十三期 spec D4）：url/s3/azure/hdfs/jdbc/odbc/file
+    # 拉取任意外部数据（数据外泄面）；mysql/postgresql/mongodb/remote/
+    # remoteSecure 跨库桥接；cluster/clusterAllReplicas 跨节点放大；
+    # input/generateRandom 非受控输入；sleep/sleepEachRow DoS
+    "clickhouse": re.compile(
+        r"\b(?:"
+        r"url|urlCluster"
+        r"|file|fileCluster"
+        r"|s3|s3Cluster"
+        r"|azure|azureCluster"
+        r"|hdfs|hdfsCluster"
+        r"|jdbc|odbc"
+        r"|mysql|postgresql|mongodb"
+        r"|remote|remoteSecure"
+        r"|cluster|clusterAllReplicas"
+        r"|input|generateRandom"
+        r"|sleep|sleepEachRow"
         r")\s*\(",
         re.IGNORECASE,
     ),
