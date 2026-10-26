@@ -84,6 +84,20 @@ jobs:
           MYSQL_TEST_USER: root
           MYSQL_TEST_PASSWORD: root
           MYSQL_TEST_DATABASE: gmall
+      # 二十四期：目录构建纳入服务级验证（此前 parity job 只跑 DSL 一致性，
+      # ensure_db/refresh_catalog 在 MySQL 上从未真实执行过）。这一步同时实锤
+      # physical_columns 的 `%s` 参数化在真实 pymysql 上生效（Review Focus 4）。
+      - name: Catalog refresh smoke (physical columns from real backend)
+        run: |
+          python -m semantic.catalog_loader | tee /tmp/catalog_smoke.txt
+          grep -q "^fact_table=order_detail" /tmp/catalog_smoke.txt
+        env:
+          DB_BACKEND: mysql
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root
+          MYSQL_DATABASE: gmall
 
   # PostgreSQL 服务级门禁（二十二期）：与 mysql-parity 同构——golden 全量 DSL
   # 双后端一致性 + 周边界/5 年补零/comparison 配对/池复用加固。本地开发不跑 PG
@@ -127,6 +141,21 @@ jobs:
           POSTGRES_TEST_USER: postgres
           POSTGRES_TEST_PASSWORD: root
           POSTGRES_TEST_DATABASE: gmall
+      # 二十四期：目录构建纳入服务级验证（见 mysql-parity 同名步骤说明）。
+      # 同时覆盖 POSTGRES_SCHEMA 过滤——不过滤会把 pg_catalog/其他 schema 的列
+      # 混进目录。
+      - name: Catalog refresh smoke (physical columns from real backend)
+        run: |
+          python -m semantic.catalog_loader | tee /tmp/catalog_smoke.txt
+          grep -q "^fact_table=order_detail" /tmp/catalog_smoke.txt
+        env:
+          DB_BACKEND: postgres
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: root
+          POSTGRES_DATABASE: gmall
+          POSTGRES_SCHEMA: public
 
   # ClickHouse 服务级门禁（二十三期）：与 postgres-parity 同构——golden 全量 DSL
   # 双后端一致性 + 熔断/周边界/补零/池复用专项。readonly 预算由仓库内 users.d
@@ -207,6 +236,20 @@ jobs:
           CLICKHOUSE_TEST_USER: dataagent_ro
           CLICKHOUSE_TEST_PASSWORD: ch_ro_pwd
           CLICKHOUSE_TEST_DATABASE: gmall
+      # 二十四期：目录构建纳入服务级验证。刻意用 **只读账号** dataagent_ro ——
+      # 同时实锤只读账号可读 system.columns（spec §10 R1：CH 的元数据面走
+      # system 库而非 information_schema，权限模型不同）。
+      - name: Catalog refresh smoke (physical columns from real backend)
+        run: |
+          python -m semantic.catalog_loader | tee /tmp/catalog_smoke.txt
+          grep -q "^fact_table=order_detail" /tmp/catalog_smoke.txt
+        env:
+          DB_BACKEND: clickhouse
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: "8123"
+          CLICKHOUSE_USER: dataagent_ro
+          CLICKHOUSE_PASSWORD: ch_ro_pwd
+          CLICKHOUSE_DATABASE: gmall
 
   nightly:
     if: github.event_name == 'schedule'

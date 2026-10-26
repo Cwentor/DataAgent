@@ -1,6 +1,6 @@
 # 物理元数据面下沉 EngineAdapter 实施计划（二十四期）
 
-> 本计划交 dev-executing-plans 逐任务执行；步骤用 `- [ ]` 勾选跟踪。
+> 本计划交 dev-executing-plans 逐任务执行；步骤用 `- [x]` 勾选跟踪。
 > 任务确认清单见 `../tasks/2026-10-26-physical-columns-adapter-tasks.md`。
 
 **Goal:** 把语义目录的物理元数据读取从"`catalog_loader` 内特判 `mysql` + 回退
@@ -81,7 +81,7 @@ owning task 的测试）：
   `Nullable(...)`/`LowCardinality(...)`/括号精度/大小写归一）。
 - 消费方：Task 2-5 的四个 `physical_columns()`。
 
-- [ ] **Step 1: 枚举四后端真实类型清单**
+- [x] **Step 1: 枚举四后端真实类型清单**
 
 在 DuckDB 建仓（`python -m mock.init_duckdb`）后取 `information_schema.columns`
 的真实 `data_type` 全集；再取 MySQL/PG/CH 三个 `mock/gmall/schema_*.py` 的 DDL
@@ -89,7 +89,7 @@ owning task 的测试）：
 断言）。把三份清单原样记入 `tests/engine/test_type_map.py` 的模块 docstring
 （作为覆盖度凭证）。
 
-- [ ] **Step 2: 实现剥壳与规则表**
+- [x] **Step 2: 实现剥壳与规则表**
 
 `strip_type_wrappers`：循环剥 `Nullable(X)` / `LowCardinality(X)`（可嵌套）、
 去掉括号参数（`Decimal(16, 2)` → `Decimal`，注意括号内含空格）、
@@ -104,7 +104,7 @@ owning task 的测试）：
 - 布尔：`BOOLEAN`/`BOOL`
 未知 → `ValueError(f"未支持的数据库类型: {raw!r}，请在 exec/engine/type_map.py 登记")`。
 
-- [ ] **Step 3: 表驱动用例**
+- [x] **Step 3: 表驱动用例**
 
 `tests/engine/test_type_map.py`：
 - `test_duckdb_types_covered` / `test_mysql_types_covered` /
@@ -116,7 +116,7 @@ owning task 的测试）：
 - `test_unknown_type_fails_closed`（`Array(String)` / `Map(String, String)` /
   `geometry` → `ValueError` 且文案含原始类型）。
 
-- [ ] **Step 4: 质量门**
+- [x] **Step 4: 质量门**
 
 `black --check .` / `ruff check .` / `pytest tests/engine/test_type_map.py -q`。
 
@@ -134,13 +134,13 @@ owning task 的测试）：
   `DuckDbAdapter.physical_columns(conn=None) -> dict[str, dict[str, str]]`。
 - 消费方：Task 6 的 `catalog_loader`。
 
-- [ ] **Step 1: 协议新增方法（含中文 docstring）**
+- [x] **Step 1: 协议新增方法（含中文 docstring）**
 
 `base.py` 在 `insert_dataframe` 之后追加 `physical_columns`，docstring 说明
 三条契约：`conn=None` 自建只读连接并负责关闭；返回值 dtype 已归一；未知类型
 fail-closed。同步更新模块 docstring 的方法计数。
 
-- [ ] **Step 2: DuckDbAdapter 实现**
+- [x] **Step 2: DuckDbAdapter 实现**
 
 ```python
 def physical_columns(self, conn=None) -> dict[str, dict[str, str]]:
@@ -164,13 +164,13 @@ def physical_columns(self, conn=None) -> dict[str, dict[str, str]]:
     return out
 ```
 
-- [ ] **Step 3: 零变更锚用例**
+- [x] **Step 3: 零变更锚用例**
 
 用内存 DuckDB 建两张表（含 `DECIMAL(16,2)` / `TIMESTAMP` / `VARCHAR` / `INTEGER`），
 断言 `physical_columns()` 输出与旧 `catalog_loader._physical_columns()` 逐项相等
 （旧实现此时仍在，可直接对拍）；再断言 `_` 前缀表被跳过。
 
-- [ ] **Step 4: 质量门**
+- [x] **Step 4: 质量门**
 
 `black` / `ruff` / `pytest tests/engine -q`。
 
@@ -187,7 +187,7 @@ def physical_columns(self, conn=None) -> dict[str, dict[str, str]]:
   `settings.MYSQL_DATABASE`）。
 - 消费方：Task 6。
 
-- [ ] **Step 1: 实现（参数化 `%s`）**
+- [x] **Step 1: 实现（参数化 `%s`）**
 
 ```python
 def physical_columns(self, conn=None) -> dict[str, dict[str, str]]:
@@ -199,13 +199,13 @@ def physical_columns(self, conn=None) -> dict[str, dict[str, str]]:
         rows = cur.fetchall()
 ```
 
-- [ ] **Step 2: 修 `?` 的历史 bug 并留痕**
+- [x] **Step 2: 修 `?` 的历史 bug 并留痕**
 
 注释记录：二十一期起该分支用 `?`，而 pymysql 参数风格为 `%s`（`execute` 内部
 `query % args`，无 `%s` 占位符却传 args → `TypeError: not all arguments
 converted`），该路径此前只被 fake `_Conn` 单测覆盖，从未在真实驱动上执行。
 
-- [ ] **Step 3: 用例（含真实参数风格断言）**
+- [x] **Step 3: 用例（含真实参数风格断言）**
 
 - `test_physical_columns_uses_percent_placeholder`：fake cursor 捕获
   `execute` 的 `(sql, params)`，断言 SQL 含 `%s`、**不含** `?`、params 为
@@ -214,7 +214,7 @@ converted`），该路径此前只被 fake `_Conn` 单测覆盖，从未在真�
 - `test_physical_columns_dtype_mapping`（`int(11)` / `decimal(16,2)` /
   `varchar(64)` / `datetime`）。
 
-- [ ] **Step 4: 质量门**
+- [x] **Step 4: 质量门**
 
 `black` / `ruff` / `pytest tests/engine/test_mysql_adapter.py -q`。
 
@@ -232,7 +232,7 @@ converted`），该路径此前只被 fake `_Conn` 单测覆盖，从未在真�
 - Produces: `settings.POSTGRES_SCHEMA`（默认 `public`）；
   `PostgresAdapter.physical_columns(conn=None)`。
 
-- [ ] **Step 1: 配置项**
+- [x] **Step 1: 配置项**
 
 ```python
 # PG 元数据 schema 过滤（二十四期）：目录物理列按该 schema 读取，与建仓口径一致
@@ -240,7 +240,7 @@ POSTGRES_SCHEMA: str = os.getenv("POSTGRES_SCHEMA", "public")
 ```
 `.env.example` 同步登记。
 
-- [ ] **Step 2: 实现（`%s` 参数化 + schema 过滤）**
+- [x] **Step 2: 实现（`%s` 参数化 + schema 过滤）**
 
 ```python
 sql = ("SELECT table_name, column_name, data_type FROM information_schema.columns "
@@ -248,14 +248,14 @@ sql = ("SELECT table_name, column_name, data_type FROM information_schema.column
 cur.execute(sql, (settings.POSTGRES_SCHEMA,))
 ```
 
-- [ ] **Step 3: 用例**
+- [x] **Step 3: 用例**
 
 `test_physical_columns_filters_public_schema`（捕获 SQL 与 params，断言 `%s`
 且 params 为 `('public',)`）、`test_physical_columns_pg_types`（
 `numeric` / `character varying` / `timestamp without time zone` / `boolean` /
 `bigint` → 正确 dtype）。
 
-- [ ] **Step 4: 质量门**
+- [x] **Step 4: 质量门**
 
 `black` / `ruff` / `pytest tests/engine/test_postgres_adapter.py -q`。
 
@@ -271,7 +271,7 @@ cur.execute(sql, (settings.POSTGRES_SCHEMA,))
 - Produces: `ClickHouseAdapter.physical_columns(conn=None)`（`database` 过滤走
   `settings.CLICKHOUSE_DATABASE`）。
 
-- [ ] **Step 1: 实现（`{db:String}` 参数化）**
+- [x] **Step 1: 实现（`{db:String}` 参数化）**
 
 ```python
 sql = ("SELECT table, name, type FROM system.columns "
@@ -282,20 +282,20 @@ result = conn.query(sql, parameters={"db": settings.CLICKHOUSE_DATABASE})
 注意：`run_query` 无参数通道（D3），故本方法内直接用 `conn.query`；连接自建时
 复用 `connect_readonly()` 并在 `finally` 关闭。
 
-- [ ] **Step 2: CH 类型剥壳接线**
+- [x] **Step 2: CH 类型剥壳接线**
 
 `Nullable(Decimal(16, 2))` / `LowCardinality(String)` / `DateTime64(3)` /
 `UInt64` / `String` / `Date32` 全部经 `map_dtype` 归一；`Array(...)`/`Map(...)`
 抛 `ValueError`。
 
-- [ ] **Step 3: 用例**
+- [x] **Step 3: 用例**
 
 `test_physical_columns_queries_system_columns`（fake client 断言 SQL 含
 `system.columns` 且 `parameters={"db": "gmall"}`）、
 `test_physical_columns_ch_types`（六种真实类型）、
 `test_physical_columns_closes_own_connection`（自建连接必被关闭）。
 
-- [ ] **Step 4: 质量门**
+- [x] **Step 4: 质量门**
 
 `black` / `ruff` / `pytest tests/engine/test_clickhouse_adapter.py -q`。
 
@@ -313,7 +313,7 @@ result = conn.query(sql, parameters={"db": settings.CLICKHOUSE_DATABASE})
 - Produces: `build_catalog(db_path=None, conn=None, overlay_path=None, adapter=None)`
   —— 新增 `adapter` 参数（缺省按 `settings.DB_BACKEND` 取 `get_adapter()`）。
 
-- [ ] **Step 1: 物理列改道**
+- [x] **Step 1: 物理列改道**
 
 ```python
 def build_catalog(db_path=None, conn=None, overlay_path=None, adapter=None):
@@ -329,7 +329,7 @@ def build_catalog(db_path=None, conn=None, overlay_path=None, adapter=None):
         ...
 ```
 
-- [ ] **Step 2: 维度成员改道 `run_query`**
+- [x] **Step 2: 维度成员改道 `run_query`**
 
 `_load_dimension_members(adapter, conn, columns, member_fields)`：SQL 仍由
 `_quote()` + 目录白名单构造（无参数），执行改 `adapter.run_query(conn, sql)`。
@@ -337,14 +337,14 @@ def build_catalog(db_path=None, conn=None, overlay_path=None, adapter=None):
 则此处再建一次（避免把连接生命周期跨函数传递；记录该取舍：两次握手换简单性，
 启动期一次，可接受）。
 
-- [ ] **Step 3: 删除旧实现 + 失败语义（D7）**
+- [x] **Step 3: 删除旧实现 + 失败语义（D7）**
 
 - 删 `_DTYPE_MAP` / `_map_dtype` / `_physical_columns` / `_fetch_all`；
 - 非 duckdb 后端：`physical` 为空 dict 或 `physical_columns()` 抛错 → 直接向上抛
   （`ValueError`/`SqlExecutionError`），**不**回退内置默认；
 - duckdb 后端：保持现状回退（`physical=None` → 内置默认）。
 
-- [ ] **Step 4: 迁移测试**
+- [x] **Step 4: 迁移测试**
 
 - `test_map_dtype_*` 两条 → 已在 Task 1 覆盖，此处删除；
 - `test_physical_columns_filters_schema` / `test_physical_columns_duckdb_keeps_legacy_path`
@@ -356,7 +356,7 @@ def build_catalog(db_path=None, conn=None, overlay_path=None, adapter=None):
   `ValueError`，文案含后端名）；
 - 新增 `test_db_path_rejected_for_non_duckdb`。
 
-- [ ] **Step 5: 质量门**
+- [x] **Step 5: 质量门**
 
 `black` / `ruff` / `pytest tests/semantic -q` + `pytest tests/compiler -q`（目录
 被编译器消费，防连带）。
@@ -373,7 +373,7 @@ def build_catalog(db_path=None, conn=None, overlay_path=None, adapter=None):
 - Consumes: `refresh_catalog()`（Task 6 后的新签名，向后兼容）
 - Produces: `ensure_db()` 四后端分派语义（D5）。
 
-- [ ] **Step 1: 实现**
+- [x] **Step 1: 实现**
 
 ```python
 def ensure_db() -> None:
@@ -389,7 +389,7 @@ def ensure_db() -> None:
     refresh_policies()
 ```
 
-- [ ] **Step 2: 三分支用例**
+- [x] **Step 2: 三分支用例**
 
 - `test_ensure_db_duckdb_initializes_when_missing`（monkeypatch `DB_PATH` 指向
   不存在文件 + fake `mock.init_duckdb.main`，断言被调用一次）；
@@ -399,7 +399,7 @@ def ensure_db() -> None:
 - `test_ensure_db_propagates_backend_failure`（fake `refresh_catalog` 抛
   `SqlExecutionError` → `ensure_db` 原样抛，不吞异常）。
 
-- [ ] **Step 3: 质量门**
+- [x] **Step 3: 质量门**
 
 `black` / `ruff` / `pytest tests/web -q`。
 
@@ -416,7 +416,7 @@ def ensure_db() -> None:
 **Interfaces:**
 - Consumes: 全部前序任务。
 
-- [ ] **Step 1: 跨后端目录一致性（Review Focus 2）**
+- [x] **Step 1: 跨后端目录一致性（Review Focus 2）**
 
 `tests/test_catalog_backend_parity.py`：以 DuckDB 建仓为基准，构造三个 fake
 adapter（分别返回 MySQL/PG/CH 风格的**原始类型**，经各自 `map_dtype` 归一），
@@ -424,7 +424,7 @@ adapter（分别返回 MySQL/PG/CH 风格的**原始类型**，经各自 `map_dt
 与 duckdb 基准**全等**。该用例纯本地可跑（不需真库），锁住"四后端同源数据 →
 同目录"这一不变量。
 
-- [ ] **Step 2: CI 冒烟（真实库）**
+- [x] **Step 2: CI 冒烟（真实库）**
 
 在 `mysql-parity` / `postgres-parity` / `clickhouse-parity` 三个 job 的 parity
 pytest 之后各加一步：
@@ -440,12 +440,12 @@ pytest 之后各加一步：
 判据：命令成功退出且输出含 `fact_table=order_detail`（CLI 现有输出）。这一步
 同时实锤 Review Focus 4（真实驱动参数化）与 §10 R1/R2（只读账号元数据读权限）。
 
-- [ ] **Step 3: 全量质量门**
+- [x] **Step 3: 全量质量门**
 
 `black --check .`、`ruff check .`、`pytest -q --basetemp=logs/.pytest_tmp-<新目录>`；
 `python -m eval.eval_runner`（oracle 31/31 + `sql_ok` 锚点 0 漂移）。
 
-- [ ] **Step 4: 文档收口**
+- [x] **Step 4: 文档收口**
 
 tasks 执行日志逐任务记录；`AGENTS.md` 若含"目录构建"契约描述则同步（注明物理
 列来源 = 当前后端 adapter）。
