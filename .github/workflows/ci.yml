@@ -183,6 +183,13 @@ jobs:
           CLICKHOUSE_USER: default
           CLICKHOUSE_PASSWORD: ch_ci_pwd
           CLICKHOUSE_DATABASE: gmall
+      - name: Dump schema on failure (diagnostic)
+        if: failure()
+        run: |
+          docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
+            --query "SHOW CREATE TABLE gmall.user_info FORMAT TSVRaw" || true
+          docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
+            --query "DESCRIBE TABLE gmall.user_info FORMAT TSVRaw" || true
       - name: Grant readonly account (after warehouse exists)
         run: |
           docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
