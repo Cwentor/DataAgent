@@ -82,16 +82,13 @@
   "^fact_table=order_detail"`），CH 侧刻意用只读账号 `dataagent_ro` 以实锤
   `system.columns` 读权限（§10 R1）。`AGENTS.md` 关键约定新增"物理元数据面"条目。
 
-**质量门（本地，conda 环境）**：`black --check .` 259 files 通过；`ruff check .`
-全绿；`pytest -q` **1285 passed / 18 skipped**，其中 18 条
-`tests/core/test_sandbox.py` 等失败为**本机环境问题**（见下），与本期改动无关
-（改动前同样失败）；`python -m eval.eval_runner` **31/31 通过**，`sql_ok` 锚点
-零漂移。
+**质量门（本地，`dataagent` conda 环境 / Python 3.12.14）**：`black --check .`
+259 files 通过；`ruff check .` 全绿；`pytest -q` **1303 passed / 18 skipped /
+0 failed**；`python -m eval.eval_runner` **31/31 通过**，`sql_ok` 锚点零漂移。
 
-**已知本地环境限制（非代码缺陷）**：本机 `D:\Env\miniconda` 归管理员所有（Users
-仅 RX），`pip install` 回落到用户 site-packages；而沙箱后端
-（`core/sandbox/backends.py::_clean_env`）刻意剥掉 `APPDATA`，子进程因此看不到
-用户 site 里的 pandas，导致 18 条依赖沙箱执行的分析类用例失败。在 CI（依赖装进
-可写 venv 的 site-packages）与"依赖装进 conda site-packages"的机器上均全绿。
-修复方式：管理员终端执行
-`D:\Env\miniconda\python.exe -m pip install --ignore-installed -r requirements-dev.txt`。
+> 排障留痕：中途误用 base 环境（`D:\Env\miniconda`，Python 3.14）跑测试，出现
+> 18 条 `ModuleNotFoundError: pandas`（`tests/core/test_sandbox.py` 等）。根因是
+> base 目录 ACL 仅 Users:RX，`pip install` 回落到用户 site-packages，而沙箱后端
+> `_clean_env` 刻意剥掉 `APPDATA` → 子进程看不到用户 site。切回项目环境
+> `C:\Users\<user>\.conda\envs\dataagent`（AGENTS.md §运行环境 指定的环境名
+> `dataagent`）后全绿。**执行任何命令前先确认激活 `dataagent`**，不要用 base。
