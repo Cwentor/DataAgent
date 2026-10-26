@@ -184,6 +184,37 @@ def test_rewrite_mysql_rejects_unauthorized_table(monkeypatch):
     assert any("越权表" in n for n in notes)
 
 
+def test_rewrite_sql_to_views_clickhouse_uses_derived_table(monkeypatch):
+    """ClickHouse 方言：表引用重写为内联派生表（复用 MySQL 路线，spec D8）。"""
+    import sqlglot
+
+    import config.settings as settings
+    from core.retrieval.exploration import rewrite_sql_to_views
+
+    monkeypatch.setattr(settings, "SQL_DIALECT", "clickhouse")
+    monkeypatch.setattr(settings, "DB_BACKEND", "clickhouse")
+    rewritten, notes = rewrite_sql_to_views(
+        "SELECT order_no FROM order_detail WHERE order_amount > 100", "analyst"
+    )
+    assert rewritten is not None and notes == []
+    # 内联派生表：sec_* 别名以子查询形态出现（无 TEMP VIEW 依赖）
+    assert "sec_order_detail" in rewritten
+    assert rewritten.count("(SELECT") >= 1
+    sqlglot.parse_one(rewritten, read="clickhouse")  # 产物必须是合法 CH SQL
+
+
+def test_rewrite_clickhouse_rejects_unauthorized_table(monkeypatch):
+    """ClickHouse 方言越权拒绝口径与 duckdb 一致（order_refund_info 对 restricted 越权）。"""
+    import config.settings as settings
+    from core.retrieval.exploration import rewrite_sql_to_views
+
+    monkeypatch.setattr(settings, "SQL_DIALECT", "clickhouse")
+    monkeypatch.setattr(settings, "DB_BACKEND", "clickhouse")
+    rewritten, notes = rewrite_sql_to_views("SELECT * FROM order_refund_info", "restricted")
+    assert rewritten is None
+    assert any("越权表" in n for n in notes)
+
+
 # --------------------------------------------------------------------------- #
 # 视图安装钩子方法存在性分发（二十二期 spec D10）：DuckDB/PG TEMP 视图同路
 # --------------------------------------------------------------------------- #

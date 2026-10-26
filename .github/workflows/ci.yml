@@ -128,6 +128,86 @@ jobs:
           POSTGRES_TEST_PASSWORD: root
           POSTGRES_TEST_DATABASE: gmall
 
+  # ClickHouse 服务级门禁（二十三期）：与 postgres-parity 同构——golden 全量 DSL
+  # 双后端一致性 + 熔断/周边界/补零/池复用专项。readonly 预算由仓库内 users.d
+  # 配置承载（CH readonly 由 profile 承载、无法会话级 SET，spec D12）；TZ=UTC
+  # 时区确定性（spec D13）。本地不跑 CH（CLICKHOUSE_TEST_* 未配置自动跳过）。
+  #
+  # 容器不用 services 而用 step 内 docker run：services 在 steps 之前启动，此时
+  # checkout 尚未执行、仓库内 users.d 文件不存在（volume 挂载只会得到空目录，
+  # 只读账号不生效）；step 内启动可保证挂载顺序正确。
+  clickhouse-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start ClickHouse (readonly profile mounted as single file)
+        run: |
+          # 单文件挂载而非整目录只读挂载：官方 entrypoint 启动时要往 users.d 写
+          # default-user.xml，整目录 :ro 会触发 "Read-only file system" 并禁用
+          # default 用户网络访问，导致启动超时。
+          # CLICKHOUSE_USER/PASSWORD 显式给出，避免 entrypoint 走
+          # "neither ... is set, disabling network access for user 'default'" 分支。
+          docker run -d --name ch-ci \
+            -p 8123:8123 \
+            -e TZ=UTC \
+            -e CLICKHOUSE_USER=default \
+            -e CLICKHOUSE_PASSWORD=ch_ci_pwd \
+            -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+            -v "${{ github.workspace }}/.github/clickhouse/users.d/dataagent_ro.xml:/etc/clickhouse-server/users.d/dataagent_ro.xml:ro" \
+            clickhouse/clickhouse-server:24.8
+          for i in $(seq 1 40); do
+            if docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
+              --query "SELECT 1" >/dev/null 2>&1; then
+              echo "ClickHouse ready"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "ClickHouse 启动超时"
+          docker logs ch-ci
+          exit 1
+      - name: Create database (image has no init-db env like MYSQL_DATABASE)
+        run: |
+          docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
+            --query "CREATE DATABASE IF NOT EXISTS gmall"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Build ClickHouse warehouse (DDL transpiled + same-source data)
+        run: python -m mock.init_clickhouse
+        env:
+          DB_BACKEND: clickhouse
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: "8123"
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ch_ci_pwd
+          CLICKHOUSE_DATABASE: gmall
+      - name: Dump schema on failure (diagnostic)
+        if: failure()
+        run: |
+          docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
+            --query "SHOW CREATE TABLE gmall.user_info FORMAT TSVRaw" || true
+      - name: Create readonly account and grant (after warehouse exists)
+        run: |
+          # 用户必须用 SQL 建（users_xml 存储对 GRANT 只读）；profile 仍取自
+          # users.d XML，保证 readonly=1 与预算由服务端承载、客户端不可篡改。
+          ch() { docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd --query "$1"; }
+          ch "CREATE USER IF NOT EXISTS dataagent_ro IDENTIFIED WITH sha256_password BY 'ch_ro_pwd' SETTINGS PROFILE 'ch_ro_profile'"
+          ch "GRANT SELECT ON *.* TO dataagent_ro"
+          docker exec ch-ci clickhouse-client --user dataagent_ro --password ch_ro_pwd \
+            --query "SELECT value FROM system.settings WHERE name = 'readonly'"
+      - name: Dual-backend parity tests (golden DSLs + Review Focus)
+        run: python -m pytest tests/test_clickhouse_backend_parity.py -q
+        env:
+          DB_BACKEND: duckdb
+          CLICKHOUSE_TEST_HOST: 127.0.0.1
+          CLICKHOUSE_TEST_PORT: "8123"
+          CLICKHOUSE_TEST_USER: dataagent_ro
+          CLICKHOUSE_TEST_PASSWORD: ch_ro_pwd
+          CLICKHOUSE_TEST_DATABASE: gmall
+
   nightly:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest

@@ -1,0 +1,27 @@
+<!-- ClickHouse 运行时只读账号的 profile（二十三期 spec D4/D12）：readonly=1 由
+     profile 承载（readonly=1 会话内无法 SET，客户端不可篡改）；max_rows_to_read /
+     max_execution_time 须与 config/settings.py 的 MAX_SCAN_ROWS /
+     QUERY_TIMEOUT_MS 保持一致（adapter.harden 验证式校验 fail-closed）。
+     改预算必须两侧同步。
+
+     这里**只定义 profile，不定义 user**：
+     1. 建仓前 gmall 库尚不存在，XML 里的 <grants> 指向不存在库会在启动时失败；
+     2. users.d 定义的用户落在 users_xml 存储，该存储对 GRANT 只读
+        （CI 实锤：ACCESS_STORAGE_READONLY: Cannot update user `dataagent_ro`
+        in users_xml because this storage is readonly）。
+     故 CI 在建仓之后用 SQL 建账号并授权（SQL 用户落 local_directory 存储，
+     可正常 GRANT，且仍可引用本文件的 XML profile）：
+       CREATE USER dataagent_ro IDENTIFIED WITH sha256_password BY 'ch_ro_pwd'
+         SETTINGS PROFILE 'ch_ro_profile';
+       GRANT SELECT ON *.* TO dataagent_ro;
+     密码为 CI 演示口径，与 mysql root/root 先例同级别，禁止复用到生产；
+     生产按 spec §9 收窄为 gmall.* + system.* 并走两账号分离。 -->
+<clickhouse>
+    <profiles>
+        <ch_ro_profile>
+            <readonly>1</readonly>
+            <max_rows_to_read>10000000</max_rows_to_read>
+            <max_execution_time>30</max_execution_time>
+        </ch_ro_profile>
+    </profiles>
+</clickhouse>

@@ -15,3 +15,8 @@ pymysql>=1.1.1,<2
 # （spec D1/D4）。兼容基线 PostgreSQL >= 13（spec §8.1 版本演进跟随策略——升级前
 # 须跑全量回归与 tests/test_pg_backend_parity.py）
 psycopg[binary]>=3.2,<4
+# ClickHouse 执行后端（二十三期）：官方主推 HTTP 客户端（选型对比 spec §4 S1——
+# 否决 clickhouse-driver：维护缓慢 + 灌数/取消成本高；否决间接通道：护栏隔层）。
+# 兼容基线 ClickHouse >= 23.8（spec §9 版本演进跟随策略——升级前须跑全量回归与
+# tests/test_clickhouse_backend_parity.py）
+clickhouse-connect>=0.7,<1.0

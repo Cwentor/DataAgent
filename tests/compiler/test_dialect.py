@@ -372,3 +372,188 @@ def test_compile_having_anchored_dialects_unchanged():
     """端到端：DuckDB/MySQL 的 HAVING 产物保持输出别名引用（golden 不变）。"""
     assert 'HAVING "gmv" > 1000.0' in _compile_dsl(_having_gmv_dsl(), "duckdb")
     assert "HAVING `gmv` > 1000.0" in _compile_dsl(_having_gmv_dsl(), "mysql")
+
+
+# --------------------------------------------------------------------------- #
+# ClickHouse 方言渲染器（二十三期 spec D6/D7）
+# --------------------------------------------------------------------------- #
+
+
+class TestClickHouseRenderer:
+    """ClickHouse 方言九原语（二十三期 spec D6/D7）+ 桶数计算边界。"""
+
+    def _r(self):
+        from compiler.dialect.clickhouse import ClickHouseRenderer
+
+        return ClickHouseRenderer()
+
+    def test_quote_ident_escapes_backtick(self):
+        assert self._r().quote_ident("a`b") == "`a``b`"
+
+    def test_quote_column(self):
+        assert self._r().quote_column("t", "col") == "`t`.`col`"
+
+    def test_timestamp_literal(self):
+        assert (
+            self._r().timestamp_literal("2025-06-01 00:00:00")
+            == "toDateTime('2025-06-01 00:00:00')"
+        )
+
+    def test_date_trunc_four_granularities(self):
+        r = self._r()
+        assert r.date_trunc("day", "d") == "toStartOfDay(d)"
+        assert r.date_trunc("week", "d") == "toMonday(d)"  # 周一锚定（spec D6）
+        assert r.date_trunc("month", "d") == "toStartOfMonth(d)"
+        assert r.date_trunc("quarter", "d") == "toStartOfQuarter(d)"
+
+    def test_date_trunc_unknown_granularity_rejected(self):
+        import pytest
+
+        from compiler.errors import CompileError
+
+        with pytest.raises(CompileError):
+            self._r().date_trunc("hour", "d")
+
+    def test_date_add_passthrough(self):
+        # 编译器 INTERVAL 1 DAY 形态在 CH 合法，透传拼接（spec D6）
+        assert self._r().date_add("d", "INTERVAL 1 DAY") == "d + INTERVAL 1 DAY"
+
+    def test_having_metric_ref_uses_alias(self):
+        assert self._r().having_metric_ref("gmv", "sum(x)") == "`gmv`"
+
+    def test_spine_day_1826_buckets(self):
+        # 5 年 day 粒度：2021-01-01 ~ 2025-12-31（编译器 end_incl 已回退末桶）
+        sql = self._r().spine_cte_sql(
+            "ts", "2021-01-01 00:00:00", "2025-12-31 00:00:00", "INTERVAL 1 DAY"
+        )
+        assert sql == (
+            "SELECT addDays(toDateTime('2021-01-01 00:00:00'), number) AS `ts` "
+            "FROM numbers(1826)"
+        )
+
+    def test_spine_week_step_normalized_to_7_days(self):
+        sql = self._r().spine_cte_sql(
+            "ts", "2021-01-04 00:00:00", "2021-02-01 00:00:00", "INTERVAL 1 WEEK"
+        )
+        assert "addDays(" in sql and "number * 7" in sql and "FROM numbers(5)" in sql
+
+    def test_spine_quarter_3month_buckets(self):
+        # 2021-01-01 起步长 3 个月至 2021-10-01（末桶起点）：4 个桶
+        # （01-01 / 04-01 / 07-01 / 10-01，闭区间含端点）
+        sql = self._r().spine_cte_sql(
+            "ts", "2021-01-01 00:00:00", "2021-10-01 00:00:00", "INTERVAL 3 MONTH"
+        )
+        assert "addMonths(toDateTime('2021-01-01 00:00:00'), number * 3)" in sql
+        assert "FROM numbers(4)" in sql
+
+    def test_spine_month_end_boundary(self):
+        # 月历算术边界：1/31 起步长 1 个月，2 月无 31 日——桶数按锚点日未满计
+        # （e.day < s.day 差一个月）：2021-01-31 ~ 2021-03-01 → 2 桶
+        sql = self._r().spine_cte_sql(
+            "ts", "2021-01-31 00:00:00", "2021-03-01 00:00:00", "INTERVAL 1 MONTH"
+        )
+        assert "FROM numbers(2)" in sql
+
+    def test_spine_unknown_interval_form_rejected(self):
+        import pytest
+
+        from compiler.errors import CompileError
+
+        with pytest.raises(CompileError):
+            self._r().spine_cte_sql(
+                "ts", "2021-01-01 00:00:00", "2021-02-01 00:00:00", "INTERVAL 1 HOUR"
+            )
+
+    def test_spine_negative_window_rejected(self):
+        import pytest
+
+        from compiler.errors import CompileError
+
+        with pytest.raises(CompileError):
+            self._r().spine_cte_sql(
+                "ts", "2021-02-01 00:00:00", "2021-01-01 00:00:00", "INTERVAL 1 DAY"
+            )
+
+    def test_with_keyword_non_recursive(self):
+        assert self._r().with_keyword() == "WITH"
+
+    def test_escape_string_literal_backslash_family(self):
+        # 反斜杠转义系：\ 翻倍 + ' 写作 \'（spec D6，与 MySQL '' 口径不同）
+        assert self._r().escape_string_literal("a'b\\c") == "'a\\'b\\\\c'"
+
+
+def test_divide_byte_identical_on_anchored_dialects():
+    """golden 锚点保护：DuckDB/MySQL/PG 除法渲染与重构前逐字节一致（除零 NULLIF）。
+
+    除法原语（二十三期补）只承载"除零口径 + 精度口径"：锚点三方言输出必须
+    与内联渲染逐字相同，否则 35 条 golden SQL 锚点（eval_runner sql_ok）失效。
+    """
+    from compiler.dialect.duckdb import DuckDbRenderer
+    from compiler.dialect.mysql import MySqlRenderer
+    from compiler.dialect.postgres import PostgresRenderer
+
+    expected = "COALESCE(SUM(f.a), 0) / NULLIF(COUNT(DISTINCT f.b), 0)"
+    for r in (DuckDbRenderer(), MySqlRenderer(), PostgresRenderer()):
+        assert r.divide("COALESCE(SUM(f.a), 0)", "COUNT(DISTINCT f.b)") == expected, r.name
+
+
+def test_clickhouse_divide_float_transpiled():
+    """CH Decimal 除法 "S = S1"（截断不舍入）→ toFloat64 浮点除法对齐 DOUBLE 口径。
+
+    CI clickhouse-parity 实锤：(cur.gmv - prev.gmv) / prev.gmv 在金额列
+    DECIMAL(16,2) 下退化为 2 位小数（0.252180 → 0.25），与 DuckDB 的
+    Decimal 除法返回 DOUBLE 不等价。
+    """
+    from compiler.dialect.clickhouse import ClickHouseRenderer
+
+    out = ClickHouseRenderer().divide("(cur.`gmv` - prev.`gmv`)", "prev.`gmv`")
+    assert out == ("toFloat64((cur.`gmv` - prev.`gmv`)) / NULLIF(toFloat64(prev.`gmv`), 0)")
+
+
+def test_clickhouse_comparison_growth_uses_float_division():
+    """端到端：comparison 增长率列在 CH 方言下走浮点除法（其余结构不变）。"""
+    import sqlglot
+
+    dsl = _month_gmv_dsl()
+    dsl["time_filter"]["comparison"] = "yoy"
+    sql = _compile_dsl(dsl, "clickhouse")
+    assert "toFloat64(" in sql and "NULLIF(toFloat64(" in sql
+    assert " AS `gmv_yoy`" in sql
+    # 语法合法性：CH 方言可解析即形态成立
+    assert sqlglot.parse_one(sql, read="clickhouse") is not None
+
+
+def test_clickhouse_registry(monkeypatch):
+    """方言注册表：SQL_DIALECT=clickhouse 返回 ClickHouseRenderer（惰性工厂）。"""
+    import config.settings as settings
+    from compiler.dialect.clickhouse import ClickHouseRenderer
+
+    monkeypatch.setattr(settings, "SQL_DIALECT", "clickhouse")
+    assert isinstance(get_renderer(), ClickHouseRenderer)
+
+
+def test_three_existing_renderers_unchanged_byte_wise():
+    """golden 红线：duckdb/mysql/postgres 三 renderer 关键产物逐字节不变（回归锚）。"""
+    import config.settings as settings
+
+    cases = {
+        "duckdb": (
+            lambda r: r.date_trunc("week", "o.order_time"),
+            "date_trunc('week', o.order_time)",
+        ),
+        "mysql": (
+            lambda r: r.date_trunc("week", "o.order_time"),
+            "DATE_SUB(DATE(o.order_time), INTERVAL WEEKDAY(DATE(o.order_time)) DAY)",
+        ),
+        "postgres": (
+            lambda r: r.date_add("d", "INTERVAL 1 DAY"),
+            "d + INTERVAL '1 day'",
+        ),
+    }
+    old = settings.SQL_DIALECT
+    try:
+        for name, (fn, expected) in cases.items():
+            settings.SQL_DIALECT = name
+            assert fn(get_renderer()) == expected, name
+    finally:
+        settings.SQL_DIALECT = old

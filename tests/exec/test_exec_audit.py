@@ -205,6 +205,10 @@ def test_scalar_cte_comma_from_allowed_but_plain_tables_rejected():
 
     放行背景：comparison 无维度形态产出 FROM cur, prev（两 CTE 均为空分组
     聚合）；CI mysql-parity 首次以全护栏链路执行该形态时审计门误报实锤。
+
+    方言维度：同一句 SQL 的 AST 形态随解析器而异——ClickHouse 解析器把
+    逗号 FROM 归一化为 ``kind='CROSS'``（DuckDB/MySQL/PG 为空 kind），故
+    放行判定必须在 kind 分支之前（CI clickhouse-parity 误报实锤）。
     """
     from exec.audit import audit_compiled_sql
 
@@ -213,13 +217,16 @@ def test_scalar_cte_comma_from_allowed_but_plain_tables_rejected():
         "prev AS (SELECT SUM(order_amount) AS gmv_p FROM order_detail) "
         "SELECT gmv, gmv_p FROM cur, prev"
     )
-    for dialect in ("duckdb", "mysql"):
+    for dialect in ("duckdb", "mysql", "postgres", "clickhouse"):
         assert all(
             f.check != "cartesian_product" for f in audit_compiled_sql(ok_sql, dialect=dialect)
         ), dialect
 
     bad_sql = "SELECT a.id, b.id FROM order_detail a, user_info b"
-    assert any(
-        f.check == "cartesian_product" and f.severity == "rejected"
-        for f in audit_compiled_sql(bad_sql, dialect="duckdb")
-    )
+    cross_sql = "SELECT a.id FROM order_detail a CROSS JOIN user_info b"
+    for dialect in ("duckdb", "clickhouse"):
+        for sql in (bad_sql, cross_sql):
+            assert any(
+                f.check == "cartesian_product" and f.severity == "rejected"
+                for f in audit_compiled_sql(sql, dialect=dialect)
+            ), (dialect, sql)

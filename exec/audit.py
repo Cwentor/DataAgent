@@ -79,10 +79,27 @@ def _finding_cartesian(
     """单个 JOIN 子句的笛卡尔积判定：CROSS / 无 ON / 无 USING。
 
     放行例外：无关联 JOIN 引用的表与 FROM 主表全部是纯标量聚合 CTE
-    （恒单行 × 单行，无笛卡尔风险——comparison 无维度形态 FROM cur, prev；
-    sqlglot 30.x 把逗号 FROM 归一化为无 ON 的 Join 节点）。
+    （恒单行 × 单行，无笛卡尔风险——comparison 无维度形态 FROM cur, prev）。
+
+    该放行判定必须先于 kind 分支：同一句 ``FROM cur, prev`` 在各方言解析器
+    下 AST 形态不同——DuckDB/MySQL/PG 产出空 kind 的无 ON Join，ClickHouse
+    解析器则归一化为 ``kind='CROSS'``（sqlglot 30.x 实测）。若把放行写在
+    "无 ON" 分支内，CH 方言下会被误判为显式 CROSS JOIN 而 REJECTED
+    （CI clickhouse-parity 实锤：Q11/Q12/Q15 全量 golden 用例中断）。
+    真实表的 CROSS JOIN 仍拒——放行条件是"全部引用均为标量聚合 CTE"，
+    与 JOIN 写法无关（恒单行相乘在数学上不构成笛卡尔积风险）。
     """
     kind = (join.kind or "").upper()
+    joined = join.this
+    if (
+        scalar_ctes is not None
+        and from_main_names is not None
+        and from_main_names
+        and from_main_names <= scalar_ctes
+        and isinstance(joined, exp.Table)
+        and joined.name in scalar_ctes
+    ):
+        return None  # 标量聚合 CTE 逗号连接（恒单行），精确放行
     if kind == "CROSS":
         return GuardrailFinding(
             "cartesian_product",
@@ -91,16 +108,6 @@ def _finding_cartesian(
             "改写查询：为 JOIN 提供显式关联条件，或去除多余表引用",
         )
     if join.args.get("on") is None and join.args.get("using") is None and kind != "LATERAL":
-        joined = join.this
-        if (
-            scalar_ctes is not None
-            and from_main_names is not None
-            and from_main_names
-            and from_main_names <= scalar_ctes
-            and isinstance(joined, exp.Table)
-            and joined.name in scalar_ctes
-        ):
-            return None  # 标量聚合 CTE 逗号连接（恒单行），精确放行
         return GuardrailFinding(
             "cartesian_product",
             "rejected",

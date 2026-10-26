@@ -92,6 +92,8 @@ _DTYPE_MAP: dict[str, str] = {
     "TIMESTAMP": "timestamp",
     "TIMESTAMP WITH TIME ZONE": "timestamp",
     "DATE": "timestamp",
+    # ClickHouse 侧 DATE 列按 Date32 建（CH Date 只覆盖 1970..2149）
+    "DATE32": "timestamp",
     # MySQL 类型族（二十一期 spec：physical 面按后端读取 information_schema）
     "INT": "int",
     "MEDIUMINT": "int",

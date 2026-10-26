@@ -33,6 +33,7 @@ _ADAPTER_FACTORIES: dict[str, Callable[[], Any]] = {
     "duckdb": DuckDbAdapter,
     "mysql": _lazy_factory("exec.engine.mysql_adapter", "MySqlAdapter"),
     "postgres": _lazy_factory("exec.engine.postgres_adapter", "PostgresAdapter"),
+    "clickhouse": _lazy_factory("exec.engine.clickhouse_adapter", "ClickHouseAdapter"),
 }
 
 

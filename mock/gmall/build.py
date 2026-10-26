@@ -69,7 +69,18 @@ def _convert_seed_value(column: str, value) -> object:
 
 def _insert_seed(conn: Any, seed_rows: dict[str, list[list]], adapter) -> None:
     # 占位符与执行通道随引擎：duckdb `?` + conn.executemany；
-    # pymysql `%s` 且 Connection 无 executemany（Cursor 才有，CI 实锤）。
+    # pymysql/psycopg `%s` + cursor.executemany；ClickHouse 无 cursor 协议
+    # （驱动实测）：种子行走具名 DataFrame + insert_df Arrow 通道（spec D10，
+    # 列序 = SEED_COLUMNS 物理表列序）
+    if adapter.name == "clickhouse":
+        for table, rows in seed_rows.items():
+            cols = SEED_COLUMNS[table]
+            converted = [
+                tuple(_convert_seed_value(c, v) for c, v in zip(cols, row, strict=False))
+                for row in rows
+            ]
+            adapter.insert_dataframe(conn, table, pd.DataFrame(converted, columns=cols))
+        return
     ph = "?" if adapter.name == "duckdb" else "%s"
     for table, rows in seed_rows.items():
         cols = SEED_COLUMNS[table]
@@ -328,8 +339,8 @@ def build_gmall_tables(
     """在给定连接上全量构建 Gmall 测试数仓，返回各表行数。
 
     adapter 缺省按 settings.DB_BACKEND 现取（二十一期引擎化）：DuckDB 走
-    schema.py DDL + pandas scan 灌数；MySQL 走 schema_mysql 转译 DDL +
-    executemany 灌数。数据序列两引擎逐行同源（确定性三原则不变）。
+    schema.py DDL + pandas scan 灌数；MySQL/PG/ClickHouse 走各自 schema_* 转译
+    DDL + 各自灌数通道。数据序列四引擎逐行同源（确定性三原则不变）。
     """
     from exec.engine import get_adapter  # 惰性导入：建仓链路晚绑定引擎
 
@@ -348,6 +359,10 @@ def build_gmall_tables(
         from mock.gmall.schema_postgres import create_postgres_tables
 
         create_postgres_tables(conn)
+    elif adapter.name == "clickhouse":
+        from mock.gmall.schema_clickhouse import create_clickhouse_tables
+
+        create_clickhouse_tables(conn)
     else:
         from mock.gmall.schema_mysql import create_mysql_tables
 

@@ -55,6 +55,11 @@ class MySqlRenderer:
         # MySQL DATE_ADD 同名兼容；小写渲染与迁移前内联产物逐字节一致（golden 锚点）
         return f"date_add({expr}, {interval})"
 
+    def divide(self, numerator: str, denominator: str) -> str:
+        # 与迁移前内联渲染逐字节一致（golden 锚点）：MySQL DECIMAL 除法结果
+        # scale = S1 + div_precision_increment（默认 4），精度足够无需转译
+        return f"{numerator} / NULLIF({denominator}, 0)"
+
     def having_metric_ref(self, alias: str, expr: str) -> str:
         # MySQL 允许 HAVING 引用输出别名——与迁移前内联渲染逐字节一致（golden 锚点）
         return self.quote_ident(alias)
