@@ -35,6 +35,62 @@ _CH_ERROR_BASE: type | None = None
 
 _ERROR_CODE_RE = re.compile(r"\bcode:\s*(\d+)")
 
+# 列类型外层包装剥离（Nullable / LowCardinality）：取基础类型名做定向转换
+_TYPE_WRAPPER_RE = re.compile(r"^(Nullable|LowCardinality)\((.*)\)$", re.IGNORECASE)
+
+# 时间字符串解析候选格式（种子/日志侧的 ISO 变体；解析失败保持原值由驱动诚实报错）
+_DT_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+)
+
+
+def _base_ch_type(type_name: str) -> str:
+    """`Nullable(Decimal(16, 2))` -> `Decimal(16, 2)`（逐层剥包装）。"""
+    name = str(type_name or "").strip()
+    while True:
+        m = _TYPE_WRAPPER_RE.match(name)
+        if m is None:
+            return name
+        name = m.group(2).strip()
+
+
+def _to_datetime(value: Any) -> Any:
+    """字符串/date -> datetime（驱动 DateTime 写入要求 datetime 实例）。"""
+    from datetime import date, datetime
+
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str):
+        for fmt in _DT_FORMATS:
+            try:
+                return datetime.strptime(value.strip(), fmt)
+            except ValueError:
+                continue
+    return value
+
+
+def _to_date(value: Any) -> Any:
+    """字符串/datetime -> date（驱动 Date 写入要求 date 实例，字符串会抛
+    DataError: Unable to create Python array —— CI 建仓实锤）。"""
+    from datetime import date, datetime
+
+    if value is None:
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        parsed = _to_datetime(value)
+        if isinstance(parsed, datetime):
+            return parsed.date()
+    return value
+
 
 def _ch_error_base() -> type:
     """惰性取驱动异常基类（未装驱动环境 import 本模块零开销）。"""
@@ -167,18 +223,30 @@ class ClickHouseAdapter:
     def insert_dataframe(self, conn, table: str, df) -> int:
         """DataFrame 批量入库（仅 mock 建仓链路），insert_df 走 Arrow 批量通道。
 
-        无列名 DataFrame（_write_rows 元组行构造，columns 为 0..n 整数）经
-        DESCRIBE TABLE 取物理列名按位置补齐（与 MySQL/PG 位置模式同语义）；
+        DESCRIBE 一次取物理列名 + 列类型：无列名 DataFrame（_write_rows 元组行
+        构造，columns 为 0..n 整数）按位置补名（与 MySQL/PG 位置模式同语义）；
         空值统一清洗为 None（Nullable 列语义，NaN/NaT/None 全覆盖——MySQL/PG
         先例实锤 pandas 空值直插会报类型错）。
+
+        时序列按 CH 类型定向转换：驱动 Date/DateTime 写入只接受 date/datetime
+        实例，字符串会抛 `DataError: Unable to create Python array`（提示文案
+        误导为 None/Nullable 问题）——CI 建仓在 user_info.birthday 实锤。
         """
         import pandas as pd
 
         data = df.copy()
+        desc = conn.query(f"DESCRIBE TABLE {self.quote_ident(table)}")
+        rows = [tuple(row) for row in desc.result_rows]
         if all(str(c).isdigit() for c in data.columns):
-            desc = conn.query(f"DESCRIBE TABLE {self.quote_ident(table)}")
-            data.columns = [row[0] for row in desc.result_rows]
+            data.columns = [row[0] for row in rows]
+        types = {row[0]: str(row[1]) if len(row) > 1 else "" for row in rows}
         data = data.astype(object).where(pd.notna(data), None)
+        for col in data.columns:
+            base = _base_ch_type(types.get(col, ""))
+            if base == "Date" or base.startswith("Date32"):
+                data[col] = [_to_date(v) for v in data[col]]
+            elif base.startswith("DateTime"):
+                data[col] = [_to_datetime(v) for v in data[col]]
         conn.insert_df(table, data)
         return len(data)
 

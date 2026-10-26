@@ -184,12 +184,64 @@ def test_insert_dataframe_unnamed_columns_and_null_cleaning():
 
 
 def test_insert_dataframe_named_columns_untouched():
-    """具名 DataFrame 不做 DESCRIBE（列名即物理列名，建仓灌数快路径）。"""
+    """具名 DataFrame 列名即物理列名（DESCRIBE 仅用于取列类型，不改列名）。"""
     adapter = ClickHouseAdapter()
     client = FakeClient(_ok_script())
     df = pd.DataFrame({"a": [1, 2], "b": [None, "x"]})
     adapter.insert_dataframe(client, "t1", df)
     assert list(client.inserted[0][1].columns) == ["a", "b"]
+
+
+def _typed_script(describe_rows) -> dict[str, FakeResult]:
+    script = _ok_script()
+    script["DESCRIBE TABLE `t1`"] = FakeResult(describe_rows, ["name", "type", "default_type"])
+    return script
+
+
+def test_insert_dataframe_coerces_date_strings():
+    """Date 列字符串 -> date 实例（驱动 Date 写入不接受字符串，CI 建仓实锤）。"""
+    from datetime import date
+
+    adapter = ClickHouseAdapter()
+    client = FakeClient(_typed_script([("birthday", "Nullable(Date)", "")]))
+    df = pd.DataFrame({"birthday": ["1990-01-02", None, "2000-12-31"]})
+    adapter.insert_dataframe(client, "t1", df)
+    out = client.inserted[0][1]["birthday"].tolist()
+    assert out == [date(1990, 1, 2), None, date(2000, 12, 31)]
+
+
+def test_insert_dataframe_coerces_datetime_strings():
+    """DateTime 列字符串 -> datetime 实例（驱动 DateTime 写入调 .timestamp()）。"""
+    from datetime import datetime
+
+    adapter = ClickHouseAdapter()
+    client = FakeClient(_typed_script([("ts", "Nullable(DateTime)", "")]))
+    df = pd.DataFrame({"ts": ["2025-01-02 03:04:05", "2025-06-07"]})
+    adapter.insert_dataframe(client, "t1", df)
+    out = client.inserted[0][1]["ts"].tolist()
+    assert out == [datetime(2025, 1, 2, 3, 4, 5), datetime(2025, 6, 7)]
+
+
+def test_insert_dataframe_keeps_unparsable_and_other_types():
+    """解析失败与非时间列保持原值：不猜测、由驱动诚实报错。"""
+    adapter = ClickHouseAdapter()
+    client = FakeClient(
+        _typed_script([("d", "Date", ""), ("amount", "Nullable(Decimal(16, 2))", "")])
+    )
+    df = pd.DataFrame({"d": ["not-a-date"], "amount": [12.5]})
+    adapter.insert_dataframe(client, "t1", df)
+    out = client.inserted[0][1]
+    assert out["d"].tolist() == ["not-a-date"]
+    assert out["amount"].tolist() == [12.5]
+
+
+def test_base_ch_type_strips_wrappers():
+    from exec.engine.clickhouse_adapter import _base_ch_type
+
+    assert _base_ch_type("Nullable(Date)") == "Date"
+    assert _base_ch_type("LowCardinality(Nullable(String))") == "String"
+    assert _base_ch_type("Nullable(Decimal(16, 2))") == "Decimal(16, 2)"
+    assert _base_ch_type("") == ""
 
 
 def test_registry_clickhouse():
