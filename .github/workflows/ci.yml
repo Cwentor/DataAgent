@@ -189,14 +189,13 @@ jobs:
         run: |
           docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
             --query "SHOW CREATE TABLE gmall.user_info FORMAT TSVRaw" || true
-      - name: Grant readonly account (after warehouse exists)
+      - name: Create readonly account and grant (after warehouse exists)
         run: |
+          # 用户必须用 SQL 建（users_xml 存储对 GRANT 只读）；profile 仍取自
+          # users.d XML，保证 readonly=1 与预算由服务端承载、客户端不可篡改。
           ch() { docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd --query "$1"; }
-          if ! ch "GRANT SELECT ON *.* TO dataagent_ro"; then
-            echo "直接授权失败：先给 default 补 GRANT OPTION 再授权"
-            ch "GRANT SELECT ON *.* TO default WITH GRANT OPTION" || true
-            ch "GRANT SELECT ON *.* TO dataagent_ro"
-          fi
+          ch "CREATE USER IF NOT EXISTS dataagent_ro IDENTIFIED WITH sha256_password BY 'ch_ro_pwd' SETTINGS PROFILE 'ch_ro_profile'"
+          ch "GRANT SELECT ON *.* TO dataagent_ro"
           docker exec ch-ci clickhouse-client --user dataagent_ro --password ch_ro_pwd \
             --query "SELECT value FROM system.settings WHERE name = 'readonly'"
       - name: Dual-backend parity tests (golden DSLs + Review Focus)
