@@ -325,7 +325,8 @@ def _expr_sql(node, resolve) -> str:
         return repr(float(node.lit)) if isinstance(node.lit, float) else str(node.lit)
     rendered = [_expr_sql(a, resolve) for a in node.args]
     if node.op == ExprOp.DIV:
-        return f"({rendered[0]} / NULLIF({rendered[1]}, 0))"
+        # 外层括号由本处保留（golden 锚点原形态）；除法内部形态交给方言渲染器
+        return f"({get_renderer().divide(rendered[0], rendered[1])})"
     if node.op == ExprOp.ADD:
         return f"({rendered[0]} + {rendered[1]})"
     if node.op == ExprOp.SUB:
@@ -353,7 +354,8 @@ def _metric_expr(m: Metric) -> tuple[str, str]:
         # 除零防护：分母为 0 时产出 NULL 而非 inf/NaN，与 comparison 列的 NULLIF 口径对齐；
         # 分子 NULL 语义（审计修复 R4a）：无退款记录的品类 SUM(refund_amount) 为 NULL，
         # 比率应呈现 0（退款率 0.00%）而非 NULL——分子 COALESCE(·, 0)。
-        return f"COALESCE({num}, 0) / NULLIF({den}, 0)", m.alias
+        # 除法形态由方言渲染器承载（CH 需 float 转译规避 Decimal 除法截断）
+        return get_renderer().divide(f"COALESCE({num}, 0)", den), m.alias
     return _aggregate_expr(m), m.alias
 
 
@@ -605,7 +607,8 @@ def _compile_with_comparison(dsl: QueryDSL) -> str:
         q_cmp = _quote_ident(alias + cmp_suffix)
         selects.append(f"cur.{q} AS {q}")
         selects.append(f"prev.{q} AS {q_prev}")
-        selects.append(f"(cur.{q} - prev.{q}) / NULLIF(prev.{q}, 0) AS {q_cmp}")
+        cmp_expr = get_renderer().divide(f"(cur.{q} - prev.{q})", f"prev.{q}")
+        selects.append(f"{cmp_expr} AS {q_cmp}")
 
     sql = "WITH " + _window_block("cur", cur_start, cur_end, time_expr_cur if time_dim else None)
     sql += ",\n" + _window_block("prev", prev_start, prev_end, time_expr_prev if time_dim else None)

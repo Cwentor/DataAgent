@@ -111,6 +111,13 @@ class ClickHouseRenderer:
         # 编译器 INTERVAL 1 DAY 形态在 CH 合法，透传拼接（spec D6）
         return f"{expr} + {interval}"
 
+    def divide(self, numerator: str, denominator: str) -> str:
+        # CH 的 Decimal 除法是 "divide: S = S1"（结果 scale 取第一操作数、
+        # 多余小数截断不舍入）：金额列 DECIMAL(16,2) 下 (cur-prev)/prev 会
+        # 退化成 2 位小数（0.252180 → 0.25）。toFloat64 浮点除法对齐
+        # DuckDB 的 Decimal/DOUBLE 口径（CI parity 实测，spec D14）。
+        return f"toFloat64({numerator}) / NULLIF(toFloat64({denominator}), 0)"
+
     def having_metric_ref(self, alias: str, expr: str) -> str:
         # CH 支持别名复用（同 MySQL 路线，spec D6）
         return self.quote_ident(alias)

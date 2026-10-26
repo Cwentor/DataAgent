@@ -34,6 +34,11 @@ class DuckDbRenderer:
         # DuckDB 原生 date_add(timestamp, interval)——与迁移前内联渲染逐字节一致（golden 锚点）
         return f"date_add({expr}, {interval})"
 
+    def divide(self, numerator: str, denominator: str) -> str:
+        # 与迁移前内联渲染逐字节一致（golden 锚点）：DuckDB 的 Decimal 除法
+        # 返回 DOUBLE，无需额外精度转译；外层括号由调用点按原形态保留
+        return f"{numerator} / NULLIF({denominator}, 0)"
+
     def having_metric_ref(self, alias: str, expr: str) -> str:
         # DuckDB 允许 HAVING 引用输出别名——与迁移前内联渲染逐字节一致（golden 锚点）
         return self.quote_ident(alias)

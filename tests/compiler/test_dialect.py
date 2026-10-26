@@ -482,6 +482,47 @@ class TestClickHouseRenderer:
         assert self._r().escape_string_literal("a'b\\c") == "'a\\'b\\\\c'"
 
 
+def test_divide_byte_identical_on_anchored_dialects():
+    """golden 锚点保护：DuckDB/MySQL/PG 除法渲染与重构前逐字节一致（除零 NULLIF）。
+
+    除法原语（二十三期补）只承载"除零口径 + 精度口径"：锚点三方言输出必须
+    与内联渲染逐字相同，否则 35 条 golden SQL 锚点（eval_runner sql_ok）失效。
+    """
+    from compiler.dialect.duckdb import DuckDbRenderer
+    from compiler.dialect.mysql import MySqlRenderer
+    from compiler.dialect.postgres import PostgresRenderer
+
+    expected = "COALESCE(SUM(f.a), 0) / NULLIF(COUNT(DISTINCT f.b), 0)"
+    for r in (DuckDbRenderer(), MySqlRenderer(), PostgresRenderer()):
+        assert r.divide("COALESCE(SUM(f.a), 0)", "COUNT(DISTINCT f.b)") == expected, r.name
+
+
+def test_clickhouse_divide_float_transpiled():
+    """CH Decimal 除法 "S = S1"（截断不舍入）→ toFloat64 浮点除法对齐 DOUBLE 口径。
+
+    CI clickhouse-parity 实锤：(cur.gmv - prev.gmv) / prev.gmv 在金额列
+    DECIMAL(16,2) 下退化为 2 位小数（0.252180 → 0.25），与 DuckDB 的
+    Decimal 除法返回 DOUBLE 不等价。
+    """
+    from compiler.dialect.clickhouse import ClickHouseRenderer
+
+    out = ClickHouseRenderer().divide("(cur.`gmv` - prev.`gmv`)", "prev.`gmv`")
+    assert out == ("toFloat64((cur.`gmv` - prev.`gmv`)) / NULLIF(toFloat64(prev.`gmv`), 0)")
+
+
+def test_clickhouse_comparison_growth_uses_float_division():
+    """端到端：comparison 增长率列在 CH 方言下走浮点除法（其余结构不变）。"""
+    import sqlglot
+
+    dsl = _month_gmv_dsl()
+    dsl["time_filter"]["comparison"] = "yoy"
+    sql = _compile_dsl(dsl, "clickhouse")
+    assert "toFloat64(" in sql and "NULLIF(toFloat64(" in sql
+    assert " AS `gmv_yoy`" in sql
+    # 语法合法性：CH 方言可解析即形态成立
+    assert sqlglot.parse_one(sql, read="clickhouse") is not None
+
+
 def test_clickhouse_registry(monkeypatch):
     """方言注册表：SQL_DIALECT=clickhouse 返回 ClickHouseRenderer（惰性工厂）。"""
     import config.settings as settings

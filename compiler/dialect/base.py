@@ -14,7 +14,7 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class DialectRenderer(Protocol):
-    """SQL 方言渲染器协议（9 个原语方法）。"""
+    """SQL 方言渲染器协议（10 个原语方法）。"""
 
     name: str  # 方言名（与 sqlglot 方言名一致）
 
@@ -39,6 +39,21 @@ class DialectRenderer(Protocol):
 
         spec D17：DuckDB/MySQL 有同名 date_add 函数；PostgreSQL 无，以
         `{expr} + INTERVAL` 加法等价式实现。
+        """
+        ...
+
+    def divide(self, numerator: str, denominator: str) -> str:
+        """除法渲染（除零口径 + 结果精度口径，二十三期 spec D14 补）。
+
+        除零：分母 NULLIF(·, 0) → 除零得 NULL 而非 inf/NaN（比率指标与
+        comparison 增长率列共用本口径）。
+
+        精度：ClickHouse 的 Decimal 除法规则是 ``divide: S = S1``（结果 scale
+        取**第一操作数**的 scale，多余小数**截断不舍入**，见官方 Decimal
+        「Operations and Result Type」），而本仓金额列是 DECIMAL(16,2)——
+        ``(cur - prev) / prev`` 会退化为 2 位小数（0.252180 → 0.25），与
+        DuckDB（Decimal 除法返回 DOUBLE）语义不等价。故 CH 侧显式走
+        toFloat64 浮点除法对齐 DOUBLE 口径；其余方言保持原有字节形态。
         """
         ...
 
