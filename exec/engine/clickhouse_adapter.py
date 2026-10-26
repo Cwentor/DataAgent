@@ -231,6 +231,12 @@ class ClickHouseAdapter:
         时序列按 CH 类型定向转换：驱动 Date/DateTime 写入只接受 date/datetime
         实例，字符串会抛 `DataError: Unable to create Python array`（提示文案
         误导为 None/Nullable 问题）——CI 建仓在 user_info.birthday 实锤。
+
+        走 `insert(column_oriented=True)` 而非 `insert_df`：后者经驱动的
+        `_convert_pandas` 按 pandas dtype 做隐式转换，跨 pandas 版本行为漂移
+        （CI pandas 3.1.0 下 Nullable(Date) 列被转成越界整数，报
+        `struct.error: 'H' format requires 0 <= number <= 65535`；本地 3.0.6
+        不复现）。列式原生通道不经过该快路径，序列化只由 CH 类型决定。
         """
         import pandas as pd
 
@@ -247,7 +253,13 @@ class ClickHouseAdapter:
                 data[col] = [_to_date(v) for v in data[col]]
             elif base.startswith("DateTime"):
                 data[col] = [_to_datetime(v) for v in data[col]]
-        conn.insert_df(table, data)
+        columns = list(data.columns)
+        conn.insert(
+            table,
+            [data[col].tolist() for col in columns],
+            columns,
+            column_oriented=True,
+        )
         return len(data)
 
     def quote_ident(self, name: str) -> str:

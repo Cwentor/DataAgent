@@ -46,7 +46,17 @@ class FakeClient:
     def query(self, sql: str, *a, **kw):
         return self._script[sql]
 
-    def insert_df(self, table: str, df, **kw):
+    def insert(self, table: str, data, column_names=None, column_oriented=False, **kw):
+        assert column_oriented, "建仓灌数走列式原生通道"
+        # dtype=object 保真：否则 pandas 会把含 None 的时间列推断为 datetime64
+        # 并把 None 变成 NaT，掩盖适配器的空值清洗契约
+        df = pd.DataFrame(
+            {n: pd.Series(list(c), dtype=object) for n, c in zip(column_names, data, strict=False)}
+        )
+        self.inserted.append((table, df))
+        return len(df)
+
+    def insert_df(self, table: str, df, **kw):  # pragma: no cover - 兜底通道
         self.inserted.append((table, df))
         return len(df)
 
