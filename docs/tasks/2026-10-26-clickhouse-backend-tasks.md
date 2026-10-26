@@ -24,21 +24,23 @@ T7 汇聚 T2/T3/T6；T8 依赖 T3；T9 汇聚全部；T10 收口。
 
 ## 服务级验证清单（CI clickhouse-parity job 承担，本地不执行）
 
-- [ ] CI `clickhouse-parity` job 首绿 = CH 链路首次真实验证通过
-- [ ] `mock.init_clickhouse` 建仓成功（clickhouse-server:24.8 服务容器 + users.d 挂载）
-- [ ] golden 全量 DSL duckdb↔clickhouse 结果集一致（行数对照 + diff 明细）
-- [ ] 周边界 / 5 年补零 1826 行（numbers spine）/ comparison yoy 配对 / 池复用只读 四专项通过
-- [ ] 扫描熔断专项通过（numbers(20M) 触发 max_rows_to_read=10M 熔断 → 131 归一）
-- [ ] `test / mysql-parity / postgres-parity` 三既有 job 结果不变绿（零破坏红线）
+> 结论（run `40314908842`，2026-10-26）：五项全绿，`nightly` 按 cron 跳过。
+
+- [x] CI `clickhouse-parity` job 首绿 = CH 链路首次真实验证通过（1m07s）
+- [x] `mock.init_clickhouse` 建仓成功（clickhouse-server:24.8 服务容器 + users.d 挂载）
+- [x] golden 全量 DSL duckdb↔clickhouse 结果集一致（`6 passed in 11.09s`）
+- [x] 周边界 / 5 年补零 1826 行（numbers spine）/ comparison yoy 配对 / 池复用只读 四专项通过
+- [x] 扫描熔断专项通过（numbers(20M) 触发 max_rows_to_read=10M 熔断 → 131 归一）
+- [x] `test / mysql-parity / postgres-parity` 三既有 job 结果不变绿（零破坏红线）
 
 ## Review Focus 专项核对（T10 收尾时逐条打勾）
 
 | # | 失效模式 | 覆盖用例 | 结果 |
 |---|---------|---------|------|
-| 1 | 错误码文本提取漂移/缺失被误归一（159/131） | T3 test_engine_error_without_code_stays_generic + CI 服务级 | ✅ 本地单测绿（CI 服务级待推送观察） |
-| 2 | profile 与应用预算漂移（缺失/readonly<1/预算不一致）未被 fail-closed 拦截 | T3 test_harden_fail_closed_matrix + test_harden_budget_consistent_with_settings | ✅ 三类失配全 fail-closed 并指名 |
+| 1 | 错误码文本提取漂移/缺失被误归一（159/131） | T3 test_engine_error_without_code_stays_generic + CI 服务级 | ✅ 本地单测绿 + CI 熔断专项实测（`max_rows_to_read` 131 归一） |
+| 2 | profile 与应用预算漂移（缺失/readonly<1/预算不一致）未被 fail-closed 拦截 | T3 test_harden_fail_closed_matrix + test_harden_budget_consistent_with_settings | ✅ 三类失配全 fail-closed 并指名；CI 建号步骤回读 `system.settings.readonly` 自检 |
 | 3 | 探索 SQL 携带 SETTINGS 子句篡改预算 | T4 test_clickhouse_extra_keywords_rejected（SETTINGS 用例） | ✅ 关键词层 + AST 层双层拦截 |
-| 4 | 无列名 DataFrame / NaN/NaT 打穿 insert_df | T3 test_insert_dataframe_unnamed_columns_and_null_cleaning + T6 建仓兜底 | ✅ DESCRIBE 补名 + 三类空值统一 None |
+| 4 | 无列名 DataFrame / NaN/NaT 打穿 insert_df | T3 test_insert_dataframe_unnamed_columns_and_null_cleaning + T6 建仓兜底 | ✅ DESCRIBE 补名 + 三类空值统一 None；CI 建仓实锤后改走列式原生通道（见 CI 修复第 3/4 轮） |
 | 5 | spine 桶数月历算术边界（周归一/月末/未知形态/负向窗口） | T2 spine 五用例（week 归一/month_end/unknown/negative/quarter） | ✅ 五用例全绿（1826 桶锚定） |
 
 ## 执行日志（按日期追加）
