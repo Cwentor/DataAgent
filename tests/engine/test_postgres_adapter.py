@@ -191,3 +191,89 @@ def test_get_adapter_rejects_unknown_with_dynamic_names(monkeypatch):
     monkeypatch.setattr(settings, "DB_BACKEND", "oracle")
     with pytest.raises(ValueError, match="duckdb, mysql, postgres"):
         get_adapter()
+
+
+# --------------------------------------------------------------------------- #
+# 物理列读取（二十四期 T4，spec D1/D3/D4）
+# --------------------------------------------------------------------------- #
+class _Cursor:
+    def __init__(self, rows, captured):
+        self._rows = rows
+        self._captured = captured
+
+    def execute(self, sql, params=None):
+        self._captured["sql"] = sql
+        self._captured["params"] = params
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+class _Conn:
+    def __init__(self, rows):
+        self._rows = rows
+        self.captured: dict[str, object] = {}
+        self.closed = False
+
+    def cursor(self):
+        return _Cursor(self._rows, self.captured)
+
+    def close(self):
+        self.closed = True
+
+
+def test_physical_columns_filters_public_schema(monkeypatch):
+    """按 POSTGRES_SCHEMA 过滤：不过滤会把 pg_catalog 等系统 schema 读进目录。"""
+    import config.settings as settings
+
+    monkeypatch.setattr(settings, "POSTGRES_SCHEMA", "public")
+    conn = _Conn([])
+    PostgresAdapter().physical_columns(conn)
+    sql = str(conn.captured["sql"])
+    assert "table_schema = %s" in sql
+    assert "?" not in sql
+    assert conn.captured["params"] == ("public",)
+
+
+def test_physical_columns_pg_type_aliases():
+    """PG 自有别名：integer / numeric / timestamp without time zone。"""
+    conn = _Conn(
+        [
+            ("order_detail", "order_id", "bigint"),
+            ("order_detail", "order_time", "timestamp without time zone"),
+            ("order_detail", "split_total_amount", "numeric"),
+            ("order_detail", "note", "text"),
+            ("order_detail", "is_paid", "boolean"),
+            ("_table_metadata", "tbl", "text"),
+        ]
+    )
+    out = PostgresAdapter().physical_columns(conn)
+    assert out == {
+        "order_detail": {
+            "order_id": "int",
+            "order_time": "timestamp",
+            "split_total_amount": "float",
+            "note": "str",
+            "is_paid": "bool",
+        }
+    }
+
+
+def test_physical_columns_closes_own_connection(monkeypatch):
+    conn = _Conn([])
+    adapter = PostgresAdapter()
+    monkeypatch.setattr(adapter, "connect_readonly", lambda: conn)
+    assert adapter.physical_columns() == {}
+    assert conn.closed is True
+
+
+def test_physical_columns_keeps_injected_connection_open():
+    conn = _Conn([])
+    PostgresAdapter().physical_columns(conn)
+    assert conn.closed is False
