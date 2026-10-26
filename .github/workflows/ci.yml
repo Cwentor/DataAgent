@@ -188,8 +188,20 @@ jobs:
         run: |
           docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
             --query "SHOW CREATE TABLE gmall.user_info FORMAT TSVRaw" || true
-          docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
-            --query "DESCRIBE TABLE gmall.user_info FORMAT TSVRaw" || true
+          python - <<'PY'
+          import random
+          import pandas as pd
+          from config import settings
+          from mock.gmall.build import _build_users, _user_rows
+
+          users = _build_users(random.Random(42), settings.AS_OF_DATE)
+          rows = _user_rows(users)
+          df = pd.DataFrame(rows)
+          print("dtypes:", dict(df.dtypes.astype(str)))
+          print("birthday 类型分布:", df[7].map(lambda v: type(v).__name__).value_counts().to_dict())
+          print("birthday 样例:", [repr(v) for v in df[7].tolist()[:5]])
+          print("user_id 样例:", [repr(v) for v in df[0].tolist()[:5]])
+          PY
       - name: Grant readonly account (after warehouse exists)
         run: |
           docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
