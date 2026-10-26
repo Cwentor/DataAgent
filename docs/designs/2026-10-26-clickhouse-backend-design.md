@@ -1,8 +1,9 @@
 # 设计方案｜ClickHouse 执行后端支持（二十三期，2026-10）
 
-> 状态：设计定稿（八节设计呈现已获用户通过），待规格审阅。实施计划与任务
-> 跟踪另立 `docs/plans/2026-10-26-clickhouse-backend-{plan,tasks}.md`
-> （对齐 `2026-10-26-postgres-backend-{plan,tasks}.md` 先例）。
+> 状态：设计定稿，规格审阅已通过（2026-10-26）。实施计划见
+> `../plans/2026-10-26-clickhouse-backend-plan.md`，任务记录见
+> `../tasks/2026-10-26-clickhouse-backend-tasks.md`（对齐二十二期先例与
+> 五类目录命名规范，见 `docs/README.md`）。
 > 分支：`feat/clickhouse-hive-backend`（自 master 92911b6 切出）。
 
 ## 1. 背景与目标
