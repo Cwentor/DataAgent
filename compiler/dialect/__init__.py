@@ -39,11 +39,12 @@ _RENDERER_FACTORIES: dict[str, Callable[[], Any]] = {
     "duckdb": _lazy_factory("compiler.dialect.duckdb", "DuckDbRenderer"),
     "mysql": _lazy_factory("compiler.dialect.mysql", "MySqlRenderer"),
     "postgres": _lazy_factory("compiler.dialect.postgres", "PostgresRenderer"),
+    "clickhouse": _lazy_factory("compiler.dialect.clickhouse", "ClickHouseRenderer"),
 }
 
 
 def get_renderer() -> DialectRenderer:
-    """取当前方言渲染器（duckdb / mysql / postgres）。"""
+    """取当前方言渲染器（duckdb / mysql / postgres / clickhouse）。"""
     from compiler.errors import CompileError  # 惰性导入：errors 不反向依赖本包
 
     name = resolve_dialect()
