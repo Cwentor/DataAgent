@@ -22,7 +22,7 @@
 - [ ] Commit `test: 红线矩阵核对与补全（十九期 M7）`
 
 ### Task M7-T4: Mimosa 式安全复审落盘
-- 对 M1-M6 diff 做安全复审（提升闸门绕路面 / 视图层逃逸面 / 审批门绕过面 / 沙箱旁路）→ `docs/reviews/20261003-security-review-capability-boundary-m1-m6.md`
+- 对 M1-M6 diff 做安全复审（提升闸门绕路面 / 视图层逃逸面 / 审批门绕过面 / 沙箱旁路）→ `docs/reviews/2026-10-03-security-review-capability-boundary-m1-m6.md`
 - [ ] Commit `docs(reviews): 十九期安全复审（M7）`
 
 ### Task M7-T5: 全量收口

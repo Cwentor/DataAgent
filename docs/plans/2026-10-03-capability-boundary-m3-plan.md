@@ -9,7 +9,7 @@
 
 **Tech Stack:** pydantic v2、既有 LangGraph 编排（零图结构变更）、agent 包启发式规则。
 
-**Spec:** `docs/superpowers/specs/2026-10-02-capability-boundary-expansion-design.md` §3.6（双产出/分级透明）、§3.7（兜底不回退）、§8 M3 验收。
+**Spec:** `docs/designs/2026-10-02-capability-boundary-expansion-design.md` §3.6（双产出/分级透明）、§3.7（兜底不回退）、§8 M3 验收。
 
 ## Global Constraints
 

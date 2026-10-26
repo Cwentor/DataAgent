@@ -9,7 +9,7 @@
 
 **Tech Stack:** DuckDB 视图与连接设置、security.policy 策略模型、沙箱 ast_guard。
 
-**Spec:** `docs/superpowers/specs/2026-10-02-capability-boundary-expansion-design.md` §3.4（安全视图层）、§6.1（沙箱旁路封堵）、§8 M5 验收。
+**Spec:** `docs/designs/2026-10-02-capability-boundary-expansion-design.md` §3.4（安全视图层）、§6.1（沙箱旁路封堵）、§8 M5 验收。
 
 ## Global Constraints
 

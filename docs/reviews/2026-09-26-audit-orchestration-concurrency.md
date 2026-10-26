@@ -1,7 +1,7 @@
 # 评审报告｜审计：编排层并发安全前置审计（2026-09）
 
-> 归属：`docs/plans/2026-09-26-agent-harness-evolution-m0-m4.md` Task 2（M0 前置审计项）。
-> 设计文档依据：`docs/superpowers/specs/2026-09-24-agent-harness-evolution-design.md` §8。
+> 归属：`docs/plans/2026-09-26-agent-harness-evolution-m0-m4-plan.md` Task 2（M0 前置审计项）。
+> 设计文档依据：`docs/designs/2026-09-24-agent-harness-evolution-design.md` §8。
 
 ## 审计项一：事件总线（core/orchestrator/events.py）线程安全
 

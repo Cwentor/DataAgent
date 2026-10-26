@@ -9,7 +9,7 @@
 
 **Tech Stack:** sqlglot（既有）、pydantic v2、语义目录 JOIN_RULES/COLUMNS。
 
-**Spec:** `docs/superpowers/specs/2026-10-02-capability-boundary-expansion-design.md` §3.3（提升闸门）、§5.2（保守性）、§8 M4 验收。
+**Spec:** `docs/designs/2026-10-02-capability-boundary-expansion-design.md` §3.3（提升闸门）、§5.2（保守性）、§8 M4 验收。
 
 ## Global Constraints
 

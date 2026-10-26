@@ -114,7 +114,7 @@ core/retrieval/ 追加（十九期）：sql_lift.py 提升闸门（LLM SQL -> DS
 eval/       Golden 评测骨架与用例（oracle / agent 双模式）+ 意图路由评测（intent_eval）
 mock/       确定性 Gmall 电商 mock 数仓（DuckDB）：mock/init_duckdb.py 入口 +
             mock/gmall/ 生成器（种子表提取 / 会话行为链模拟 / 埋点 JSON 日志 /
-            日志解析入仓；反向解析规格见 docs/plans/2026-10-06-gmall-mock-reverse-spec.md）
+            日志解析入仓；反向解析规格见 docs/designs/2026-10-06-gmall-mock-reverse-design.md）
 present/    展示层（解释 + 可视化推荐）
 security/   权限控制（表级/列级/行级 RLS + 生成前作用域收窄 + views.py 会话级
             安全视图：禁列物理投影 / RLS 固化 / 连接加固）
@@ -129,6 +129,10 @@ tests/      测试（子目录与源码包一一对应：tests/core、tests/comp
             conftest、fixture_keys）
 tools/      生产工具包（工具注册中心、内置工具等）
 web/        Web 服务与工作台（FastAPI 服务 + service 编排链路 + static 前端）
+scripts/    生产验证脚本（P0-1 端到端 / 渗透用例 / Top10 复核等一次性验证入口）
+docs/       项目文档（分类规范与总索引见 docs/README.md：guides 稳定指南 /
+            designs 设计方案 / plans 实施计划 / tasks 任务记录 / reviews 评审归档 /
+            assets 静态资源；logs/ 与根目录 analytics_sandbox.duckdb 为运行期产物）
 ```
 
 ### core/ 四包（Data Agent 升级层）
@@ -225,7 +229,7 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas +
 ## 评审落盘规范（Review Archive）
 
 - 任何评审（PR 评审、代码审计、生产就绪度评审、安全评审等）的落盘文件**必须统一输出到 `docs/reviews/`**，严禁散落在项目根目录或其他目录；
-- 文件命名遵循 `docs/reviews/README.md` 中的规范：`yyyymmdd-` 归档日期前缀 + kebab-case 英文类型与主题（如 `20260905-pr-review-<主题>.md`、`20260906-audit-<主题>.md`、`20260906-readiness-<主题>.md`）；
+- 文件命名遵循 `docs/reviews/README.md` 中的规范：`YYYY-MM-DD-`（ISO）归档日期前缀 + kebab-case 英文类型与主题（如 `2026-09-05-pr-review-<主题>.md`、`2026-09-06-audit-<主题>.md`、`2026-09-06-readiness-<主题>.md`）；
 - 文件首行标题必须遵循统一格式 `# 评审报告｜<评审类型>：<评审主题>（YYYY-MM）`，内容结构不强制统一；
 - 归档规范与清单详见 [`docs/reviews/README.md`](docs/reviews/README.md)。
 

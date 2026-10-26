@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12 / pydantic v2（`UnifiedChatRequest`）/ http.client（`_http_post`）/ pytest + monkeypatch（`_http_post` 打桩、`_resolve_llm` 打桩）。
 
-**Spec:** `docs/superpowers/specs/2026-09-29-analysis-report-narrative-design.md`（执行者需同时读两者）。
+**Spec:** `docs/designs/2026-09-29-analysis-report-narrative-design.md`（执行者需同时读两者）。
 
 ## Global Constraints
 

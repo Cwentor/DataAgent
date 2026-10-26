@@ -2,13 +2,13 @@
 
 > 本计划交 dev-executing-plans 逐任务执行；步骤用 `- [ ]` 勾选跟踪。
 
-**Goal:** 按 `docs/superpowers/specs/2026-09-24-agent-harness-evolution-design.md` 完成底座迁移（LangGraph + FastAPI 双引擎可回退）与 A 线（Plan Mode 审批门 + 自主性分级）、B 线（Subagent fan-out）落地，M4 收敛为单引擎。
+**Goal:** 按 `docs/designs/2026-09-24-agent-harness-evolution-design.md` 完成底座迁移（LangGraph + FastAPI 双引擎可回退）与 A 线（Plan Mode 审批门 + 自主性分级）、B 线（Subagent fan-out）落地，M4 收敛为单引擎。
 
 **Architecture:** 三阶段双引擎迁移——自研 StateGraph 与 LangGraph 图并存于 `ORCHESTRATOR_ENGINE` 开关之后（节点/路由函数零改动复用）；ThreadingHTTPServer 与 FastAPI 并存于 `WEB_SERVER_ENGINE` 开关之后（端点路径/SSE 契约不变）；A 线用 `interrupt()` 泛化（clarify 与 plan_review 同一原语两个 kind）；B 线用四节点受限子图 + `Send` fan-out，native 引擎下降级为串行子任务循环。领域内核（agent/compiler/exec/security/semantic/core）零改动。
 
 **Tech Stack:** Python 3.12（conda `dataagent`/`futurebi`）、pydantic v2、langgraph + langgraph-checkpoint-sqlite（精确 pin）、fastapi + uvicorn（已装）、httpx（TestClient）、DuckDB、pytest。
 
-**Spec:** `docs/superpowers/specs/2026-09-24-agent-harness-evolution-design.md`（执行者需同时读本计划与该规格）。
+**Spec:** `docs/designs/2026-09-24-agent-harness-evolution-design.md`（执行者需同时读本计划与该规格）。
 
 ## Global Constraints
 
@@ -1725,7 +1725,7 @@ git commit -m "refactor(orchestrator): 删除旧引擎与双引擎开关，LangG
 **Files:**
 - Modify: `README.md`（选型哲学章节：从"零框架依赖"改写为"领域内核零框架（4 依赖不变）+ 编排/交互层拥抱成熟框架"）、目录结构章节（新增 `core/orchestrator/langgraph_engine.py`、`autonomy.py`、`subagent.py`、`web/api.py`）
 - Modify: `AGENTS.md`（依赖方向铁律措辞同步：编排层框架依赖白名单 langgraph/fastapi；常用命令不变）
-- Modify: `docs/superpowers/specs/2026-09-24-agent-harness-evolution-design.md`（文首追加实施状态小节：M0-M4 完成记录 + 计划文档链接）
+- Modify: `docs/designs/2026-09-24-agent-harness-evolution-design.md`（文首追加实施状态小节：M0-M4 完成记录 + 计划文档链接）
 
 - [ ] **Step 1: 按上述三处更新文档**（内容以实际落地代码为准，逐节核对不写愿景）。
 - [ ] **Step 2: 终验**
@@ -1738,7 +1738,7 @@ python -m web.server 8000  # 冒烟：登录/提问/审批门/自主性切换/fa
 - [ ] **Step 3: Commit**
 
 ```bash
-git add README.md AGENTS.md docs/superpowers/specs/
+git add README.md AGENTS.md docs/designs/
 git commit -m "docs(specs): 十七期 Agent 架构演进 M0-M4 实施完成——单引擎收敛与文档同步"
 ```
 

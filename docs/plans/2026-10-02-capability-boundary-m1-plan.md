@@ -9,7 +9,7 @@
 
 **Tech Stack:** pydantic v2（`model_validator`）、DuckDB、既有 LangGraph 编排（不改图结构、不加节点）。
 
-**Spec:** `docs/superpowers/specs/2026-10-02-capability-boundary-expansion-design.md`（本计划实现其 §3.1 纯投影部分、§3.2、§3.8、§4 案例 A、§8 M1；HAVING 与表达式指标属 M2，不在本计划）。
+**Spec:** `docs/designs/2026-10-02-capability-boundary-expansion-design.md`（本计划实现其 §3.1 纯投影部分、§3.2、§3.8、§4 案例 A、§8 M1；HAVING 与表达式指标属 M2，不在本计划）。
 
 ## Global Constraints
 

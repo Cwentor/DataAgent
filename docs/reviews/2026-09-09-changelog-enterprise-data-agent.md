@@ -1,7 +1,7 @@
 # 评审报告｜升级变更记录：企业级 Data Agent 重型升级（2026-09）
 
 > 分支：feat/relaxed-chat-constraints；计划与决策详见
-> [docs/plans/20260909-enterprise-data-agent-plan.md](../plans/20260909-enterprise-data-agent-plan.md)
+> [docs/plans/2026-09-09-enterprise-data-agent-plan.md](../plans/2026-09-09-enterprise-data-agent-plan.md)
 
 ## 升级总览
 

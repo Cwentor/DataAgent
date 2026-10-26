@@ -1,6 +1,6 @@
 # 评审报告｜方案评审：语义层去耦与评测分层三期规格（2026-10）
 
-- 评审对象：`docs/plans/2026-10-07-semantic-decoupling-spec.md`（P0 评测分层 / P1 业务映射收编 / P2 单一事实源）
+- 评审对象：`docs/designs/2026-10-07-semantic-decoupling-design.md`（P0 评测分层 / P1 业务映射收编 / P2 单一事实源）
 - 评审基线：branch `feature/wip` @ f144c5e
 - 评审日期：2026-10-07
 - 总结论：**通过（含 1 项 MEDIUM 偏差 + 3 项 LOW 偏差需收口）**

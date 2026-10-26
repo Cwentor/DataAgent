@@ -116,7 +116,7 @@ golden 31/31（oracle + 离线 agent）+ `test_agent.py` 的 heuristic 全量 go
 ## 6. 兑现状态（2026-10-07 评审收口后）
 
 规格落盘晚于实现（实现在 e147927..6b2a24e），评审报告
-`docs/reviews/20261007-plan-review-semantic-decoupling-spec.md` 复跑门禁全绿并清出 4 项偏差，
+`docs/reviews/2026-10-07-plan-review-semantic-decoupling.md` 复跑门禁全绿并清出 4 项偏差，
 当日收口：
 
 | 偏差 | 处置 |

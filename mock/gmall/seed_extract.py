@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-# 需要提取的种子表（与 docs/plans/2026-10-06-gmall-mock-reverse-spec.md §3.1 一致）
+# 需要提取的种子表（与 docs/designs/2026-10-06-gmall-mock-reverse-design.md §3.1 一致）
 SEED_TABLES = [
     "base_province",
     "base_region",

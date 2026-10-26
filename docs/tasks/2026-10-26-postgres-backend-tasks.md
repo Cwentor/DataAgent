@@ -1,7 +1,7 @@
 # 任务记录｜PostgreSQL 执行后端支持（二十二期）
 
-> 配套文档：设计方案 `../superpowers/specs/2026-10-26-postgres-backend-design.md` ｜
-> 实施计划 `2026-10-26-postgres-backend-plan.md`（步骤级勾选项在计划内，本文件只跟踪任务级状态）。
+> 配套文档：设计方案 `../designs/2026-10-26-postgres-backend-design.md` ｜
+> 实施计划 `../plans/2026-10-26-postgres-backend-plan.md`（步骤级勾选项在计划内，本文件只跟踪任务级状态）。
 > 分支：`feat/postgres-backend`（基线 master@41ca5cc）。
 
 ## 任务总览

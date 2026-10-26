@@ -14,7 +14,7 @@
 **Tech Stack:** Python 3.12 标准库 `http.client`（无新依赖）；pytest + monkeypatch；
 black + ruff 门禁。
 
-**Spec:** `docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md`（提交
+**Spec:** `docs/designs/2026-10-05-llm-handshake-retry-design.md`（提交
 91c166c）——执行者须同时读本计划与 spec，冲突以 spec 为准。
 
 ## Global Constraints
@@ -77,7 +77,7 @@ black + ruff 门禁。
 ```python
 """LLM 流式握手期超时安全重试测试。
 
-spec: docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md
+spec: docs/designs/2026-10-05-llm-handshake-retry-design.md
 覆盖：异常体系兼容性、配置默认值、指标计数器、握手期判定与独立预算、
 mid-stream 禁重试、重试包装（成功 / 双失败 / 开关关闭 / 鉴权头一致）、
 三协议适配器接入。
@@ -197,7 +197,7 @@ if PROVIDER_STREAM_MAX_SECONDS <= 0:
 # 最坏总延迟不高于单次 PROVIDER_TIMEOUT 上限；运行时对 <=0 钳制为 1（防非法配置）
 PROVIDER_HANDSHAKE_TIMEOUT: int = int(os.getenv("PROVIDER_HANDSHAKE_TIMEOUT", "30"))
 # 握手期超时安全重试次数：仅限未收到任何响应字节的超时（防重复计费假设见
-# docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md §前提假设）；<=0 关闭
+# docs/designs/2026-10-05-llm-handshake-retry-design.md §前提假设）；<=0 关闭
 PROVIDER_HANDSHAKE_RETRY_MAX: int = int(os.getenv("PROVIDER_HANDSHAKE_RETRY_MAX", "1"))
 ```
 
@@ -802,7 +802,7 @@ def _consume_stream_handshake_retry(
       payload / headers / api_key / 协议参数与首次请求完全一致（原样重发，
       鉴权头完整性由既有 _build_headers / api_key 透传保证）；
     - 仅 StreamHandshakeTimeout（未收到任何响应字节）触发重试——计费假设与
-      免责锚点见 docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md
+      免责锚点见 docs/designs/2026-10-05-llm-handshake-retry-design.md
       §前提假设；mid-stream 超时 / 断连 / 错误帧 / 协议错误原样穿透；
     - 0.2s 固定短退避后重试；重试失败连接已在 _http_post_sse finally 关闭，
       退避期间不持有任何连接；

@@ -3,9 +3,9 @@
 ## 评审元信息
 
 - **评审对象**：十九期全项（M1-M7），固定点 `e5999f7..HEAD`（HEAD = 79d1629），44 提交、49 文件、+5645/-129；
-- **需求对照物**：设计定稿 `docs/superpowers/specs/2026-10-02-capability-boundary-expansion-design.md`（200 行）、七份里程碑实施计划 `docs/plans/2026-10-0X-capability-boundary-m1..m7.md`、AGENTS.md 十九期铁律段；
+- **需求对照物**：设计定稿 `docs/designs/2026-10-02-capability-boundary-expansion-design.md`（200 行）、里程碑实施计划（`docs/plans/` 下 capability-boundary-m*-plan 系列）、AGENTS.md 十九期铁律段；
 - **方法**：双轴并行独立评审（Spec 轴代理 + Standards 轴代理，互不知晓），CRITICAL 由主评审复核事实链（MRO 继承、调用链、异常捕获范围三点静态验证）；
-- **前序评审**：`20261003-pr-review-capability-boundary-m1-m5.md`（3 HIGH 已修复）、`20261003-security-review-capability-boundary-m1-m6.md`（0 高危结论）。本报告为第三次、覆盖 M1-M7 全项的独立评审，此前未被发现的 CRITICAL 见 Standards 轴 #1。
+- **前序评审**：`2026-10-03-pr-review-capability-boundary-m1-m5.md`（3 HIGH 已修复）、`2026-10-03-security-review-capability-boundary-m1-m6.md`（0 高危结论）。本报告为第三次、覆盖 M1-M7 全项的独立评审，此前未被发现的 CRITICAL 见 Standards 轴 #1。
 
 ## 做得好的
 
@@ -61,7 +61,7 @@
   需求原句：「选项：**允许一次 / 本会话允许 / 拒绝**」（设计 §3.5、§12）。现状：`state.py:195-198` `exploration_allowed` 为轮内字段，未接 session store 跨轮持久化。M6 计划 Review Focus #5 已批准延后，安全复审已如实记录，但设计文档未修订此偏差。
 
 - **[S-9] M7 安全复审文档防线数字与代码不符**（LOW）
-  `docs/reviews/20261003-security-review-capability-boundary-m1-m6.md` §2.1 写「解析超时 3s + 长度上限 20K」；代码为 `_PARSE_TIMEOUT_S = 5.0`、`_MAX_SQL_LENGTH = 10_000`（`core/retrieval/sql_lift.py:37-38`）。
+  `docs/reviews/2026-10-03-security-review-capability-boundary-m1-m6.md` §2.1 写「解析超时 3s + 长度上限 20K」；代码为 `_PARSE_TIMEOUT_S = 5.0`、`_MAX_SQL_LENGTH = 10_000`（`core/retrieval/sql_lift.py:37-38`）。
 
 - **[S-10] 口径模糊锚点期望为 refusal，与设计 §7 通过条件字面不符**（LOW，疑似）
   需求原句：「断言：**要么发生选项式澄清、要么 assumptions 非空且报告可见**，两种都算通过」（设计 §7 题库第 3 层）。现状：`eval/intent_golden.json` 该题 `expect: "refusal"`，intent_eval 强制无 LLM 走兜底拒答；「补充假设作答断言」落在单测层（`tests/test_orchestrator.py:1671,1709`）。可辩护为「不静默猜」的证明，但 eval 中无 LLM 场景落点。

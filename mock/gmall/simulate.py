@@ -5,7 +5,7 @@
 - 同时在 WarehouseState 上落业务行（购物车 / 收藏 / 领券 / 订单 / 支付 / 退款 / 评论），
   对应原 jar 在 MySQL 业务库与埋点日志两条数据线上的双写。
 
-与原 jar 的有意差异（详见 docs/plans/2026-10-06-gmall-mock-reverse-spec.md §3.4）：
+与原 jar 的有意差异（详见 docs/designs/2026-10-06-gmall-mock-reverse-design.md §3.4）：
 - 单线程顺序演算（原线程池并发不可复现）；
 - good_detail 从上个页面的曝光选择商品时只过滤 sku 位（原实现会把活动位 id 误当 sku）；
 - 下单读取购物车时跳过已下单条目（原实现在 if-order-rate=100 时会重复下单已购条目，疑似笔误）；

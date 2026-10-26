@@ -9,7 +9,7 @@
 
 **Tech Stack:** sqlglot、DuckDB TEMP VIEW、langgraph interrupt、既有 exec 护栏与 export 管道、web/static 审批卡。
 
-**Spec:** `docs/superpowers/specs/2026-10-02-capability-boundary-expansion-design.md` §3.5（审批门）、§4 案例 B、§6.5（L4 边界）、§8 M6 验收。
+**Spec:** `docs/designs/2026-10-02-capability-boundary-expansion-design.md` §3.5（审批门）、§4 案例 B、§6.5（L4 边界）、§8 M6 验收。
 
 ## Global Constraints
 

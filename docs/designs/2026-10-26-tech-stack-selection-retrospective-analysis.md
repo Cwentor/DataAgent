@@ -17,17 +17,17 @@
 |------|------|-------------|
 | 一至十六 | ChatBI 基础栈（语义目录/DSL 契约/编译器/执行护栏/权限/审计/认证/持久化/模型网关/Web 工作台/评测/mock v1） | 本文件（无逐期存档） |
 | 穿插修复波次 | 指示器中断检测（2026-09-15）、实现缺口修复（2026-09-28） | 各自文档末尾补记节 |
-| 十七期 | harness 演进 M0-M4（LangGraph 单引擎收敛） | `docs/superpowers/specs/2026-09-24-agent-harness-evolution-design.md` 末尾补记节 |
+| 十七期 | harness 演进 M0-M4（LangGraph 单引擎收敛） | `docs/designs/2026-09-24-agent-harness-evolution-design.md` 末尾补记节 |
 | 十八期 | 意图路由与诚实兜底（一期/二期） | `2026-09-27-intent-routing-honest-fallback-design.md`、`2026-09-28-intent-honest-phase2-design.md` 末尾补记节 |
 | 穿插特性 | 报告叙述化 / 分层降级兜底 / LLM 流式改造（2026-09-29~30） | 各自 design 文档末尾补记节 |
 | 十九期 | 能力边界扩展（三层同心圆，M1-M7） | `2026-10-02-capability-boundary-expansion-design.md` 末尾补记节 |
 | 穿插特性 | 握手期超时安全重试 / 枚举作答审计握手（2026-10-05~07） | 各自 design 文档末尾补记节 |
-| 二十期 | Gmall mock 数仓全量替换 | `docs/plans/2026-10-06-gmall-mock-reverse-spec.md` 末尾补记节 |
-| 穿插特性 | 语义去耦（semantic.json 单一事实源，2026-10-07） | `2026-10-07-semantic-decoupling-spec.md` 末尾补记节 |
-| 二十一期 | MySQL 执行后端 | `docs/plans/2026-10-25-mysql-support-spec.md` 末尾补记节 |
-| 二十二期 | PostgreSQL 执行后端 | `docs/superpowers/specs/2026-10-26-postgres-backend-design.md` 末尾补记节 |
-| 二十三期 | ClickHouse 执行后端 | `docs/superpowers/specs/2026-10-26-clickhouse-backend-design.md` §4（设计期原生输出） |
-| core/ 四包立项 | 编排/沙箱/技能包（2026-09-09 总体方案） | `docs/plans/20260909-enterprise-data-agent-plan.md` 末尾补记节 |
+| 二十期 | Gmall mock 数仓全量替换 | `docs/designs/2026-10-06-gmall-mock-reverse-design.md` 末尾补记节 |
+| 穿插特性 | 语义去耦（semantic.json 单一事实源，2026-10-07） | `docs/designs/2026-10-07-semantic-decoupling-design.md` 末尾补记节 |
+| 二十一期 | MySQL 执行后端 | `docs/designs/2026-10-25-mysql-support-design.md` 末尾补记节 |
+| 二十二期 | PostgreSQL 执行后端 | `docs/designs/2026-10-26-postgres-backend-design.md` 末尾补记节 |
+| 二十三期 | ClickHouse 执行后端 | `docs/designs/2026-10-26-clickhouse-backend-design.md` §4（设计期原生输出） |
+| core/ 四包立项 | 编排/沙箱/技能包（2026-09-09 总体方案） | `docs/plans/2026-09-09-enterprise-data-agent-plan.md` 末尾补记节 |
 
 ## S1 语言与运行时
 

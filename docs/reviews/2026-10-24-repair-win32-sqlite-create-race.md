@@ -230,7 +230,7 @@ raise PermissionError(
 | PR #15 合并 | **待办** | 当前 OPEN，`lint` / `test` 双绿；合入后 master 才具备该修复 |
 | master 夜跑验证 | **待观察** | master 修复 duckdb 事故后的 `schedule` 运行尚未发生；`nightly` 独有的 `boundary_eval` + RLS 对抗矩阵只在定时任务跑 |
 | 跨平台 CI | **未做** | 建议增加 Windows job，至少覆盖 `tests/persistence` 与 `tests/audit`，否则同类问题仍会复发且不可见 |
-| DuckDB 2.x 上界解除 | **未做** | 前置条件：扫描行计量不依赖计划文本渲染（见 `20261024-repair-ci-duckdb2-scan-cap-bypass.md`） |
+| DuckDB 2.x 上界解除 | **未做** | 前置条件：扫描行计量不依赖计划文本渲染（见 `2026-10-24-repair-ci-duckdb2-scan-cap-bypass.md`） |
 
 ---
 

@@ -1,7 +1,7 @@
 # 评审报告｜生产就绪度：十七期底座迁移双跑对比（2026-09）
 
-> 归属：`docs/plans/2026-09-26-agent-harness-evolution-m0-m4.md` Task 16（M4 验收收敛前置）。
-> 设计文档：`docs/superpowers/specs/2026-09-24-agent-harness-evolution-design.md`。
+> 归属：`docs/plans/2026-09-26-agent-harness-evolution-m0-m4-plan.md` Task 16（M4 验收收敛前置）。
+> 设计文档：`docs/designs/2026-09-24-agent-harness-evolution-design.md`。
 
 ## 一、双跑对比结论（M0 验收门实测）
 
@@ -47,7 +47,7 @@ golden 框架无法为 A/B 线（审批门 / fan-out）提供验收锚点。裁�
 | oracle 评测双跑 | 逐例一致（23+2 环境性；纯净基线 25/25） |
 | SSE 事件 diff | 分层等价成立（本报告第二节） |
 | 双跑对比输出 | 留档（本报告第一节） |
-| 前置审计 | `docs/reviews/20260926-audit-orchestration-concurrency.md` |
+| 前置审计 | `docs/reviews/2026-09-26-audit-orchestration-concurrency.md` |
 | recursion_limit 校准 | `test_recursion_limit_anchors_termination`（limit=3 确定性触发护栏） |
 | checkpointer 重启恢复 | `test_checkpointer_survives_process_restart` |
 

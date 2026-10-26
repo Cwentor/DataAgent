@@ -10,7 +10,7 @@
 
 **P3（可观测性/合规缺口）**：审计写入只挂在 `/api/query` 查询管道（`web/service.py:619`），编排器路由 `/api/agent/run`（`web/api.py:512`）完全不落 `audit.jsonl`——多轮对话（产品主链路）零审计留痕。`planner_llm_error` 只存于内存态、`_llm_json` 的降级 warning 只进 stderr，服务进程一关日志即失，出问题既查不到也复不了盘。
 
-**P4（既有待审件）**：`handshake-retry-design`（spec `docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md` 已提交）一直待审。中转站瞬时抖动（60s 挂起与 0.8s 返回交替）仍靠"降级水印"兜着，该项落地后能自愈一大半真·LLM 故障场景。
+**P4（既有待审件）**：`handshake-retry-design`（spec `docs/designs/2026-10-05-llm-handshake-retry-design.md` 已提交）一直待审。中转站瞬时抖动（60s 挂起与 0.8s 返回交替）仍靠"降级水印"兜着，该项落地后能自愈一大半真·LLM 故障场景。
 
 ## 范围与优先级
 
@@ -132,7 +132,7 @@ ENUMERATION 路径的 s2 synthesize 不走 LLM 叙述，直接确定性渲染维
 
 本项为既有待审 spec 的落地实施，不重复设计。
 
-- **既有规格**：`docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md`
+- **既有规格**：`docs/designs/2026-10-05-llm-handshake-retry-design.md`
 - **核心内容**：握手期（收到任何响应字节之前）超时抛专用异常 `StreamHandshakeTimeout`，允许安全重试一次；握手阶段使用独立短超时预算 `PROVIDER_HANDSHAKE_TIMEOUT`（默认 30s）；三类事件（握手超时 / 重试成功 / 重试仍失败）计入 `/api/metrics`；不触碰 mid-stream 防重复计费铁律
 - **本轮动作**：推进 spec 过审 + 实施落地，验收锚点沿用既有 spec 的测试覆盖（握手超时专用异常 / 重试配置 / 握手指标计数器）
 

@@ -292,7 +292,7 @@ import `audit.logging` / `audit.metrics` 已是项目既有先例，providers→
 | `config/settings.py` | 新增 2 项配置 | ~8 行 |
 | `audit/metrics.py` | 新增 `record_llm_handshake` + snapshot 导出 | ~12 行 |
 | `tests/test_provider_handshake_retry.py` | 新建（上述 9 组用例） | ~300 行 |
-| `docs/superpowers/specs/` | 本设计文档 | — |
+| `docs/designs/` | 本设计文档 | — |
 
 不改动：编排层（core/orchestrator）、web 层、前端、非流式 `_http_post` 路径、
 `_llm_json` 及其测试桩格局。

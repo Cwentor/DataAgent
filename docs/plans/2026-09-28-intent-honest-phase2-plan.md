@@ -8,7 +8,7 @@
 
 **Tech Stack:** 现有栈零新依赖（dataclass / LangGraph interrupt / pytest / GitHub Actions）。
 
-**Spec:** `docs/superpowers/specs/2026-09-28-intent-honest-phase2-design.md`（执行者必须同时读规格；冲突以规格为准）
+**Spec:** `docs/designs/2026-09-28-intent-honest-phase2-design.md`（执行者必须同时读规格；冲突以规格为准）
 
 ## Global Constraints
 

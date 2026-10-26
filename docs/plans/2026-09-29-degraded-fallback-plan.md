@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12 / pydantic v2（AgentState、QueryDSL 契约）/ LangGraph interrupt / pytest + monkeypatch。
 
-**Spec:** `docs/superpowers/specs/2026-09-29-degraded-fallback-design.md`（执行者需同时读两者）。
+**Spec:** `docs/designs/2026-09-29-degraded-fallback-design.md`（执行者需同时读两者）。
 
 ## Global Constraints
 

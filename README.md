@@ -101,7 +101,7 @@ python -m mock.init_duckdb
 python -m web.server 8000
 ```
 
-> 🌐 启动后用浏览器打开 <http://127.0.0.1:8000> 即可体验；完整的安装、评测与离线自检步骤见 **[快速开始](docs/quickstart.md)**。
+> 🌐 启动后用浏览器打开 <http://127.0.0.1:8000> 即可体验；完整的安装、评测与离线自检步骤见 **[快速开始](docs/guides/quickstart.md)**。
 
 ---
 
@@ -170,7 +170,7 @@ python -m pytest tests/test_dual_backend_parity.py -q
 **版本演进跟随（重要）**：治理管道依赖引擎行为（EXPLAIN ANALYZE 输出格式、
 max_execution_time、sql_mode 默认值），MySQL 版本升级须先跑全量测试 + 双后端
 一致性回归再放行——这是多引擎支持的必然代价（详见
-`docs/plans/2026-10-25-mysql-support-spec.md` §8.1）。
+`docs/designs/2026-10-25-mysql-support-design.md` §8.1）。
 
 ### 四、配置 LLM
 
@@ -209,7 +209,7 @@ AUTH_STRICT=1                  # 严格生产安全模式
 
 > **多供应商管理**：除 `.env` 单供应商接入外，亦可在 Web 工作台「设置」中可视化配置多个
 > 模型供应商（支持 OpenAI Chat / Responses、Anthropic 协议，Key 加密存储），编排请求支持
-> 请求级模型切换。详见 [环境配置](docs/configuration.md) 与 [API 参考](docs/api.md)。
+> 请求级模型切换。详见 [环境配置](docs/guides/configuration.md) 与 [API 参考](docs/guides/api.md)。
 
 ### 五、启动服务
 
@@ -329,7 +329,7 @@ DataAgent/
 ├── mock/         # 确定性 DuckDB 数仓（Gmall 电商模型：种子提取 / 会话行为链模拟 / 埋点 JSON 日志 / 解析入仓）
 ├── tests/        # 59 个测试文件（与源码包一一对应 14 个子目录：agent / audit / auth / compiler / core / eval / exec /
 │                 #   persistence / present / providers / security / semantic / tools / web）
-└── docs/         # 详细文档 + 评审归档
+└── docs/         # 项目文档（guides/designs/plans/tasks/reviews 五类，见 docs/README.md）
 ```
 
 ## 🧩 关键技术选型
@@ -360,14 +360,14 @@ DataAgent/
 
 | 文档 | 内容 |
 | --- | --- |
-| [架构与设计](docs/architecture.md) | 架构总览、核心原则、技术栈、全链路能力 |
-| [快速开始](docs/quickstart.md) | 环境准备、初始化、评测、Web UI、LLM 接入、离线自检 |
-| [环境配置](docs/configuration.md) | 全部环境变量与生产注意事项 |
-| [Web UI 与 API](docs/api.md) | 端点、鉴权与查询示例 |
-| [安全模型](docs/security.md) | 认证、数据权限、演示账号 |
-| [质量保障](docs/quality.md) | Golden 评测、CI、可复现锚点 |
-| [演进里程碑](docs/roadmap.md) | 二十期能力演进 |
-| [生产就绪评审](./docs/reviews/20260905-production-readiness-audit.md) | 生产就绪度评估与整改项 |
+| [架构与设计](docs/guides/architecture.md) | 架构总览、核心原则、技术栈、全链路能力 |
+| [快速开始](docs/guides/quickstart.md) | 环境准备、初始化、评测、Web UI、LLM 接入、离线自检 |
+| [环境配置](docs/guides/configuration.md) | 全部环境变量与生产注意事项 |
+| [Web UI 与 API](docs/guides/api.md) | 端点、鉴权与查询示例 |
+| [安全模型](docs/guides/security.md) | 认证、数据权限、演示账号 |
+| [质量保障](docs/guides/quality.md) | Golden 评测、CI、可复现锚点 |
+| [演进里程碑](docs/guides/roadmap.md) | 二十期能力演进 |
+| [生产就绪评审](./docs/reviews/2026-09-05-production-readiness-audit.md) | 生产就绪度评估与整改项 |
 | [评审归档](./docs/reviews/README.md) | 历次评审落盘文件统一归档目录 |
 | [工程约定](./AGENTS.md) | 面向 AI 协作者的运行环境与命令 |
 

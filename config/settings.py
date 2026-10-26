@@ -190,7 +190,7 @@ if PROVIDER_STREAM_MAX_SECONDS <= 0:
 # 最坏总延迟不高于单次 PROVIDER_TIMEOUT 上限；运行时对 <=0 钳制为 1（防非法配置）
 PROVIDER_HANDSHAKE_TIMEOUT: int = int(os.getenv("PROVIDER_HANDSHAKE_TIMEOUT", "30"))
 # 握手期超时安全重试次数：仅限未收到任何响应字节的超时（防重复计费假设见
-# docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md §前提假设）；<=0 关闭
+# docs/designs/2026-10-05-llm-handshake-retry-design.md §前提假设）；<=0 关闭
 PROVIDER_HANDSHAKE_RETRY_MAX: int = int(os.getenv("PROVIDER_HANDSHAKE_RETRY_MAX", "1"))
 
 # 报告综合（Synthesizer）专用读超时（秒）：长文生成耗时 > 常规调用，独立预算；

@@ -8,7 +8,7 @@
 
 **Tech Stack:** DuckDB、LangGraph、FastAPI、pytest、Pydantic。
 
-**Spec:** `docs/superpowers/specs/2026-10-07-enum-answer-audit-handshake-design.md`（执行者需同时读规格与本计划）。
+**Spec:** `docs/designs/2026-10-07-enum-answer-audit-handshake-design.md`（执行者需同时读规格与本计划）。
 
 ## Global Constraints
 
@@ -572,7 +572,7 @@ git commit -m "feat(audit): 结构化日志可选 RotatingFileHandler 落盘（P
 - Create: `tests/providers/test_handshake_retry.py`
 
 **Interfaces:**
-- Consumes: 既有 spec `docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md`（§4 架构设计全套）
+- Consumes: 既有 spec `docs/designs/2026-10-05-llm-handshake-retry-design.md`（§4 架构设计全套）
 - Produces: 握手期超时安全重试能力 + 三类事件指标
 
 **说明**：本任务实施既有 spec，详细设计见 spec §4（异常体系 / 握手预算 / 重试策略 / 指标）。执行者按 spec §4 逐项落地，关键锚点如下。

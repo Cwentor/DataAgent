@@ -1,7 +1,7 @@
 # 设计方案｜MySQL 数据库支持（二十一期，2026-10）
 
-> 状态：设计定稿，待实现。实施计划见 `2026-10-25-mysql-support-plan.md`，
-> 任务跟踪见 `2026-10-25-mysql-support-tasks.md`。
+> 状态：设计定稿，待实现。实施计划见 `../plans/2026-10-25-mysql-support-plan.md`，
+> 任务跟踪见 `../tasks/2026-10-25-mysql-support-tasks.md`。
 > 分支：`feat/mysql-support`。
 
 ## 1. 背景与目标

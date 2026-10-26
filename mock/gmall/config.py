@@ -1,6 +1,6 @@
 """Gmall mock 生成器参数（反向解析自原 jar 的 application.yml + AppConfig 静态默认值）。
 
-对照关系见 docs/plans/2026-10-06-gmall-mock-reverse-spec.md §4。
+对照关系见 docs/designs/2026-10-06-gmall-mock-reverse-design.md §4。
 与原 jar 的有意差异：
 - mock.date 不再可配，锚定 settings.AS_OF_DATE；
 - 逐日演算 [DOMAIN_START, AS_OF_DATE]（2021-01-01 ~ 2025-12-31）每一天（模拟课程每日跑批），

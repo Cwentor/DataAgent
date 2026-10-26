@@ -23,7 +23,7 @@
 - `config/settings.py` 新增 `SANDBOX_BACKEND`（默认 "subprocess"；可选 "auto"/"docker"）。
 - `core/sandbox/backends.py`：default_backend() 加进程级缓存（模块级单例 + 锁，仿 langgraph_engine._app 模式），避免每次 run_code 都 spawn docker image inspect。
 - `core/sandbox/api.py`：run_code 默认后端解析改为显式传参 > settings——subprocess 恒子进程（默认，行为不变）；auto 走 default_backend() 缓存探测；docker 显式用 DockerBackend，不可用时如实降级子进程并在结果/日志标注降级（不静默）。
-- `.env.example`、`docs/configuration.md` 补 SANDBOX_BACKEND；`docs/architecture.md`/README 沙箱表述改为「默认子进程，SANDBOX_BACKEND 可切 auto（Docker 优先探测）/docker 强隔离」。
+- `.env.example`、`docs/guides/configuration.md` 补 SANDBOX_BACKEND；`docs/guides/architecture.md`/README 沙箱表述改为「默认子进程，SANDBOX_BACKEND 可切 auto（Docker 优先探测）/docker 强隔离」。
 - 测试：默认路径回归不变；auto/docker 路径 monkeypatch 探测函数验证分发与降级标注。
 
 ## 第 4 步：L3 高危确认端到端（缺口 1）
@@ -58,7 +58,7 @@
 |------|-----------|--------|------|
 | **SANDBOX_BACKEND settings 开关 + 进程级缓存单例（选定）** | 显式传参 > settings，默认 subprocess 行为不变 | 低（default_backend() 缓存仿既有模式） | ✅ 默认零破坏；auto 探测只跑一次 |
 | 每次 run_code 现场探测 | 同左 | 探测开销反复发生 | ❌ docker image inspect 逐次执行不可接受 |
-| 纯环境变量（绕过 config/settings） | — | — | ❌ 脱离统一配置面与 docs/configuration.md 文档口径 |
+| 纯环境变量（绕过 config/settings） | — | — | ❌ 脱离统一配置面与 docs/guides/configuration.md 文档口径 |
 
 ### S2 Subagent 白名单执行路径（对应第 2 步）
 

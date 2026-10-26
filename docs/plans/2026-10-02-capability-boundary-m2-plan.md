@@ -9,7 +9,7 @@
 
 **Tech Stack:** pydantic v2 递归模型、DuckDB、sqlglot（审计门既有依赖）。
 
-**Spec:** `docs/superpowers/specs/2026-10-02-capability-boundary-expansion-design.md` §3.1（HAVING/表达式指标）、§3.2（多维枚举 M2 放开）、§8 M2 验收。
+**Spec:** `docs/designs/2026-10-02-capability-boundary-expansion-design.md` §3.1（HAVING/表达式指标）、§3.2（多维枚举 M2 放开）、§8 M2 验收。
 
 ## Global Constraints
 

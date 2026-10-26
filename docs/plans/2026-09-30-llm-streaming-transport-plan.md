@@ -8,7 +8,7 @@
 
 **Tech Stack:** 纯标准库（http.client / json / time），pydantic v2 契约，pytest 单测（monkeypatch 打桩）。
 
-**Spec:** `docs/superpowers/specs/2026-09-30-llm-streaming-transport-design.md`
+**Spec:** `docs/designs/2026-09-30-llm-streaming-transport-design.md`
 
 ## Global Constraints
 

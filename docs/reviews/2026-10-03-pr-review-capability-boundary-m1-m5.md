@@ -5,7 +5,7 @@
 ## 评审对象与需求来源
 
 - **评审对象**：十九期「能力边界扩展」里程碑 M1-M5 全部代码变更（feature/wip 分支，M1 起点 `e2a197c` 至 HEAD `066e0fa`）。M6（探索层执行+审批门）/ M7（验收收口）未实施，属计划内分期，不计缺陷。
-- **需求来源**：`docs/superpowers/specs/2026-10-02-capability-boundary-expansion-design.md`（总设计，§8 里程碑验收标准为硬验收线）+ `docs/plans/2026-10-02~03-capability-boundary-m1..m5.md` 五份实施计划。
+- **需求来源**：`docs/designs/2026-10-02-capability-boundary-expansion-design.md`（总设计，§8 里程碑验收标准为硬验收线）+ `docs/plans/` 下 capability-boundary-m1~m5-plan 系列五份实施计划。
 - **工程三件套实跑验证**：`python -m pytest -q` **967 passed**（基线 875 → 零失败）；`black --check .` 184 files unchanged；`ruff check .` All checks passed。
 
 ## 做得好的
@@ -26,7 +26,7 @@
 
 ### MEDIUM 1: 设计 §8 M5 验收线部分项被 M5 计划改判 M6——需在 M6 计划显式立项
 
-**File:** `security/views.py:225-231`、`docs/plans/2026-10-03-capability-boundary-m5.md:23`
+**File:** `security/views.py:225-231`、`docs/plans/2026-10-03-capability-boundary-m5-plan.md:23`
 **需求原句**：设计 §8 M5 验收标准「视图逃逸矩阵（**基表不可达**/禁列不存在/行过滤生效）」（:169）；§3.4「DSL 核……**编译器产 SQL 同样改查安全视图**」（:91）。
 **Issue**：当前 `install_secure_views` 不删基表、无命名空间限制，同一连接可直接查 `fact_orders`；「编译器改查安全视图」未实施（M5 计划明示「不改编译器」）。这是计划对设计的有意改判（CREATE VIEW 需可写连接等工程边界，`m5.md:27` 如实记录），但意味着 M5 的设计验收线未完全达成。
 **Fix**：在 M6 实施计划中显式立项：探索层连接只暴露 `sec_*` 命名空间（连接级 schema 限制/基表收回）、`read_only` 连接补位（当前 `views.py:234-237` 仅 `enable_external_access` + `lock_configuration` 两项）、编译器-安全视图切换或显式放弃该承诺（修订设计文档）。
@@ -60,7 +60,7 @@
 
 - **自愈次数设计-实现不一致**：设计 §3.3「复用既有 ≤3 次闭环」（:84），实现 `_LIFT_MAX_RETRIES = 2`（`nodes.py:475`）跟 M4 计划「≤2 次」（`m4.md:8`）。取收紧值方向保守，建议设计文档同步口径。
 - **口径模糊题库落位**：设计 §7 第 3 层「澄清或 assumptions 标注，两种都算通过」（:152）在 CI 中实际以「兜底 refusal（`eval/intent_golden.json:48-51`）+ mock 路由状态机单测」形态达成——LLM 在场的端到端分级作答无 CI 覆盖（CI 无 Key 的既有约束），属设计第 3 层与第 6 层适用域张力的实施选择，非缺陷。
-- **可接受范围蔓延（如实报告）**：① checkpointer 线程按轮隔离（`ce62a05`）——十九期未要求，但有独立审计-拍板-修复记录（`docs/reviews/20261002-audit-clarify-pending-hijack.md`）；② 沙箱 `FORBIDDEN_CALLS` 额外加入 `"database"`（`ast_guard.py:95-96`）——计划只要求 `connect`，方向更保守；③ 启发式 HAVING 触发词覆盖计数类指标（`agent/heuristic.py:227-233`）——计划写「金额类」，有 `alias` 前置约束兜住，无害外扩。**§9「明确不做」清单零命中**（无沙箱任意 SQL、无写操作、无外部数据源、无策略可视化面板）。
+- **可接受范围蔓延（如实报告）**：① checkpointer 线程按轮隔离（`ce62a05`）——十九期未要求，但有独立审计-拍板-修复记录（`docs/reviews/2026-10-02-audit-clarify-pending-hijack.md`）；② 沙箱 `FORBIDDEN_CALLS` 额外加入 `"database"`（`ast_guard.py:95-96`）——计划只要求 `connect`，方向更保守；③ 启发式 HAVING 触发词覆盖计数类指标（`agent/heuristic.py:227-233`）——计划写「金额类」，有 `alias` 前置约束兜住，无害外扩。**§9「明确不做」清单零命中**（无沙箱任意 SQL、无写操作、无外部数据源、无策略可视化面板）。
 
 ## Standards 轴（对照 AGENTS.md + 通用底线速查表）
 

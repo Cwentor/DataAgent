@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12 + pydantic（AgentState 契约）、pytest、现有 DuckDB/编译器/编排图（零新依赖）。
 
-**Spec:** `docs/superpowers/specs/2026-09-27-intent-routing-honest-fallback-design.md`（执行者必须同时读规格；本文与规格冲突时以规格为准）
+**Spec:** `docs/designs/2026-09-27-intent-routing-honest-fallback-design.md`（执行者必须同时读规格；本文与规格冲突时以规格为准）
 
 ## Global Constraints
 

@@ -405,7 +405,7 @@ def _consume_stream_handshake_retry(
       payload / headers / api_key / 协议参数与首次请求完全一致（原样重发，
       鉴权头完整性由既有 _build_headers / api_key 透传保证）；
     - 仅 StreamHandshakeTimeout（未收到任何响应字节）触发重试——计费假设与
-      免责锚点见 docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md
+      免责锚点见 docs/designs/2026-10-05-llm-handshake-retry-design.md
       §前提假设；mid-stream 超时 / 断连 / 错误帧 / 协议错误原样穿透；
     - 0.2s 固定短退避后重试；失败连接已在 _http_post_sse 的 finally 关闭，
       退避期间不持有任何连接；

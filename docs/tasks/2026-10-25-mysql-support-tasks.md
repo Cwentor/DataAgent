@@ -1,7 +1,7 @@
 # 任务记录｜MySQL 数据库支持（二十一期）
 
-> 配套文档：设计方案 `2026-10-25-mysql-support-spec.md` ｜ 实施计划
-> `2026-10-25-mysql-support-plan.md`（步骤级勾选项在计划内，本文件只跟踪任务级状态）。
+> 配套文档：设计方案 `../designs/2026-10-25-mysql-support-design.md` ｜ 实施计划
+> `../plans/2026-10-25-mysql-support-plan.md`（步骤级勾选项在计划内，本文件只跟踪任务级状态）。
 > 分支：`feat/mysql-support`。
 
 ## 任务总览

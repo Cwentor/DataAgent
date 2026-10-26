@@ -264,7 +264,7 @@ def test_event_reflection_on_replan(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# M0 前置审计（docs/plans/2026-09-26-agent-harness-evolution-m0-m4.md Task 2）：
+# M0 前置审计（docs/plans/2026-09-26-agent-harness-evolution-m0-m4-plan.md Task 2）：
 # 事件总线在多线程调用方下的隔离性与异常契约，作为 LangGraph 迁移的设计依据。
 # ---------------------------------------------------------------------------
 
