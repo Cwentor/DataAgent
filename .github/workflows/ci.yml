@@ -140,15 +140,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Start ClickHouse (users.d readonly profile mounted)
+      - name: Start ClickHouse (readonly profile mounted as single file)
         run: |
+          # 单文件挂载而非整目录只读挂载：官方 entrypoint 启动时要往 users.d 写
+          # default-user.xml，整目录 :ro 会触发 "Read-only file system" 并禁用
+          # default 用户网络访问，导致启动超时。
+          # CLICKHOUSE_USER/PASSWORD 显式给出，避免 entrypoint 走
+          # "neither ... is set, disabling network access for user 'default'" 分支。
           docker run -d --name ch-ci \
             -p 8123:8123 \
             -e TZ=UTC \
-            -v "${{ github.workspace }}/.github/clickhouse/users.d:/etc/clickhouse-server/users.d:ro" \
+            -e CLICKHOUSE_USER=default \
+            -e CLICKHOUSE_PASSWORD=ch_ci_pwd \
+            -v "${{ github.workspace }}/.github/clickhouse/users.d/dataagent_ro.xml:/etc/clickhouse-server/users.d/dataagent_ro.xml:ro" \
             clickhouse/clickhouse-server:24.8
           for i in $(seq 1 40); do
-            if docker exec ch-ci clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
+            if docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
+              --query "SELECT 1" >/dev/null 2>&1; then
               echo "ClickHouse ready"
               exit 0
             fi
@@ -169,11 +177,12 @@ jobs:
           CLICKHOUSE_HOST: 127.0.0.1
           CLICKHOUSE_PORT: "8123"
           CLICKHOUSE_USER: default
-          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_PASSWORD: ch_ci_pwd
           CLICKHOUSE_DATABASE: gmall
       - name: Grant readonly account (after warehouse exists)
         run: |
-          docker exec ch-ci clickhouse-client --query "GRANT SELECT ON *.* TO dataagent_ro"
+          docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
+            --query "GRANT SELECT ON *.* TO dataagent_ro"
           docker exec ch-ci clickhouse-client --user dataagent_ro --password ch_ro_pwd \
             --query "SELECT value FROM system.settings WHERE name = 'readonly'"
       - name: Dual-backend parity tests (golden DSLs + Review Focus)
