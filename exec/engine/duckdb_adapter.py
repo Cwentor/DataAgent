@@ -12,6 +12,7 @@ from typing import Any
 import duckdb
 
 from config import settings
+from exec.engine.base import physical_from_rows
 from exec.engine.plan_text import parse_scan_rows, plan_rows_measurable
 from exec.engine.watchdog import run_with_timeout
 from exec.errors import SqlExecutionError
@@ -97,6 +98,27 @@ class DuckDbAdapter:
     def insert_dataframe(self, conn: Any, table: str, df: Any) -> int:
         conn.execute(f"INSERT INTO {table} SELECT * FROM df")
         return len(df)
+
+    def physical_columns(self, conn: Any | None = None) -> dict[str, dict[str, str]]:
+        """DuckDB 物理列（二十四期 spec D1/D3）：单库无需 schema 过滤。
+
+        `ORDER BY table_name, ordinal_position` 保证顺序确定；`_` 前缀元数据表
+        由 `physical_from_rows` 统一跳过。
+        """
+        sql = (
+            "SELECT table_name, column_name, data_type FROM information_schema.columns "
+            "ORDER BY table_name, ordinal_position"
+        )
+        own = None
+        if conn is None:
+            own = self.connect_readonly()
+            conn = own
+        try:
+            _, rows = self.run_query(conn, sql)
+        finally:
+            if own is not None:
+                own.close()
+        return physical_from_rows(rows)
 
 
 # 连接加固设置（DuckDB 专属，迁自 security/views）
