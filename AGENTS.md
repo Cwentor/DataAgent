@@ -80,10 +80,14 @@ python -m mock.init_mysql
 # 需 .env 配置 POSTGRES_* 与可写账号，库需预先存在）
 python -m mock.init_postgres
 
+# 重建 ClickHouse 版数仓（二十三期可选后端：DDL 运行时转译 + 同源数据；
+# 需 .env 配置 CLICKHOUSE_* 与可写账号，库需预先存在）
+python -m mock.init_clickhouse
+
 # 重建埋点日志解析链路的种子数据（仅种子变更时需要，需 mock/gmall/upstream/gmall.sql）
 python -m mock.gmall.seed_extract
 
-# 评测（oracle / agent 双模式；--backend mysql/postgres 仅做连通性冒烟——golden 锚定 DuckDB 方言）
+# 评测（oracle / agent 双模式；--backend mysql/postgres/clickhouse 仅做连通性冒烟——golden 锚定 DuckDB 方言）
 python -m eval.eval_runner
 python -m eval.eval_runner --pipeline agent
 
@@ -92,6 +96,9 @@ python -m pytest tests/test_dual_backend_parity.py -q
 
 # 双后端一致性回归（需 POSTGRES_TEST_* 指向已 init_postgres 的测试库，未配置自动跳过）
 python -m pytest tests/test_pg_backend_parity.py -q
+
+# 双后端一致性回归（需 CLICKHOUSE_TEST_* 指向已 init_clickhouse 的测试库，未配置自动跳过）
+python -m pytest tests/test_clickhouse_backend_parity.py -q
 
 # 启动 Web 可视化 UI（默认 8000）
 python -m web.server 8000
@@ -105,7 +112,8 @@ compiler/   DSL -> SQL 确定性编译器
 agent/      NL -> DSL Agent（LLM + 启发式兜底 + 意图路由 + 多轮记忆 + 多工具调度）
 exec/       SQL 执行层（P0/P1 资源治理：执行前审计门 / 超时取消 / 扫描行数熔断 / LIMIT 硬上限 /
             只读连接池 / 查询结果缓存；二十一期 engine/ 执行引擎抽象层：EngineAdapter
-            协议 + duckdb/mysql/postgres 三 adapter（二十二期增 postgres）——连接/取消/计划解析/异常归一/加固按引擎下沉，
+            协议 + duckdb/mysql/postgres/clickhouse 四 adapter（二十二期增 postgres、
+            二十三期增 clickhouse）——连接/取消/计划解析/异常归一/加固按引擎下沉，
             护栏框架引擎无关）
 core/retrieval/ 追加（十九期）：sql_lift.py 提升闸门（LLM SQL -> DSL 转译，
             拒升精确清单喂回自愈）；exploration.py 探索执行器（审批门 + 安全
@@ -216,6 +224,21 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas +
   harden 显式 pin，反斜杠不翻倍）；comparison 对齐走 renderer.date_add
   （PG 加法等价式，spec D17）；CI postgres-parity 门禁锚定 postgres:16，
   兼容基线 >= 13；golden 评测锚定 DuckDB 方言不随引擎切换。
+
+- ClickHouse 执行后端（二十三期，2026-10）：`DB_BACKEND` 四值
+  （duckdb|mysql|postgres|clickhouse，默认 duckdb 零破坏）；驱动
+  clickhouse-connect（HTTP，无 cancel 方法——超时取消靠服务端
+  max_execution_time）；超时/扫描预算由**账号 profile 承载**（readonly=1 +
+  max_execution_time + max_rows_to_read），harden 为**验证式加固**（查
+  system.settings 与应用预算 fail-closed 比对）；驱动异常无结构化错误码
+  （文本 "code: N" 正则归一：159 超时 / 131 扫描超限）；扫描预检诚实不可计量
+  （无 EXPLAIN ANALYZE，warning 留痕）；spine 用 numbers(N) +
+  addDays/addMonths/addYears（N 纯 Python 桶数计算，周步长归一 7 天）；探索层
+  走内联派生表（无 TEMP VIEW 且 readonly=1 无 DDL 权限）；方言增量黑名单
+  SYSTEM/KILL/TRUNCATE/OPTIMIZE/SETTINGS/OUTFILE + 外部源表函数族；建仓
+  MergeTree ORDER BY (时间列) + 全列 Nullable（Nullable 排序键须
+  `SETTINGS allow_nullable_key = 1`）、无 ANALYZE 步骤；兼容基线
+  >= 23.8、CI 锚定 24.8；golden 评测锚定 DuckDB 方言不随引擎切换。
 
 - 提交前确保 `black --check .`、`ruff check .`、`python -m pytest -q` 全绿。
 

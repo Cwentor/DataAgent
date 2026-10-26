@@ -1,0 +1,30 @@
+<!-- ClickHouse 运行时只读账号（二十三期 spec D4/D12）：readonly=1 由 profile
+     承载（readonly=1 会话内无法 SET，客户端不可篡改）；max_rows_to_read /
+     max_execution_time 须与 config/settings.py 的 MAX_SCAN_ROWS /
+     QUERY_TIMEOUT_MS 保持一致（adapter.harden 验证式校验 fail-closed）。
+     改预算必须两侧同步。
+
+     授权（GRANT）不写在本文件：users.d 在服务启动时加载，此时 gmall 库尚未
+     建仓，指向不存在库的 GRANT 会失败。CI 在建仓之后用 clickhouse-client
+     执行 `GRANT SELECT ON *.* TO dataagent_ro`（演示口径；生产按 spec §9
+     收窄为 gmall.* + system.*）。
+
+     密码为 CI 演示口径，与 mysql root/root 先例同级别，禁止复用到生产。 -->
+<clickhouse>
+    <profiles>
+        <ch_ro_profile>
+            <readonly>1</readonly>
+            <max_rows_to_read>10000000</max_rows_to_read>
+            <max_execution_time>30</max_execution_time>
+        </ch_ro_profile>
+    </profiles>
+    <users>
+        <dataagent_ro>
+            <password>ch_ro_pwd</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>ch_ro_profile</profile>
+        </dataagent_ro>
+    </users>
+</clickhouse>

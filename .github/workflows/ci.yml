@@ -128,6 +128,64 @@ jobs:
           POSTGRES_TEST_PASSWORD: root
           POSTGRES_TEST_DATABASE: gmall
 
+  # ClickHouse 服务级门禁（二十三期）：与 postgres-parity 同构——golden 全量 DSL
+  # 双后端一致性 + 熔断/周边界/补零/池复用专项。readonly 预算由仓库内 users.d
+  # 配置承载（CH readonly 由 profile 承载、无法会话级 SET，spec D12）；TZ=UTC
+  # 时区确定性（spec D13）。本地不跑 CH（CLICKHOUSE_TEST_* 未配置自动跳过）。
+  #
+  # 容器不用 services 而用 step 内 docker run：services 在 steps 之前启动，此时
+  # checkout 尚未执行、仓库内 users.d 文件不存在（volume 挂载只会得到空目录，
+  # 只读账号不生效）；step 内启动可保证挂载顺序正确。
+  clickhouse-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start ClickHouse (users.d readonly profile mounted)
+        run: |
+          docker run -d --name ch-ci \
+            -p 8123:8123 \
+            -e TZ=UTC \
+            -v "${{ github.workspace }}/.github/clickhouse/users.d:/etc/clickhouse-server/users.d:ro" \
+            clickhouse/clickhouse-server:24.8
+          for i in $(seq 1 40); do
+            if docker exec ch-ci clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
+              echo "ClickHouse ready"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "ClickHouse 启动超时"
+          docker logs ch-ci
+          exit 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Build ClickHouse warehouse (DDL transpiled + same-source data)
+        run: python -m mock.init_clickhouse
+        env:
+          DB_BACKEND: clickhouse
+          CLICKHOUSE_HOST: 127.0.0.1
+          CLICKHOUSE_PORT: "8123"
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_DATABASE: gmall
+      - name: Grant readonly account (after warehouse exists)
+        run: |
+          docker exec ch-ci clickhouse-client --query "GRANT SELECT ON *.* TO dataagent_ro"
+          docker exec ch-ci clickhouse-client --user dataagent_ro --password ch_ro_pwd \
+            --query "SELECT value FROM system.settings WHERE name = 'readonly'"
+      - name: Dual-backend parity tests (golden DSLs + Review Focus)
+        run: python -m pytest tests/test_clickhouse_backend_parity.py -q
+        env:
+          DB_BACKEND: duckdb
+          CLICKHOUSE_TEST_HOST: 127.0.0.1
+          CLICKHOUSE_TEST_PORT: "8123"
+          CLICKHOUSE_TEST_USER: dataagent_ro
+          CLICKHOUSE_TEST_PASSWORD: ch_ro_pwd
+          CLICKHOUSE_TEST_DATABASE: gmall
+
   nightly:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
