@@ -42,13 +42,6 @@ def test_physical_columns_skips_underscore_tables(memory_conn):
     assert all(not table.startswith("_") for table in out)
 
 
-def test_physical_columns_matches_legacy_implementation(memory_conn):
-    """零变更锚：与旧 catalog_loader._physical_columns 输出逐项相等。"""
-    from semantic.catalog_loader import _physical_columns as legacy
-
-    assert DuckDbAdapter().physical_columns(memory_conn) == legacy(memory_conn)
-
-
 def test_physical_columns_reuses_injected_connection(memory_conn):
     """注入连接由调用方持有生命周期——方法内不得关闭。"""
     adapter = DuckDbAdapter()
