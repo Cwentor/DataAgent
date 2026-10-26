@@ -57,11 +57,22 @@ def _base_ch_type(type_name: str) -> str:
         name = m.group(2).strip()
 
 
+def _is_null(value: Any) -> bool:
+    """None / NaN / pd.NaT / pd.NA 统一判空（避免 pandas 单例判等陷阱）。"""
+    if value is None:
+        return True
+    if isinstance(value, float) and value != value:
+        return True
+    return type(value).__name__ in ("NaTType", "NAType")
+
+
 def _to_datetime(value: Any) -> Any:
     """字符串/date -> datetime（驱动 DateTime 写入要求 datetime 实例）。"""
     from datetime import date, datetime
 
-    if value is None or isinstance(value, datetime):
+    if _is_null(value):
+        return None
+    if isinstance(value, datetime):
         return value
     if isinstance(value, date):
         return datetime(value.year, value.month, value.day)
@@ -79,8 +90,8 @@ def _to_date(value: Any) -> Any:
     DataError: Unable to create Python array —— CI 建仓实锤）。"""
     from datetime import date, datetime
 
-    if value is None:
-        return value
+    if _is_null(value):
+        return None
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -250,9 +261,15 @@ class ClickHouseAdapter:
         for col in data.columns:
             base = _base_ch_type(types.get(col, ""))
             if base == "Date" or base.startswith("Date32"):
-                data[col] = [_to_date(v) for v in data[col]]
+                values = [_to_date(v) for v in data[col]]
             elif base.startswith("DateTime"):
-                data[col] = [_to_datetime(v) for v in data[col]]
+                values = [_to_datetime(v) for v in data[col]]
+            else:
+                continue
+            # 显式 object dtype：直接 df[col] = list 会让 pandas 重新推断为
+            # datetime64 并把 None 变回 NaT（bool(NaT) 为真 → 驱动调
+            # .timestamp() 抛 ValueError: NaTType does not support timestamp）
+            data[col] = pd.Series(values, index=data.index, dtype=object)
         columns = list(data.columns)
         conn.insert(
             table,

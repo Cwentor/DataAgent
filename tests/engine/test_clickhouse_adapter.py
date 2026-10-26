@@ -245,6 +245,35 @@ def test_insert_dataframe_keeps_unparsable_and_other_types():
     assert out["amount"].tolist() == [12.5]
 
 
+def test_insert_dataframe_keeps_none_in_datetime_column():
+    """赋列不得让 pandas 重新推断成 datetime64：None 必须保持 None 而非 NaT。
+
+    回归：CI pandas 3.1.0 下 `df[col] = [datetime, None]` 重新推断为
+    datetime64，None 变 NaT；驱动 `if x else 0` 判 NaT 为真后调 .timestamp()
+    抛 `ValueError: NaTType does not support timestamp`（coupon_info.expire_time 实锤）。
+    """
+    from datetime import datetime
+
+    adapter = ClickHouseAdapter()
+    client = FakeClient(_typed_script([("expire_time", "Nullable(DateTime)", "")]))
+    df = pd.DataFrame({"expire_time": [datetime(2023, 12, 13, 1, 15, 58), None]})
+    adapter.insert_dataframe(client, "t1", df)
+    out = client.inserted[0][1]["expire_time"].tolist()
+    assert out[0] == datetime(2023, 12, 13, 1, 15, 58)
+    assert out[1] is None
+
+
+def test_is_null_covers_pandas_singletons():
+    from exec.engine.clickhouse_adapter import _is_null
+
+    assert _is_null(None) is True
+    assert _is_null(float("nan")) is True
+    assert _is_null(pd.NaT) is True
+    assert _is_null(pd.NA) is True
+    assert _is_null(datetime(2025, 1, 1)) is False
+    assert _is_null("") is False
+
+
 def test_base_ch_type_strips_wrappers():
     from exec.engine.clickhouse_adapter import _base_ch_type
 
