@@ -152,6 +152,7 @@ jobs:
             -e TZ=UTC \
             -e CLICKHOUSE_USER=default \
             -e CLICKHOUSE_PASSWORD=ch_ci_pwd \
+            -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
             -v "${{ github.workspace }}/.github/clickhouse/users.d/dataagent_ro.xml:/etc/clickhouse-server/users.d/dataagent_ro.xml:ro" \
             clickhouse/clickhouse-server:24.8
           for i in $(seq 1 40); do
@@ -190,8 +191,12 @@ jobs:
             --query "SHOW CREATE TABLE gmall.user_info FORMAT TSVRaw" || true
       - name: Grant readonly account (after warehouse exists)
         run: |
-          docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd \
-            --query "GRANT SELECT ON *.* TO dataagent_ro"
+          ch() { docker exec ch-ci clickhouse-client --user default --password ch_ci_pwd --query "$1"; }
+          if ! ch "GRANT SELECT ON *.* TO dataagent_ro"; then
+            echo "直接授权失败：先给 default 补 GRANT OPTION 再授权"
+            ch "GRANT SELECT ON *.* TO default WITH GRANT OPTION" || true
+            ch "GRANT SELECT ON *.* TO dataagent_ro"
+          fi
           docker exec ch-ci clickhouse-client --user dataagent_ro --password ch_ro_pwd \
             --query "SELECT value FROM system.settings WHERE name = 'readonly'"
       - name: Dual-backend parity tests (golden DSLs + Review Focus)
