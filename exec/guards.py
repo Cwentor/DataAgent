@@ -9,18 +9,25 @@
    QueryTimeoutError。
 
 2. 扫描行数上限（扫描行熔断）
-   DuckDB 没有原生的"扫描行数上限"，故采用 EXPLAIN ANALYZE 预检：
-   先以分析执行的方式得到每个物理算子实际处理的行数（TABLE_SCAN 的 rows），
-   若任一基表扫描超过 max_scan_rows 则直接熔断（MaxRowsScannedExceeded），
-   不再执行真实查询。预检在超时看门狗内运行，病态查询同样会被超时拦截。
-   注意：EXPLAIN ANALYZE 会实际执行查询，这是"先计量后放行"的成本，
-   也是 DuckDB 上实现预防式扫描上限的唯一可靠手段。
+   DuckDB 没有原生的"扫描行数上限"，故采用两段式 EXPLAIN 预检（二十六期）：
+   先以 `EXPLAIN` 取各算子的**估算**行数，估算足够小（`est × SF < max_scan_rows`）
+   就直接放行，否则再以 `EXPLAIN ANALYZE` 取**实测**行数；实测超限则熔断
+   （MaxRowsScannedExceeded），不再执行真实查询。预检在超时看门狗内运行，
+   病态查询同样会被超时拦截。
+
+   **估算只做"能否跳过实测"的判据，绝不做熔断值**：估算最大高估实测 750 倍，
+   直接比阈值会误杀合法查询；熔断判定一律用实测值（或缓存里的实测值）。
+   `EXPLAIN ANALYZE` 会实际执行查询，两段式的价值就是把"同一条查询跑两遍"降到
+   "规划一遍 + 执行一遍"（冷查询端到端 ≈2.2× → ≈1.3×）。
 
    版本敏感：本机制的计量口径完全依赖 DuckDB 计划文本的 "N rows" 渲染格式。
    DuckDB 2.0 起 count/sum 等聚合走元数据快路径，计划被折叠为单算子且
    EXPLAIN ANALYZE 只输出 Summary 块（无任何算子行数），届时本护栏会失效——
    因此 requirements.txt 对 duckdb 锁定主版本上界，且计划不可测量时记 warning
    留痕（plan_rows_measurable），避免"测不到"被静默当成"扫了 0 行"。
+   **告警只在第二段（实测）不可计量时发**：第一段拿不到可信估算（`count(*)` 的
+   `COLUMN_DATA_SCAN ~1 row`、空结果折叠的 `EMPTY_RESULT`）是常态分支，不许
+   消耗按后端去重的告警额度，否则真出现计划格式变更时告警已经哑了。
 
 3. LIMIT 硬上限熔断（返回行数熔断）
    无论 DSL 的 limit 是多少，执行层对返回行数做独立硬上限 max_result_rows
@@ -33,6 +40,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 import re
 import threading
 import time
@@ -44,7 +52,7 @@ from sqlglot import exp
 
 from audit.logging import get_logger
 from config import settings
-from exec.engine.base import EngineAdapter
+from exec.engine.base import EngineAdapter, ScanPrecheck
 from exec.engine.plan_text import parse_scan_rows, plan_rows_measurable
 from exec.errors import (
     MaxRowsScannedExceeded,
@@ -442,6 +450,9 @@ class ExecutionResult:
     columns: list[str]
     rows: list[list[Any]]
     scan_rows: int = 0
+    # scan_rows 是估算值还是实测值（二十六期 D6）：跳过分支记估算，第二段与
+    # 缓存命中记实测。下游做趋势对比时必须看这个标志，否则会把估算当实测用。
+    scan_rows_estimated: bool = False
     duration_ms: float = 0.0
     # 执行前审计的 WARNING 级发现（REJECTED 级在执行前已熔断抛 GuardrailRejected）
     findings: list[dict[str, str]] = field(default_factory=list)
@@ -593,6 +604,122 @@ def _warn_unmeasurable_once(adapter: EngineAdapter) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 两段式扫描行预检（二十六期，spec D1-D4）
+#
+# 第一段：只发 EXPLAIN 取估算（不执行），估算够小就放行；
+# 第二段：EXPLAIN ANALYZE 取实测（会真的执行一遍），熔断判定只认它。
+#
+# 三条红线：估算绝不进熔断值、估算绝不进缓存、第一段失败绝不碰告警去重额度。
+# --------------------------------------------------------------------------- #
+
+
+def _two_stage_enabled() -> bool:
+    """两段式开关（`SCAN_PRECHECK_TWO_STAGE`，spec D7）：置 0 完全回退旧行为。"""
+    return bool(settings.SCAN_PRECHECK_TWO_STAGE)
+
+
+def _audit_sample_hit() -> bool:
+    """采样骰子（spec D4）：命中则强制走第二段，用于观测估算是否已经漂出 SF。
+
+    跳过路径不产生实测值，SF 是否还够用在运行期本不可观测；这个采样就是那个
+    观测口。`SCAN_PRECHECK_AUDIT_RATE <= 0` 恒 False（关闭）。
+    """
+    rate = settings.SCAN_PRECHECK_AUDIT_RATE
+    if rate <= 0:
+        return False
+    return random.random() < rate
+
+
+def _log_estimate_drift(est: ScanPrecheck, actual: int) -> None:
+    """采样命中后比对估算与实测：超 SF 升 WARNING 提示重新校准（spec D4）。"""
+    ratio = round(actual / est.rows, 2) if est.rows else 0.0
+    extra = {
+        "scan_rows_est": est.rows,
+        "scanned": actual,
+        "ratio": ratio,
+        "operator": est.operator,
+    }
+    if est.rows and actual > est.rows * settings.SCAN_PRECHECK_SAFETY_FACTOR:
+        logger.warning("扫描行预检估算偏差超安全系数（建议重新校准 SF）", extra=extra)
+    else:
+        logger.info("扫描行预检估算偏差采样", extra=extra)
+
+
+def _exact_scan_rows(
+    adapter: EngineAdapter,
+    conn: Any,
+    sql: str,
+    timeout_ms: int | None,
+    scope: str,
+) -> int:
+    """第二段：`EXPLAIN ANALYZE` 实测扫描行数（会真的执行查询）。
+
+    可计量才写缓存；不可计量时告警留痕且**不缓存**——避免把"测不到"固化成
+    "扫了 0 行"的假事实，也不静默放行。这是**唯一**允许触发不可计量告警的地方。
+    """
+    try:
+        scanned, measurable = adapter.explain_scan_rows(conn, sql, timeout_ms)
+    except QueryTimeoutError:
+        raise
+    except Exception as exc:
+        # 预检阶段暴露的引擎错误同样视为执行失败（可自愈）
+        norm = adapter.engine_error(exc)
+        if norm is not None:
+            raise norm from exc
+        raise
+    if measurable:
+        cache_scan_rows(sql, scanned, scope=scope)
+    else:
+        _warn_unmeasurable_once(adapter)
+    return scanned
+
+
+def _precheck_scan_rows(
+    adapter: EngineAdapter,
+    conn: Any,
+    sql: str,
+    timeout_ms: int | None,
+    max_scan_rows: int,
+    scope: str,
+) -> tuple[int, bool]:
+    """两段式预检，返回 `(scan_rows, estimated)`（spec §3 判定式）。
+
+    `estimated=True` 表示这个数字是估算（只可能来自第一段放行分支），调用方据此
+    给 `ExecutionResult.scan_rows_estimated` 赋值；熔断比较永远用实测或缓存值。
+    """
+    estimate_fn = getattr(adapter, "explain_scan_estimate", None)
+    if estimate_fn is None or not _two_stage_enabled():
+        # 引擎不提供"只做规划"的估算（CH/Hive/MySQL/PG），或开关关闭 → 旧行为
+        return _exact_scan_rows(adapter, conn, sql, timeout_ms, scope), False
+
+    sample = _audit_sample_hit()
+    try:
+        est = estimate_fn(conn, sql, timeout_ms)
+    except QueryTimeoutError:
+        raise
+    except Exception as exc:
+        # 第一段失败不是新失败模式：退回第二段，让真实错误在实测阶段按既有路径
+        # 归一（语法/权限问题在 EXPLAIN ANALYZE 上同样会抛）
+        logger.debug("扫描行估算预检失败，回退实测", extra={"error": str(exc)[:200]})
+        return _exact_scan_rows(adapter, conn, sql, timeout_ms, scope), False
+
+    if est.usable and not sample:
+        if est.rows * settings.SCAN_PRECHECK_SAFETY_FACTOR < max_scan_rows:
+            # 放行的安全性：est × SF < 阈值，只要 实测/估算 ≤ SF 就不会漏熔断。
+            # 日志 key 用 scan_rows_est 与熔断日志的 scanned 区分（spec D6）。
+            logger.info(
+                "扫描行预检按估算放行（未执行）",
+                extra={"scan_rows_est": est.rows, "operator": est.operator},
+            )
+            return est.rows, True
+
+    scanned = _exact_scan_rows(adapter, conn, sql, timeout_ms, scope)
+    if sample and est.usable:
+        _log_estimate_drift(est, scanned)
+    return scanned, False
+
+
+# --------------------------------------------------------------------------- #
 # 受控执行入口
 # --------------------------------------------------------------------------- #
 
@@ -640,31 +767,25 @@ def execute_sql(
         raise
     started = time.perf_counter()
     scan_rows = 0
+    scan_rows_estimated = False
 
-    # 1) 扫描行预算预检（EXPLAIN ANALYZE 在超时看门狗内运行；解析口径由 adapter 决定）
+    # 1) 扫描行预算预检（两段式：先估算够小就放行，否则 EXPLAIN ANALYZE 取实测）
     #    整改指令3-3：同一 SQL（自愈重试同编译产物）命中缓存则跳过重复预检降本。
     #    缓存按「后端 + 数据源」隔离并带 TTL：同一 SQL 在不同引擎/库上行数完全不同，
     #    且数据增长后旧行数会让熔断静默失效（2026-10-27 审计 §9.1）。
+    #    缓存里只有实测值（spec D4），命中即 estimated=False。
     if max_scan_rows is not None:
         scope = _adapter_scope(adapter)
         scanned = cached_scan_rows(sql, scope=scope)
         if scanned is None:
-            try:
-                scanned, measurable = adapter.explain_scan_rows(conn, sql, statement_timeout_ms)
-            except QueryTimeoutError:
-                raise
-            except Exception as exc:
-                # 预检阶段暴露的引擎错误同样视为执行失败（可自愈）
-                norm = adapter.engine_error(exc)
-                if norm is not None:
-                    raise norm from exc
-                raise
-            if measurable:
-                cache_scan_rows(sql, scanned, scope=scope)
-            else:
-                # 计划不含任何算子行数：护栏本轮不可计量（引擎版本/计划格式变更）。
-                # 不缓存——避免把"测不到"固化成"扫了 0 行"的假事实，也不静默放行。
-                _warn_unmeasurable_once(adapter)
+            scanned, scan_rows_estimated = _precheck_scan_rows(
+                adapter,
+                conn,
+                sql,
+                statement_timeout_ms,
+                max_scan_rows,
+                scope,
+            )
         scan_rows = scanned
         if scanned > max_scan_rows:
             logger.error(
@@ -705,6 +826,7 @@ def execute_sql(
         columns=columns,
         rows=rows,
         scan_rows=scan_rows,
+        scan_rows_estimated=scan_rows_estimated,
         duration_ms=duration_ms,
         findings=guard_warnings,
     )
