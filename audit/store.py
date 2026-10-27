@@ -206,13 +206,27 @@ class AuditStore:
             (),
         ).fetchall()
         existing = {row[0] for row in rows}
+        # 历史污染清理：早期版本的迁移把 re.Match 对象直接插进了 DDL，列名落成
+        # `<re.Match object; span=(0, 11), match='answered_by'>` 这种畸形串。这类
+        # 列永不参与读写（_INSERT_SQL 用显式列名），但会让下面的 existing 判定
+        # 失真（answered_by 缺失 → 再次 ADD → CatalogException: already exists），
+        # 结果是每条审计记录都写库失败、静默落到 JSONL。就地删除以自愈。
+        for name in sorted(existing):
+            if _AUDIT_COLUMN_IDENTIFIER_RE.fullmatch(name) is None:
+                quoted = name.replace('"', '""')
+                self._conn.execute(f'ALTER TABLE audit_log DROP COLUMN "{quoted}"', ())
+                existing.discard(name)
         for column, column_type in _AUDIT_COLUMN_TYPES.items():
             if column not in existing:
                 # 列名/类型来自模块级常量字典（非外部输入），仍带参数元组走安全形态
                 col = _AUDIT_COLUMN_IDENTIFIER_RE.fullmatch(column)
                 if col is None:
                     raise ValueError(f"非法审计列名标识符: {column!r}")
-                self._conn.execute(f'ALTER TABLE audit_log ADD COLUMN "{col}" {column_type}', ())
+                # group(0)：fullmatch 返回 Match 对象，直接插值会把整个 repr 写进
+                # 列名——这里必须是匹配到的字符串本身
+                self._conn.execute(
+                    f'ALTER TABLE audit_log ADD COLUMN "{col.group(0)}" {column_type}', ()
+                )
 
     def _append_jsonl(self, record: AuditRecord) -> None:
         with _CrossProcessLock(self.jsonl_path):

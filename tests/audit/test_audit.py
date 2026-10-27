@@ -390,6 +390,55 @@ def test_audit_store_db_orchestration_fields(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# schema 迁移列名回归（2026-10-27 五后端链路实测发现）
+# --------------------------------------------------------------------------- #
+def test_migrate_schema_uses_matched_identifier_not_match_repr(tmp_path):
+    """迁移补齐缺失列时列名必须是匹配到的标识符，不能是 Match 对象的 repr。
+
+    回归背景：``_migrate_schema`` 曾把 ``fullmatch`` 的返回对象直接插进 DDL，
+    列名落成 ``<re.Match object; span=(0, 11), match='answered_by'>``。后果是
+    后续每次写入都判定 answered_by 缺失 → 重复 ADD → CatalogException →
+    审计记录静默丢库（只有 JSONL 有）。该用例同时覆盖历史畸形列的自愈清理。
+    """
+    db_path = tmp_path / "audit.duckdb"
+
+    # 构造旧版表：缺 answered_by / planner_llm_error，且已存在被污染的畸形列
+    legacy = duckdb.connect(str(db_path))
+    try:
+        legacy.execute("""
+            CREATE TABLE audit_log (
+                request_id VARCHAR, session_id VARCHAR, user_name VARCHAR,
+                principal VARCHAR, prompt VARCHAR, retrieval_context VARCHAR,
+                dsl VARCHAR, sql VARCHAR, latency_ms DOUBLE, row_count BIGINT,
+                scan_rows BIGINT, rewrites BIGINT, error VARCHAR,
+                detected_intent VARCHAR, routing_latency_ms DOUBLE,
+                routing_reason VARCHAR, created_at VARCHAR,
+                "<re.Match object; span=(0, 11), match='answered_by'>" VARCHAR
+            )
+            """)
+    finally:
+        legacy.close()
+
+    store = AuditStore(db_path=db_path)
+    store.write(AuditRecord(request_id="r-migrate", prompt="迁移回归", answered_by="planner"))
+    store.close()
+
+    conn = duckdb.connect(str(db_path), read_only=True)
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()]
+        row = conn.execute(
+            "SELECT request_id, answered_by, planner_llm_error FROM audit_log"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert "answered_by" in cols
+    assert "planner_llm_error" in cols
+    assert not [c for c in cols if c.startswith("<re.Match")], "畸形列未被清理"
+    assert row == [("r-migrate", "planner", None)]
+
+
+# --------------------------------------------------------------------------- #
 # 锁文件并发创建重试（Windows 竞争回归，CI 2026-10-24）
 # --------------------------------------------------------------------------- #
 def test_lock_file_open_retries_on_permission_error(tmp_path, monkeypatch):
