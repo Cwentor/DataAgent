@@ -85,3 +85,4 @@ logs/
 
 # --- 本地工作记录目录（不应入库）---
 .workbuddy/
+.workbuddy-ai/
