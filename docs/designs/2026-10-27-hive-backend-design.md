@@ -214,19 +214,33 @@ Windows 无法装 sasl——requirements 统一性优先）。客户端 socket �
    标准授权 `hive.security.authorization.enabled` 或存储授权）；建仓账号分离；
 2. **语句层**：方言增量黑名单（见 T4：DDL/DML/ADMIN/LOAD/DFS/MSCK/RESET/SET
    等 HiveQL 特有语句族 + `system:...` UDF 族）；
-3. **连接层 harden（验证式）**：执行 `SET` 回读会话配置——验证
-   `hive.mapred.mode=strict`（若部署配置）与当前用户非匿名可写面；
-   **明示验证清单（fail-closed）**：harden 校验 `SET -v` 输出中
-   `hive.security.authorization.enabled` 与部署声明一致 + `SELECT current_user()`
-   非建仓账号（两账号分离防误配）。验证面窄于 CH（无 per-profile 预算可读），
-   属 Hive 平台事实，文档诚实记录。
+3. **连接层 harden（验证式，fail-closed）**：建连时执行并回读校验两项——
+   ① **会话级查询超时**：`SET hive.query.timeout.seconds=<QUERY_TIMEOUT_MS/1000>`
+   后回读确认生效（回读为 `is undefined` 即拒绝连接）；② **身份回读**：
+   `SELECT current_user()` 必须与 dsn 用户一致，拦截"用户名未生效"的部署漂移。
+
+   > **2026-10-27 审计修订**：本节原写「harden 校验 `SET -v` 输出中
+   > `hive.security.authorization.enabled` 与部署声明一致 + current_user 非建仓
+   > 账号」，与实现不符——实际只做 `current_user()` 一致性回读。修订同时新增了
+   > 会话超时加固，理由见 D5。验证面仍窄于 CH（无 per-profile 预算可读），属
+   > Hive 平台事实，文档诚实记录。
 
 ### D5 超时与取消
 
-PyHive 无 TCancelOperation 封装（§12 预研成立）→ `cancel()` 空操作；超时
-承载 = 客户端 socket 读超时（D2 的 +5s 口径）+ 部署侧 HiveServer2 查询
-超时配置（`hive.server2.query.timeout`，部署要求建议项）。超时异常归一：
-PyHive 抛 `socket.timeout`/`HiveServer2Error` 文本 → `QueryTimeoutError`。
+PyHive 无 TCancelOperation 封装（§12 预研成立）→ `cancel()` 空操作。
+
+> **2026-10-27 审计修订（`docs/reviews/2026-10-27-audit-project-issues.md` §3.1）**：
+> 原设计把超时承载完全交给「客户端 socket 读超时 + 部署侧 `hive.server2.query.timeout`」。
+> 实测发现 `hive.query.timeout.seconds` **默认 0s，即服务端永不终止任何查询**，而
+> `hive.server2.query.timeout` 在默认容器里是 `undefined`——服务端对超预算查询
+> 一无所知，超时防线实际只剩客户端 socket（`QUERY_TIMEOUT_MS + 5s`）。
+> 实测该参数可会话级 SET 且立即生效（设 2s 后 8 表笛卡尔积在 2.39s 被服务端终止，
+> 错误文本 `found TIMEDOUT`），故改为由 harden 在**每次建连时设置并回读校验**。
+> 看门狗超时后的连接按 `connstate` 打标废弃，不复用（同审计报告 §二）。
+
+超时异常归一：PyHive 抛 `socket.timeout`/`HiveServer2Error` 文本 → `QueryTimeoutError`
+（识别词含 `timeout` / `timed out` / `timedout`——服务端超时文本是连写的
+`found TIMEDOUT`，原实现漏识别，已修）。
 
 ### D6 方言十原语 Hive 口径（M1/M2/M6/M7 实测）
 
