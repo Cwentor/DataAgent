@@ -5,9 +5,10 @@
 - **手段**：静态审计（全仓扫描）+ 本地 Docker 容器实测（复用五后端矩阵的四个容器）
 - **前置**：[五后端本地 Docker 实测矩阵](2026-10-27-audit-five-backend-docker-matrix.md)
 - **轮次**：两轮。第一轮查「防线缺不缺」（§二~§八，已修）；第二轮查「防线是否仍然
-  有效」——即既有机制在数据增长、双写失败、并发压力下会不会自己失效（§九，待修）
+  有效」——即既有机制在数据增长、双写失败、并发压力下会不会自己失效（§九，2 个 P1 已修）
 - **结论**：工程质量基线良好。第一轮的 1 个 P0 + 3 个 P1 已修；第二轮另发现
-  **2 个 P1**（扫描行缓存过时致熔断失效、审计双写不一致且无恢复手段）与 6 项 P2。
+  **2 个 P1**（扫描行缓存过时致熔断失效、审计双写不一致且无恢复手段）与 6 项 P2，
+  其中 2 个 P1 与 2 项 P2 已修，其余记债。
 
 ## 一、结论摘要
 
@@ -17,11 +18,11 @@
 | **P1** | 扫描行熔断在 ClickHouse / Hive 上失效，Hive 无任何兜底 | **已修**（Hive 补服务端会话超时；告警去重） |
 | **P1** | `sqlglot` 无版本上界（SQL 转译核心依赖裸奔） | **已修**（`<31` + 升级流程注释） |
 | **P1** | Hive 无账号体系（生产接入前置条件缺失） | 文档记录（代码不可解） |
-| **P1** | 扫描行缓存无 TTL、key 不含后端 → 数据增长后熔断静默失效（§9.1） | **待修** |
-| **P1** | 审计双写无一致性保证、无 JSONL→DB 重建工具，实测缺 21% 记录（§9.2） | **待修** |
+| **P1** | 扫描行缓存无 TTL、key 不含后端 → 数据增长后熔断静默失效（§9.1） | **已修**（作用域键 + TTL + `clear_scan_cache`） |
+| **P1** | 审计双写无一致性保证、无 JSONL→DB 重建工具，实测缺 21% 记录（§9.2） | **已修**（`scripts/audit_rebuild.py`，历史 3469 条已补齐） |
 | **P2** | 审计失败无计数告警 | **已修**（`/api/metrics` 计数 + 阈值告警） |
 | **P2** | Hive `ensure_db` 启动 9.4s、`nodes.py` 3301 行、限流仅覆盖登录、超时路径零测试覆盖 | 部分修（超时路径已补用例，其余记债） |
-| **P2** | duckdb 预检使冷查询延迟翻倍、Hive 设计文档漂移、12 项配置未入 `.env.example`、SSE 线程无上限、审计写入全局串行、P0 修复无集成测试（§9.3） | **待修** |
+| **P2** | duckdb 预检使冷查询延迟翻倍、Hive 设计文档漂移、12 项配置未入 `.env.example`、SSE 线程无上限、审计写入全局串行、P0 修复无集成测试（§9.3） | 部分修（文档漂移与配置项已修，其余记债） |
 
 修复过程中另外撞出三个**新的真实缺陷**（详见 §八），一并修掉：
 
@@ -443,6 +444,27 @@ def _scan_cache_key(sql: str) -> str:
 
 加重因素：`_SCAN_CACHE` 没有对外清理接口，数据更新后**除了重启进程没有别的办法**。
 
+#### 9.1.1 修复实现
+
+| 改动 | 内容 |
+|---|---|
+| 缓存键加作用域 | `_scan_cache_key(sql, scope)`，`scope = _adapter_scope(adapter)` = 后端名 + 数据源标识（外部后端 `host:port/database`，DuckDB 取文件路径）。同一 SQL 在不同引擎/库上不再串用 |
+| 条目带时间戳 + TTL | 值从 `int` 改为 `(scan_rows, cached_at)`；读取时 `now - cached_at > SCAN_CACHE_TTL_SECONDS` 即视为未命中。新增配置 `SCAN_CACHE_TTL_SECONDS`（默认 300s，0 = 不过期） |
+| 手动失效出口 | 新增 `clear_scan_cache()`；`mock/init_duckdb.py` 重建数据后、`scripts/backend_matrix.py` 切后端时自动调用 |
+
+TTL 取值权衡：预检本身等于把查询**真的执行一遍**（见 §9.3），所以 TTL 太短会明显拖慢；数据量通常以小时/天级变化，300s 足以覆盖同一会话内的重复预检，又不至于让过时值长期生效。
+
+修复后复跑同一实验（TTL 设为 1s 便于观察）：
+
+```
+1) 1000 行，预算 10000 -> 通过（scan_rows=1000），已缓存
+   已灌入 200 万行
+2) TTL 内 -> 仍用缓存（scan_rows=1000），符合设计
+3) TTL 过期后重新预检 -> 熔断（修复生效）
+```
+
+回归用例 3 条：跨后端作用域隔离、TTL 过期返回未命中、`clear_scan_cache` 生效。
+
 ### 9.2 P1：审计双写不一致，且没有恢复手段
 
 `AuditStore.write` 是两个独立通道的顺序写：
@@ -469,16 +491,57 @@ DuckDB 行数: 12992
 这 3469 条正是畸形列 bug 期间的记录。审计的用途是追溯与合规，21% 的缺口不是
 小数——现在的状态是"能报警，但修不了"。
 
+#### 9.2.1 修复实现
+
+**不加死信队列，改为承认「JSONL 是权威源、DB 是派生物」。** 顺序写决定了 DB 成功
+必然意味着 JSONL 已成功，反之不成立——所以 JSONL 天然是超集，只要能从它重建，
+就不需要额外的死信通道。
+
+| 改动 | 内容 |
+|---|---|
+| `AuditStore.write_db_many` | 批量**仅**写 DB 通道：一次跨进程锁 + 一次连接 + `executemany`。逐条走 `_insert_db` 的话每条都要开关连接，3469 条要几分钟 |
+| `AuditStore.existing_request_ids` | 批量查已存在的 `request_id`（分块 500），用于算差集；表不存在时返回空集而非抛错 |
+| `_record_params` 抽取 | 单条写入与批量回灌共用同一份字段映射——两处各写一遍，加字段时必然漏一处（本项目已有 §8.3 的前车之鉴） |
+| `scripts/audit_rebuild.py` | 读 JSONL → 按 `request_id` 去重 → 批量回灌 → 复核行数。支持 `--dry-run` / `--since` / `--batch-size` |
+
+本机实际回灌结果：
+
+```
+可解析记录 : 16461
+库内已有   : 12992
+待回灌     : 3469
+回灌完成   : 写入 3469 条，库内行数 12992 -> 16461
+（再次运行）待回灌 : 0 → 无需回灌（两通道已一致）
+```
+
+历史缺口已补齐（16461 = 16461），且重复执行幂等。回归用例 5 条，含 CLI 端到端与
+`--dry-run` 不写库。
+
 ### 9.3 P2：六项
 
-| 项 | 事实 | 影响 |
+| 项 | 事实 | 影响 | 状态 |
+|---|---|---|---|
+| **duckdb 预检让冷查询延迟翻倍** | `explain_scan_rows` 走 `EXPLAIN ANALYZE`，**会真的执行查询**。同一查询：直接执行 33.8ms / 预检 29.3ms ≈ 2x；小查询 1.0ms vs 1.8ms（2.78x） | 缓存命中才免，但问数场景 SQL 很少完全重复 → 每个新查询都要等两遍 | 待修（见 §9.5） |
+| **Hive 设计文档与实现漂移** | design D4 写「harden 校验 `SET -v` 输出」，实际是 `current_user()` 回读；本轮又加了 `hive.query.timeout.seconds` | 读文档的人会按错的验证面排查 | **已修**（见 9.3.1） |
+| **12 项运行时配置未入 `.env.example`** | `AGENT_RUN_*`（5 项）、`ASYNC_TASK_*`（3 项）、`SESSION_MEMORY_*`（3 项）、`MAX_SCAN_CACHE_SIZE` | 运维不知道这些参数存在，也就不会去调 | **已修**（见 9.3.1） |
+| **SSE 每连接一个线程** | `web/api.py:746` 直接 `Thread(target=_pump, daemon=True).start()`，无并发上限 | 客户端大量连接时线程数线性增长；FastAPI 场景本可用 async 生成器 | 待修（见 §9.5） |
+| **审计写入是全局串行点** | `AuditStore._lock` 覆盖 JSONL 追加 + DuckDB 插入，每次查询末尾都过这把锁 | 高并发下审计写入成为吞吐瓶颈 | 待修（见 §9.5） |
+| **本轮 P0 修复只有单测** | parity / 矩阵都不测超时场景 | 真实后端"超时后连接是否被废弃"无 CI 验证——正是原缺陷能潜伏那么久的原因 | 待修（见 §9.5） |
+
+#### 9.3.1 已修的两项
+
+**文档漂移**：`docs/designs/2026-10-27-hive-backend-design.md` 的 D4 / D5 按实现重写，
+并在两节末尾各加一个引用块标注「2026-10-27 审计修订」，说明改了什么、为什么改——
+避免下次读文档的人以为修订块是原始设计的一部分。
+
+| 决策 | 原文档 | 改为（与实现一致） |
 |---|---|---|
-| **duckdb 预检让冷查询延迟翻倍** | `explain_scan_rows` 走 `EXPLAIN ANALYZE`，**会真的执行查询**。同一查询：直接执行 33.8ms / 预检 29.3ms ≈ 2x；小查询 1.0ms vs 1.8ms（2.78x） | 缓存命中才免，但问数场景 SQL 很少完全重复 → 每个新查询都要等两遍 |
-| **Hive 设计文档与实现漂移** | design D4 写「harden 校验 `SET -v` 输出」，实际是 `current_user()` 回读；本轮又加了 `hive.query.timeout.seconds` | 读文档的人会按错的验证面排查 |
-| **12 项运行时配置未入 `.env.example`** | `AGENT_RUN_*`（5 项）、`ASYNC_TASK_*`（3 项）、`SESSION_MEMORY_*`（3 项）、`MAX_SCAN_CACHE_SIZE` | 运维不知道这些参数存在，也就不会去调 |
-| **SSE 每连接一个线程** | `web/api.py:746` 直接 `Thread(target=_pump, daemon=True).start()`，无并发上限 | 客户端大量连接时线程数线性增长；FastAPI 场景本可用 async 生成器 |
-| **审计写入是全局串行点** | `AuditStore._lock` 覆盖 JSONL 追加 + DuckDB 插入，每次查询末尾都过这把锁 | 高并发下审计写入成为吞吐瓶颈 |
-| **本轮 P0 修复只有单测** | parity / 矩阵都不测超时场景 | 真实后端"超时后连接是否被废弃"无 CI 验证——正是原缺陷能潜伏那么久的原因 |
+| D4 加固验证面 | harden 校验 `SET -v` 输出中 `hive.security.authorization.enabled` | 会话超时 `SET hive.query.timeout.seconds` + 回读确认生效；身份侧只做 `current_user()` 回读 |
+| D5 超时来源 | 客户端 socket + 部署侧 `hive.server2.query.timeout` | 实测服务端默认 0s（等于无超时），改为 harden 每次建连都 SET，fail-closed |
+
+**配置项缺失**：`.env.example` 补 12 项（`MAX_SCAN_CACHE_SIZE`、`SCAN_CACHE_TTL_SECONDS`、
+`AGENT_RUN_*` 5 项、`ASYNC_TASK_*` 3 项、`SESSION_MEMORY_*` 3 项），并逐项与
+`config/settings.py` 的默认值核对一致（第一版凭印象写错了 7 项，已按源码改正并加校验）。
 
 ### 9.4 复现方法
 
@@ -498,15 +561,15 @@ print(n_jsonl, c.execute("SELECT count(*) FROM audit_log").fetchone()[0])
 PY
 ```
 
-### 9.5 处置建议（未实施）
+### 9.5 处置建议（更新于 2026-10-27）
 
-| 优先级 | 项 | 建议改法 |
-|---|---|---|
-| 高 | 9.1 缓存过时 | 键加 `adapter.name` + 库名；加 TTL（按 `settings` 可配）或数据版本号；暴露 `clear_scan_cache()` 供运维/建仓脚本调用 |
-| 高 | 9.2 审计恢复 | 新增 `scripts/audit_rebuild.py`：从 JSONL 回灌 DuckDB（按 `request_id` 幂等去重），先补齐历史 3469 条；`write` 改为 DB 失败时落死信文件 |
-| 中 | 9.3 预检开销 | 先用 `EXPLAIN`（不执行）估算初筛，仅当估算接近阈值时才做 `EXPLAIN ANALYZE` |
-| 中 | 9.3 文档漂移 | 更新 Hive design D4 的验证面清单 |
-| 低 | 其余 | 配置项补进 `.env.example`；SSE 改 async；审计锁按通道拆分 |
+| 优先级 | 项 | 建议改法 | 状态 |
+|---|---|---|---|
+| 高 | 9.1 缓存过时 | 键加 `adapter.name` + 库名；加 TTL（按 `settings` 可配）或数据版本号；暴露 `clear_scan_cache()` 供运维/建仓脚本调用 | **已实施**（§9.1.1） |
+| 高 | 9.2 审计恢复 | 新增 `scripts/audit_rebuild.py`：从 JSONL 回灌 DuckDB（按 `request_id` 幂等去重），先补齐历史 3469 条 | **已实施**（§9.2.1）；「DB 失败落死信文件」**未采纳**，改为 JSONL 即权威源 |
+| 中 | 9.3 预检开销 | 先用 `EXPLAIN`（不执行）估算初筛，仅当估算接近阈值时才做 `EXPLAIN ANALYZE` | 待修 |
+| 中 | 9.3 文档漂移 | 更新 Hive design D4 的验证面清单 | **已完成**（§9.3.1） |
+| 低 | 其余 | 配置项补进 `.env.example`；SSE 改 async；审计锁按通道拆分 | 配置项**已完成**；SSE 与审计锁待修 |
 
 ## 十、给运维的检查清单
 
@@ -518,6 +581,6 @@ PY
 | Hive 会话超时是否生效 | `SET hive.query.timeout.seconds` 回读不应是 `is undefined`（harden 已 fail-closed 校验） |
 | ClickHouse profile 预算与 `MAX_SCAN_ROWS` 一致 | `adapter.harden` 会 fail-closed 拒绝漂移 |
 | 审计落库是否真的在写 | 看 `/api/metrics` 的 `audit_write_failures`，非零即代表 JSONL 有、库无 |
-| **数据量大幅增长后熔断是否还有效** | 扫描行缓存无 TTL（§9.1）：重灌数据后必须重启进程，否则旧行数继续放行 |
-| **审计两通道是否对得上** | `wc -l logs/audit.jsonl` 与 `SELECT count(*) FROM audit_log` 对比（§9.2，本机已差 3469 条） |
+| **数据量大幅增长后熔断是否还有效** | 扫描行缓存有 TTL（`SCAN_CACHE_TTL_SECONDS`，默认 300s，§9.1）：超过 TTL 会重新预检；重建数据后可主动 `clear_scan_cache()` 立即失效 |
+| **审计两通道是否对得上** | `wc -l logs/audit.jsonl` 与 `SELECT count(*) FROM audit_log` 对比；不一致就跑 `python scripts/audit_rebuild.py` 幂等回灌（§9.2） |
 | 端口是否与宿主冲突 | 本机 10000 被百度网盘占用，故 compose 偏移到 10001 |
