@@ -34,6 +34,7 @@ _ADAPTER_FACTORIES: dict[str, Callable[[], Any]] = {
     "mysql": _lazy_factory("exec.engine.mysql_adapter", "MySqlAdapter"),
     "postgres": _lazy_factory("exec.engine.postgres_adapter", "PostgresAdapter"),
     "clickhouse": _lazy_factory("exec.engine.clickhouse_adapter", "ClickHouseAdapter"),
+    "hive": _lazy_factory("exec.engine.hive_adapter", "HiveAdapter"),
 }
 
 

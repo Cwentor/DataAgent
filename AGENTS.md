@@ -248,6 +248,30 @@ orchestrator；sandbox 不感知业务语义；skills 只依赖 numpy / pandas +
   `SETTINGS allow_nullable_key = 1`）、无 ANALYZE 步骤；兼容基线
   >= 23.8、CI 锚定 24.8；golden 评测锚定 DuckDB 方言不随引擎切换。
 
+- Hive 执行后端（二十五期，2026-10）：`DB_BACKEND` 五值
+  （duckdb|mysql|postgres|clickhouse|hive，默认 duckdb 零破坏）；驱动
+  PyHive 0.7 + thrift（**HTTP transport**——sasl 包 Windows 无官方 wheel，
+  HTTP 是三平台统一 requirements 的唯一通道，spec D2；SASL binary 为部署
+  备选）；无会话级只读/预算/取消面——只读防线 = 账号仅 SELECT（SQL 标准
+  授权，部署侧）+ 方言黑名单 + 验证式 harden（仅身份回读 current_user 一致，
+  fail-closed）；超时 = 客户端 THttpClient 读超时（应用预算 +5s），扫描预检
+  诚实不可计量（EXPLAIN 无 actual rows，warning 留痕）；spine 用
+  posexplode(split(space(n),' ')) 行生成（N 纯 Python 桶数复用 CH 算术）——
+  **Hive 裸标识符禁下划线开头**（__spine/__one 实测 ParseException），编译器
+  内部别名经 renderer.internal_aliases 反引号化（其余方言裸名不变）；
+  date_trunc 无原生函数（day=to_date / week=pmod(datediff,'1970-01-05') 周一
+  锚定 / month、quarter=trunc）；HAVING 别名可用；建仓灌数 = CSV staging +
+  LOAD DATA LOCAL INPATH（**LOCAL 是 hiveserver2 进程本地路径**，staging 双
+  路径配置；分隔符 \001 规避文本歧义；null 标记 SQL 字面量须双反斜杠
+  `'\\N'`；**staging 文件名禁 `_` 开头**——Hadoop 隐藏文件约定 LOAD 直接
+  跳过）；元数据面逐表 DESCRIBE 解析（分区段 fail-closed）；方言增量黑名单
+  DFS/MSCK/USE/SHOW/DESCRIBE/LOCK 族 + reflect/java_method/system: 函数族；
+  PyHive DATE 列原样返回字符串（adapter 定向补 date 转换）；探索层走内联
+  派生表（只读账号无 DDL 权限）；兼容基线 >= 3.1、CI 锚定 apache/hive:4.0.0
+  （单容器 hiveserver2 + 内嵌 Derby + HTTP transport；/tmp/hive 权限坑须
+  chmod 1777、hive-site 挂载须含镜像默认配置）；golden 评测锚定 DuckDB 方言
+  不随引擎切换。
+
 - 提交前确保 `black --check .`、`ruff check .`、`python -m pytest -q` 全绿。
 
 - 能力边界与三层取数架构（十九期，2026-10）：能力边界 = 治理管道边界（只读 + RLS + 敏感数据保护 + 资源上限），不是 DSL 契约表达力；诚实 = 不虚构 + 假设透明（assumptions 契约字段，报告头部呈现），拒答降为最后手段——二轮歧义转"带假设作答"，严禁静默猜口径；三层同心圆：L1 确定性核（Planner 直产 DSL）/ L2 提升闸门（拒升精确清单喂回自愈 ≤2 次，拒升 ≠ 拒答）/ L3 探索层（第四类 interrupt 审批门 allow_once/allow_session/deny；L4 自动放行硬边界 = SQL 无主体禁列；deny = 诚实告知）；探索 SQL 永不原文执行（表名重写到 sec_* 安全视图 + 三护栏 + PII 脱敏）；沙箱 `connect/database` 调用永久封死（取数权只在执行层）；意图词表新增枚举/基数触发词时须同步 `intent_golden.json` 锚点；

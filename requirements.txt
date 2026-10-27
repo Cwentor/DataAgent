@@ -20,3 +20,12 @@ psycopg[binary]>=3.2,<4
 # 兼容基线 ClickHouse >= 23.8（spec §9 版本演进跟随策略——升级前须跑全量回归与
 # tests/test_clickhouse_backend_parity.py）
 clickhouse-connect>=0.7,<1.0
+# Hive 执行后端（二十五期）：HiveServer2 Thrift 事实标准驱动（dropbox/PyHive，
+# 维护缓慢 0.7.0/2022，上界 pin + fork 预案，spec §4 S1/R4）。走 HTTP transport
+# （transport='http'）避开 SASL——sasl 包在 Windows 无官方 wheel（C 编译），
+# 是唯一能三平台统一安装的通道（spec D2）；否决 PyHive[hive]+SASL binary（本机
+# 装不上）、impyla（同 sasl 链路）、pyhive-fix 等 fork（非官方供应链）。兼容基线
+# Hive >= 3.1、CI 锚定 4.0.0（spec §9——升级前须跑全量回归与
+# tests/test_hive_backend_parity.py）
+pyhive>=0.7,<1
+thrift>=0.16,<1
