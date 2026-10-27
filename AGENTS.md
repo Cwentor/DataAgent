@@ -69,6 +69,9 @@ ruff check .
 # Lint 自动修复
 ruff check --fix .
 
+# 文档链接完整性检查（docs 五类目录规范配套；目录迁移/改名后必跑，CI lint job 已挂）
+python scripts/check_docs_links.py
+
 # 重建本地数仓（幂等，Gmall 电商模型：业务表 + 埋点日志解析入仓）
 python -m mock.init_duckdb
 

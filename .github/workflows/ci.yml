@@ -22,6 +22,11 @@ jobs:
         run: black --check .
       - name: Ruff lint check
         run: ruff check .
+      # 文档链接完整性门禁：docs 五类目录规范（docs/README.md）要求跨类目互链用
+      # 相对路径，而相对链接在目录迁移/文件改名后最容易失效——`docs/...` 全路径
+      # grep 覆盖不到（如 `../.env.example` 随文件下沉需多退一层），故由脚本兜底。
+      - name: Docs link check
+        run: python scripts/check_docs_links.py
 
   test:
     runs-on: ubuntu-latest
