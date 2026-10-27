@@ -5,9 +5,11 @@
 
 检查两类引用：
 1. Markdown 相对链接 `[文本](相对路径)`——按所在文件目录解析，须真实存在；
-2. 仓库根相对引用 `docs/xxx.md`——任意正文/代码注释中出现即校验存在性。
+2. 仓库根相对引用 `docs/xxx.md`——Markdown 正文与 Python 注释/docstring 中出现
+   即校验存在性（代码注释同样承载设计依据引用，改名漏改会静默失效）。
 
-跳过项：http(s)/mailto/tel/ftp 外链、纯锚点、围栏代码块内的示例文本。
+跳过项：http(s)/mailto/tel/ftp 外链、纯锚点、围栏代码块内的示例文本，
+以及本检查器自身与其测试文件（其中的 `docs/...` 是夹具与示例，非真实引用）。
 退出码：0 = 全部可达；1 = 存在失效引用（CI lint job 以此判定门禁）。
 
 用法：
@@ -45,16 +47,39 @@ DOCS_REF_RE = re.compile(r"docs/[A-Za-z0-9_./\-]+\.md")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 # 视为外链/非文件目标的 scheme
 SKIP_SCHEMES = ("http://", "https://", "mailto:", "tel:", "ftp://", "data:")
+# 参与 docs 引用校验的代码文件后缀（注释与 docstring 承载设计依据引用）
+CODE_SUFFIXES = (".py",)
+# 本检查器自身与其测试：其中的 docs 路径是夹具/示例，不参与校验
+SELF_REFERENTIAL = {
+    "scripts/check_docs_links.py",
+    "tests/test_docs_links.py",
+}
 
 
-def iter_markdown_files(root: Path) -> list[Path]:
-    """收集参与检查的 Markdown 文件（按路径排序，输出稳定）。"""
+def _iter_source_files(root: Path, suffix: str) -> list[Path]:
+    """收集指定后缀的源文件（按路径排序，输出稳定）。"""
     files = []
-    for path in root.rglob("*.md"):
+    for path in root.rglob(f"*{suffix}"):
         rel_parts = path.relative_to(root).parts
         if any(part in EXCLUDE_DIRS for part in rel_parts[:-1]):
             continue
         files.append(path)
+    return sorted(files)
+
+
+def iter_markdown_files(root: Path) -> list[Path]:
+    """收集参与检查的 Markdown 文件。"""
+    return _iter_source_files(root, ".md")
+
+
+def iter_code_files(root: Path) -> list[Path]:
+    """收集参与 docs 引用检查的代码文件（跳过本检查器自身与测试）。"""
+    files = []
+    for suffix in CODE_SUFFIXES:
+        for path in _iter_source_files(root, suffix):
+            if path.relative_to(root).as_posix() in SELF_REFERENTIAL:
+                continue
+            files.append(path)
     return sorted(files)
 
 
@@ -72,7 +97,7 @@ def strip_fenced_blocks(text: str) -> str:
 
 
 def check_file(path: Path, root: Path) -> tuple[list[str], list[str]]:
-    """检查单个文件，返回 (失效相对链接, 失效 docs 引用)。"""
+    """检查单个 Markdown 文件，返回 (失效相对链接, 失效 docs 引用)。"""
     text = strip_fenced_blocks(path.read_text(encoding="utf-8", errors="replace"))
     broken_links: list[str] = []
     broken_refs: list[str] = []
@@ -94,6 +119,12 @@ def check_file(path: Path, root: Path) -> tuple[list[str], list[str]]:
     return broken_links, broken_refs
 
 
+def check_code_file(path: Path, root: Path) -> list[str]:
+    """检查单个代码文件注释/docstring 中的 docs 引用，返回失效引用。"""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return [ref for ref in DOCS_REF_RE.findall(text) if not (root / ref).exists()]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="校验 Markdown 相对链接与 docs 引用")
     parser.add_argument(
@@ -106,13 +137,13 @@ def main() -> int:
 
     root = Path(args.root).resolve()
     files = iter_markdown_files(root)
+    code_files = iter_code_files(root)
 
-    total_links = total_broken_links = total_broken_refs = 0
+    total_broken_links = total_broken_refs = 0
     failures: list[str] = []
     for path in files:
         rel = path.relative_to(root).as_posix()
         broken_links, broken_refs = check_file(path, root)
-        total_links += 1
         total_broken_links += len(broken_links)
         total_broken_refs += len(broken_refs)
         for target in broken_links:
@@ -120,9 +151,16 @@ def main() -> int:
         for ref in broken_refs:
             failures.append(f"  [docs 引用失效] {rel} -> {ref}")
 
+    for path in code_files:
+        rel = path.relative_to(root).as_posix()
+        broken_refs = check_code_file(path, root)
+        total_broken_refs += len(broken_refs)
+        for ref in broken_refs:
+            failures.append(f"  [代码内 docs 引用失效] {rel} -> {ref}")
+
     if not args.quiet:
         print(f"扫描目录：{root}")
-    print(f"扫描 Markdown 文件：{total_links}")
+    print(f"扫描 Markdown 文件：{len(files)}，代码文件：{len(code_files)}")
     print(f"相对链接失效：{total_broken_links}")
     print(f"docs 引用失效：{total_broken_refs}")
 

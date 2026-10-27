@@ -78,6 +78,21 @@ def test_fenced_code_block_is_ignored(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_broken_reference_in_python_comment_fails(tmp_path: Path) -> None:
+    """代码注释/docstring 中的 docs 引用失效时应 FAIL（改名漏改的静默失效面）。"""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text(
+        '"""模块说明：设计依据见 docs/designs/ghost-design.md。"""\n\nVALUE = 1\n',
+        encoding="utf-8",
+    )
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 1
+    assert "代码内 docs 引用失效" in result.stdout
+    assert "docs/designs/ghost-design.md" in result.stdout
+
+
 def test_repository_docs_are_clean() -> None:
     """仓库真实文档必须全部可达（守住既有基线，防止后续改名漏改）。"""
     result = subprocess.run(
