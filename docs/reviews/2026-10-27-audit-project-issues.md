@@ -521,7 +521,7 @@ DuckDB 行数: 12992
 
 | 项 | 事实 | 影响 | 状态 |
 |---|---|---|---|
-| **duckdb 预检让冷查询延迟翻倍** | `explain_scan_rows` 走 `EXPLAIN ANALYZE`，**会真的执行查询**。同一查询：直接执行 33.8ms / 预检 29.3ms ≈ 2x；小查询 1.0ms vs 1.8ms（2.78x） | 缓存命中才免，但问数场景 SQL 很少完全重复 → 每个新查询都要等两遍 | 待修（见 §9.5） |
+| **duckdb 预检让冷查询延迟翻倍** | `explain_scan_rows` 走 `EXPLAIN ANALYZE`，**会真的执行查询**。同一查询：直接执行 33.8ms / 预检 29.3ms ≈ 2x；小查询 1.0ms vs 1.8ms（2.78x） | 缓存命中才免，但问数场景 SQL 很少完全重复 → 每个新查询都要等两遍 | 设计已出（见 §9.5） |
 | **Hive 设计文档与实现漂移** | design D4 写「harden 校验 `SET -v` 输出」，实际是 `current_user()` 回读；本轮又加了 `hive.query.timeout.seconds` | 读文档的人会按错的验证面排查 | **已修**（见 9.3.1） |
 | **12 项运行时配置未入 `.env.example`** | `AGENT_RUN_*`（5 项）、`ASYNC_TASK_*`（3 项）、`SESSION_MEMORY_*`（3 项）、`MAX_SCAN_CACHE_SIZE` | 运维不知道这些参数存在，也就不会去调 | **已修**（见 9.3.1） |
 | **SSE 每连接一个线程** | `web/api.py:746` 直接 `Thread(target=_pump, daemon=True).start()`，无并发上限 | 客户端大量连接时线程数线性增长；FastAPI 场景本可用 async 生成器 | 待修（见 §9.5） |
@@ -611,7 +611,7 @@ PY
 |---|---|---|---|
 | 高 | 9.1 缓存过时 | 键加 `adapter.name` + 库名；加 TTL（按 `settings` 可配）或数据版本号；暴露 `clear_scan_cache()` 供运维/建仓脚本调用 | **已实施**（§9.1.1） |
 | 高 | 9.2 审计恢复 | 新增 `scripts/audit_rebuild.py`：从 JSONL 回灌 DuckDB（按 `request_id` 幂等去重），先补齐历史 3469 条 | **已实施**（§9.2.1）；「DB 失败落死信文件」**未采纳**，改为 JSONL 即权威源 |
-| 中 | 9.3 预检开销 | 先用 `EXPLAIN`（不执行）估算初筛，仅当估算接近阈值时才做 `EXPLAIN ANALYZE` | 待修 |
+| 中 | 9.3 预检开销 | 先用 `EXPLAIN`（不执行）估算初筛，仅当估算接近阈值时才做 `EXPLAIN ANALYZE` | **已出设计**：[两段式设计](../designs/2026-10-27-scan-precheck-two-stage-design.md)（未实施） |
 | 中 | 9.3 文档漂移 | 更新 Hive design D4 的验证面清单 | **已完成**（§9.3.1） |
 | 低 | 其余 | 配置项补进 `.env.example`；SSE 改 async；审计锁按通道拆分 | 配置项**已完成**；SSE 与审计锁待修 |
 
