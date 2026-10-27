@@ -16,7 +16,7 @@
 - [x] T7 parity 测试汇聚
 - [x] T8 eval 冒烟
 - [x] T9 CI hive-parity 门禁 + AGENTS.md 契约小节
-- [ ] T10 全量收尾（质量门 + Review Focus 核对 + CI 收敛 + 提交推送）
+- [x] T10 全量收尾（质量门 + Review Focus 核对 + CI 收敛 + 提交推送）
 
 ## Review Focus 专项核对表
 
@@ -90,6 +90,23 @@
 - **T7 收尾**：`tests/test_catalog_backend_parity.py` 增 hive 条目（DESCRIBE
   实报小写形态），目录一致性测试 5 后端全绿。
 
+### 2026-10-27 收口期（T10）
+
+- **CI 首跑即全绿，零轮次迭代**：PR [#20](https://github.com/Cwentor/DataAgent/pull/20)
+  触发 run **40429132085**（headSha `5b6f298`，2026-10-27T00:52Z），六个 job
+  全部 success，`nightly` 按 schedule 条件 skipped（符合预期）。无失败重跑。
+  - hive-parity：3m06s（首个真实 Hive 链路验证面——建仓 + golden 全量 DSL
+    parity + 目录构建 smoke 一次通过，说明 T0 阶段固化的三个容器坑
+    （`/tmp/hive` 权限 / hive-site 整体替换 / staging 卷同路径）在 CI 环境同样成立）；
+  - test：3m23s / lint：44s / mysql-parity：1m46s / postgres-parity：1m42s /
+    clickhouse-parity：54s —— 前四期门禁零回归。
+- **本地质量门复跑（收口前树状态）**：`black --check .` 266 files unchanged；
+  `ruff check .` All checks passed；`python -m pytest -q` **1358 passed /
+  24 skipped**（4m19s，零失败；较实施期记录的 1357 例 +1，系实施期记录后新增
+  用例所致，无回归）。
+- **PR 状态**：`#20 feat/hive-backend -> master`，`mergeable=MERGEABLE`，
+  非 draft，check rollup 全绿——具备合并条件。
+
 ## 服务级验证清单
 
 **本地验证（2026-10-27，apache/hive:4.0.0 单容器 @127.0.0.1:10001）**：
@@ -105,5 +122,8 @@
 
 **CI 验证（PR 首跑后回填：run 号 / job / 耗时 / 轮次）**：
 
-- [ ] hive-parity job 首绿（Hive 链路 CI 首次真实验证）；
-- [ ] lint / test / mysql-parity / postgres-parity / clickhouse-parity 不变绿。
+- [x] hive-parity job 首绿（Hive 链路 CI 首次真实验证）——run 40429132085，
+      job success，耗时 3m06s（00:52:32Z → 00:55:38Z），**首跑即绿，1 轮收敛**；
+- [x] lint / test / mysql-parity / postgres-parity / clickhouse-parity 不变绿
+      ——同 run 全部 success（44s / 3m23s / 1m46s / 1m42s / 54s）；
+      `nightly` 仅 schedule 触发，PR 下 skipped 符合设计。

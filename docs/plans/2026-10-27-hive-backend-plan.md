@@ -42,35 +42,35 @@
 
 ## Tasks
 
-- [ ] **T1 配置与依赖基座**：`config/settings.py` HIVE_* 五件套 + STAGING 两路径
+- [x] **T1 配置与依赖基座**：`config/settings.py` HIVE_* 五件套 + STAGING 两路径
       + DB_BACKEND 五值注释；`requirements.txt` 驱动注释段（选型理由/否决项/上界
       pin/升级跟随）；`.env.example` 增量；`exec/engine/__init__.py` 与
       `compiler/dialect/__init__.py` 注册表各一行（T2/T3 文件随后落地，先建注册
       防环）。
-- [ ] **T2 方言层**：`compiler/dialect/hive.py` HiveRenderer 十原语（D6 口径逐条
+- [x] **T2 方言层**：`compiler/dialect/hive.py` HiveRenderer 十原语（D6 口径逐条
       实现；spine 用 posexplode CTE + 纯 Python 桶数；INTERVAL 转译照
       pg_interval_literal 先例）+ `tests/compiler/dialect/` 单测（渲染快照 +
       CompileError 分支 + 既有四方言快照不变）。
-- [ ] **T3 引擎层**：`exec/engine/hive_adapter.py` HiveAdapter 全协议（D2/D3/D4/
+- [x] **T3 引擎层**：`exec/engine/hive_adapter.py` HiveAdapter 全协议（D2/D3/D4/
       D5/D10/D11）+ `tests/engine/test_hive_adapter.py` 纯逻辑单测（硬编码清单/
       错误归一/DESCRIBE 解析器/CSV 写出字节，用假驱动对象注入）。
-- [ ] **T4 护栏方言黑名单**：`exec/guards.py` `_DIALECT_EXTRA_KEYWORDS["hive"]`、
+- [x] **T4 护栏方言黑名单**：`exec/guards.py` `_DIALECT_EXTRA_KEYWORDS["hive"]`、
       `_DIALECT_EXTRA_FUNC_RE["hive"]`、Lock 分支评估；单测逐词锁定。
-- [ ] **T5 探索层**：`core/retrieval/exploration.py` 内联派生表方言集合加
+- [x] **T5 探索层**：`core/retrieval/exploration.py` 内联派生表方言集合加
       `"hive"`；相关既有测试跑绿。
-- [ ] **T6 建仓链路**：`mock/gmall/schema_hive.py`（sqlglot 转译 + 后处理 D9）+
+- [x] **T6 建仓链路**：`mock/gmall/schema_hive.py`（sqlglot 转译 + 后处理 D9）+
       `mock/init_hive.py`（照 init_clickhouse 骨架：显式注入 adapter、DROP 幂等、
       行数打印）+ `mock/gmall/build.py` hive 显式分支（Global Constraint 4）+
       `tests/mock/test_schema_hive.py` 对拍。
-- [ ] **T7 parity 测试**：`tests/test_hive_backend_parity.py`（HIVE_TEST_* 门控，
+- [x] **T7 parity 测试**：`tests/test_hive_backend_parity.py`（HIVE_TEST_* 门控，
       场景照 CH 模板裁剪：golden DSL 全量 / 周边界 / comparison / fill_gaps（D7
       裁决） / 连接池复用只读验证口径 per-backend / 扫描熔断专项改为"warning
       诚实留痕"断言）；`tests/test_catalog_backend_parity.py` 加 hive 条目。
-- [ ] **T8 eval 冒烟**：`eval/eval_runner.py` `_hive_smoke()` + choices 加
+- [x] **T8 eval 冒烟**：`eval/eval_runner.py` `_hive_smoke()` + choices 加
       `"hive"`（照三先例 fail-fast）。
-- [ ] **T9 CI 门禁**：`.github/workflows/ci.yml` 加 `hive-parity` job（D13：卷
+- [x] **T9 CI 门禁**：`.github/workflows/ci.yml` 加 `hive-parity` job（D13：卷
       挂载 conf + staging、beeline 就绪循环、CREATE DATABASE、init、parity）；
       AGENTS.md 增 Hive 契约小节。
-- [ ] **T10 全量收尾**：本地三件套（black/ruff/pytest）全绿；golden 31 例回归；
+- [x] **T10 全量收尾**：本地三件套（black/ruff/pytest）全绿；golden 31 例回归；
       push 分支触发 CI 首跑，收敛 hive-parity（轮次记录回填 tasks）；Review
       Focus 逐条核对；tasks 收口。
