@@ -277,3 +277,35 @@ def test_physical_columns_keeps_injected_connection_open():
     conn = _Conn([])
     PostgresAdapter().physical_columns(conn)
     assert conn.closed is False
+
+
+def test_cancel_delegates_to_driver_cancel():
+    """超时取消必须真的发给驱动（二十六期补强）。
+
+    回归背景（2026-10-27，Linux CI postgres-parity 抓出）：``cancel`` 曾是空操作，
+    看门狗超时后 worker 仍阻塞在旧 socket 上，``pool.discard`` 关连接后立刻新建，
+    Linux 立刻复用刚释放的 fd，worker 抢读新连接启动报文 →
+    ``lost synchronization with server``，新连接建不起来、池容量名额退不回。
+    本用例锁死"必须调 ``conn.cancel()``"，防止再次退化为 ``return None``。
+    """
+
+    class _CancelableConn:
+        def __init__(self) -> None:
+            self.cancelled = 0
+
+        def cancel(self) -> None:
+            self.cancelled += 1
+
+    conn = _CancelableConn()
+    PostgresAdapter().cancel(conn)
+    assert conn.cancelled == 1
+
+
+def test_cancel_swallows_driver_error():
+    """取消失败不得阻断超时分支：服务端 statement_timeout 仍是兜底。"""
+
+    class _BrokenConn:
+        def cancel(self) -> None:
+            raise RuntimeError("cancel 通道不可用")
+
+    PostgresAdapter().cancel(_BrokenConn())  # 不抛出即通过

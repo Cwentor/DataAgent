@@ -1,8 +1,17 @@
 """PostgreSQL 适配器（二十二期 spec D2-D6）：psycopg3 只读执行面。
 
-超时取消（spec D3）：服务端 statement_timeout 为主（连接 options + 会话 SET
-双保险），SQLSTATE 57014 归一为 QueryTimeoutError；pg_cancel_backend 方案
-已否决（需独立 pid 通道，注入复杂度不值得——与 MySQL KILL QUERY 否决同口径）。
+超时取消（spec D3，二十六期补强）：服务端 statement_timeout 为主（连接 options +
+会话 SET 双保险），SQLSTATE 57014 归一为 QueryTimeoutError；客户端另经
+``psycopg.Connection.cancel()`` 发 CancelRequest（线程安全、走独立连接）让 worker
+尽快退出——这不是 pg_cancel_backend 方案（SQL 级取消仍需独立 pid 通道，已否决）。
+
+**为什么必须显式取消**（2026-10-27 审计 §9.3.2 的 parity 用例在 Linux CI 上抓出）：
+看门狗超时后只 ``join(2.0)`` 就返回，若 ``cancel`` 是空操作，worker 仍阻塞在旧
+socket 上；``pool.discard`` 随即 ``close()`` 掉这条连接并**立刻**建新连接，Linux 会把
+刚释放的 fd 号立刻复用给新 socket，于是仍阻塞的 worker 抢读了新连接的启动报文 →
+``lost synchronization with server: got message type``，新连接建不起来、池容量名额
+退不回（``pool.size`` 掉到 0）。取消成功则 worker 先退出，close 的是空闲连接，
+不存在这段竞争窗口。Windows 上句柄回收不激进，故本机不复现、CI 必现。
 
 连接加固（spec D6，fail-closed）：default_transaction_read_only /
 standard_conforming_strings（转义口径确定性，spec D7）/ lock_timeout /
@@ -18,10 +27,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from audit.logging import get_logger
 from config import settings
 from exec.engine.base import physical_from_rows
 from exec.engine.normalize import normalize_cell
 from exec.errors import QueryTimeoutError, SqlExecutionError
+
+logger = get_logger("exec.engine.postgres")
 
 # PostgreSQL statement_timeout 触发的 SQLSTATE（query_canceled）
 PG_QUERY_CANCELED_SQLSTATE = "57014"
@@ -115,9 +127,23 @@ class PostgresAdapter:
         return columns, rows
 
     def cancel(self, conn) -> None:
-        # 服务端 statement_timeout 已自限（spec D3）；看门狗回调为空操作，
-        # 仅等待 worker 携超时异常返回
-        return None
+        """尽力取消在途查询（psycopg3 ``Connection.cancel()``，线程安全）。
+
+        与 DuckDB ``interrupt()`` 同语义：看门狗在主线程调用，worker 线程正阻塞在
+        ``execute`` 上。psycopg3 的 cancel 走**独立连接**发 CancelRequest（不是 SQL
+        级 ``pg_cancel_backend``，无需 pid 通道），因此可跨线程安全调用。
+
+        取消成功 → worker 立即抛 ``QueryCanceled`` 退出 → 后续 ``pool.discard``
+        ``close()`` 的是空闲连接，避免"fd 被新连接复用、仍阻塞的 worker 抢读新连接
+        报文"的竞争（见模块 docstring）。取消失败不抛出：服务端 statement_timeout
+        仍是兜底，看门狗也会继续走超时分支。
+        """
+        try:
+            conn.cancel()
+        except Exception:  # 取消失败不得阻断超时分支
+            logger.debug(
+                "PostgreSQL 取消请求发送失败（退回服务端 statement_timeout 兜底）", exc_info=True
+            )
 
     def engine_error(self, exc: BaseException) -> SqlExecutionError | None:
         import psycopg

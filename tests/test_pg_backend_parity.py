@@ -146,8 +146,11 @@ def test_pool_reuse_session_still_readonly():
 def test_timeout_discards_connection():
     """超时后的连接必须被废弃而非归还复用（2026-10-27 审计 §9.3 的真实后端验证）。
 
-    psycopg3 的 ``cancel`` 未在适配器封装（``cancel()`` 空操作），看门狗超时后
-    worker 线程仍阻塞在同一条连接上——照常归还就会把这条连接发给下一个请求。
+    被测契约与 ``adapter.cancel`` 是否有效**无关**：看门狗在超时分支无条件
+    ``mark_unusable``，废弃是必须的（取消只是让 worker 尽早退出，取消成功也不
+    允许复用）。PG 侧取消已由 ``psycopg.Connection.cancel()`` 承载（二十六期补强，
+    见 ``postgres_adapter`` 模块 docstring）；若退化为空操作，Linux 上会撞
+    fd 复用竞争，本用例断言 ``pool.size == 1`` 恰好把它抓出来。
     """
     from exec.engine.postgres_adapter import PostgresAdapter
 

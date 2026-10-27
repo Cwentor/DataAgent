@@ -171,3 +171,51 @@ golden 低估 6 / 35、最大低估 3.21×、最大高估 750.75×、合成过�
 
 **质量门**：`black --check .` 275 文件无改动、`ruff check .` 全通过、
 `scripts/check_docs_links.py` 87 个 Markdown + 273 个代码文件零失效引用。
+
+## 附：CI 首轮抓出的分支既有缺陷（非二十六期，顺带修复）
+
+PR 首轮 CI：`test` / `lint` / `mysql-parity` / `clickhouse-parity` / `hive-parity` 全绿，
+**`postgres-parity` 红**，挂在 `test_timeout_discards_connection`：
+
+```
+AssertionError: 废弃后容量名额未回收（size=0）
+WARNING exec.pool:pool.py:106 废弃后补建连接失败，容量名额已退回（等待者继续排队）
+psycopg.OperationalError: ... lost synchronization with server: got message type "S"
+```
+
+### 归因：与本期的预检改动无关
+
+- 该用例由分支既有提交 `c903029`（审计 §9.3.2）引入，缺陷在 `d67252b`（超时脏归还）；
+- 二十六期只给 **duckdb** 加了 `explain_scan_estimate`，PG 走 `getattr` → None →
+  `_exact_scan_rows`，调用序列与改造前逐点一致；
+- 本地 Windows 跑该用例 **10/10 通过**，是 **Linux 独有的竞争**。
+
+### 根因：fd 复用竞争
+
+1. 看门狗超时后只 `worker.join(2.0)`，比 `pg_sleep(3)` **短**，worker 仍阻塞在旧 socket 上；
+2. PG 的 `adapter.cancel()` 当时是 `return None`（依据"服务端 statement_timeout 自限"
+   ——但用例的 `timeout_ms=300` 远小于 `QUERY_TIMEOUT_MS`，服务端超时根本没到）；
+3. `pool.discard()` 关掉连接后**立刻** `connect_readonly()` 建新连接；
+4. Linux 把刚释放的 fd 号立刻复用给新 socket → 仍阻塞的 worker 抢读新连接的启动报文
+   → 新连接 `lost synchronization` → 补建失败 → 容量名额退回 → `pool.size == 0`。
+
+Windows 句柄回收不激进，故本机不复现。**本地全绿不代表 CI 绿。**
+
+### 修复
+
+`PostgresAdapter.cancel()` 改为经 `psycopg.Connection.cancel()` 发 CancelRequest
+（psycopg3 线程安全、走独立连接，不是 SQL 级 `pg_cancel_backend`）。取消成功则 worker
+先退出，`close()` 的是空闲连接，竞争窗口消失。
+
+**验证**：同一条用例耗时 **3.35s → 0.54s**（`pg_sleep(3)` 在 300ms 超时后立即被取消），
+说明取消真的生效而不是碰巧不撞。
+
+另补两条单测锁死行为：`test_cancel_delegates_to_driver_cancel`（必须调 `conn.cancel()`，
+防止再退化为 `return None`）、`test_cancel_swallows_driver_error`（取消失败不得阻断
+超时分支）。`docs/reviews/2026-10-27-audit-project-issues.md` §2.3 的 PG 行已标注修订，
+`tests/parity_utils.py` 补记了这段竞争。
+
+**教训**：`pool.discard()` 的"关闭 + 立刻补建"在 worker 未真正退出时是不安全组合。
+凡是 `cancel` 退化为空操作的引擎（MySQL / CH / Hive），理论上都有同一个窗口，只是
+各驱动关闭忙连接的行为不同、尚未被抓出。后续若要统一加固，方向是"延迟关闭"
+（reaper 线程宽限期后关）而不是继续依赖各驱动的巧合。
