@@ -75,4 +75,4 @@ YYYY-MM-DD-<类型>-<主题关键词>.md
 | [2026-10-24-repair-ci-duckdb2-scan-cap-bypass.md](2026-10-24-repair-ci-duckdb2-scan-cap-bypass.md) | 缺陷修复：CI 扫描行熔断被 DuckDB 2.0 计划渲染变更打穿 | 2026-10 |
 | [2026-10-24-repair-win32-sqlite-create-race.md](2026-10-24-repair-win32-sqlite-create-race.md) | 缺陷修复：Windows 并发首次创建文件竞争导致本地测试稳定失败 | 2026-10 |
 | [2026-10-27-audit-five-backend-docker-matrix.md](2026-10-27-audit-five-backend-docker-matrix.md) | 深度审计：五后端本地 Docker 实测（连通性/实用性/调度链路稳定性）+ 审计库迁移缺陷修复 | 2026-10 |
-| [2026-10-27-audit-project-issues.md](2026-10-27-audit-project-issues.md) | 深度审计：全项目问题诊断（P0 超时脏连接 / P1 熔断与依赖缺口 / P2 技术债） | 2026-10 |
+| [2026-10-27-audit-project-issues.md](2026-10-27-audit-project-issues.md) | 深度审计（两轮）：全项目问题诊断——P0 超时脏连接 / P1 熔断与依赖缺口 / P2 技术债；第二轮查防线时效性（扫描行缓存过时、审计双写不一致） | 2026-10 |
