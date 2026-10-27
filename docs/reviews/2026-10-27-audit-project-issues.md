@@ -100,7 +100,7 @@ if worker.is_alive():
 | 后端 | `cancel()` | 注释依据 |
 |---|---|---|
 | mysql | `return None` | 服务端 `max_execution_time` 已自限（spec D2） |
-| postgres | `return None` | 服务端 `statement_timeout` 已自限（spec D3） |
+| postgres | `conn.cancel()`（2026-10-27 修订，见下方注） | `psycopg3` 线程安全 CancelRequest + 服务端 `statement_timeout` 兜底 |
 | clickhouse | `return None` | 驱动无 cancel 方法（spec D5 退化路径） |
 | hive | `return None` | 同步执行模型无可靠取消通道（spec D5） |
 
@@ -112,6 +112,16 @@ if worker.is_alive():
 | postgres | `QUERY_TIMEOUT_MS` | 无 | `statement_timeout = QUERY_TIMEOUT_MS` | 同上 |
 | clickhouse | `QUERY_TIMEOUT_MS` | `send_receive_timeout = QTM/1000 + 5s` | `max_execution_time = QTM/1000` | 同值竞争，网络半开时残留 |
 | **hive** | `QUERY_TIMEOUT_MS` | **socket timeout = `QTM + 5s`** | **无强制超时** | **必然残留 ≥3s** |
+
+> **2026-10-27 修订（二十六期 CI 首轮抓出）**：上表 `postgres` 行已失效——
+> `PostgresAdapter.cancel()` 现经 `psycopg.Connection.cancel()` 发 CancelRequest
+> （线程安全，走独立连接）。原判断本身没错（`statement_timeout` 确实自限），错的是
+> **时序**：看门狗只 `join(2.0)`，比 `pg_sleep(3)` 短，空操作会让 worker 阻塞到
+> `pool.discard()` 关连接**之后**；Linux 立刻把刚释放的 fd 复用给新连接，仍阻塞的
+> worker 抢读新连接启动报文 → `lost synchronization with server` → 新连接建不起来、
+> 池容量名额退不回（`pool.size` 掉到 0）。
+> 该竞争在 Windows 上不复现（句柄回收不激进），**本地全绿不代表 CI 绿**。
+> 详见 `exec/engine/postgres_adapter.py` 模块 docstring 与 `tests/parity_utils.py` 补记。
 
 Hive 的 `hive_adapter.py:169` 把 Thrift transport 的 socket 超时设为
 `(QUERY_TIMEOUT_MS / 1000 + HIVE_TIMEOUT_EXTRA_SECONDS)`，其中
