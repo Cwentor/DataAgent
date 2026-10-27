@@ -22,6 +22,11 @@ jobs:
         run: black --check .
       - name: Ruff lint check
         run: ruff check .
+      # 文档链接完整性门禁：docs 五类目录规范（docs/README.md）要求跨类目互链用
+      # 相对路径，而相对链接在目录迁移/文件改名后最容易失效——`docs/...` 全路径
+      # grep 覆盖不到（如 `../.env.example` 随文件下沉需多退一层），故由脚本兜底。
+      - name: Docs link check
+        run: python scripts/check_docs_links.py
 
   test:
     runs-on: ubuntu-latest
@@ -250,6 +255,95 @@ jobs:
           CLICKHOUSE_USER: dataagent_ro
           CLICKHOUSE_PASSWORD: ch_ro_pwd
           CLICKHOUSE_DATABASE: gmall
+
+  # Hive 服务级门禁（二十五期）：与 clickhouse-parity 同构（step 内 docker run）——
+  # golden 全量 DSL 双后端一致性 + 周边界/补零/comparison/池复用专项。本地不跑
+  # Hive（HIVE_TEST_* 未配置自动跳过）。容器为单容器 HiveServer2 + 内嵌 Derby
+  # （apache/hive 官方镜像），HTTP transport 是三平台统一 requirements 的唯一
+  # 通道（spec D2：sasl 包在 Windows 无官方 wheel）。
+  #
+  # 实测坑（spec §0，CI 配置已固化）：
+  # - /tmp/hive 权限：镜像 entrypoint 启动 hiveserver2 时 Hadoop 权限检查失败
+  #   会进入 60s 重试循环，容器启动后立即 chmod 1777 使下一轮重试成功；
+  # - hive-site.xml 必须含镜像默认的全部配置（warehouse.dir/tez local 模式等），
+  #   单文件 :ro 挂载是整体替换——仅写 transport 四项会把 warehouse 打回
+  #   /user/hive/warehouse 导致建表失败；
+  # - staging 卷挂载同路径：LOAD DATA LOCAL INPATH 的 LOCAL 是 hiveserver2
+  #   进程本地路径，client/server 两目录经卷映射为同一内容（spec D10）。
+  hive-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start HiveServer2 (single container, embedded Derby, HTTP transport)
+        run: |
+          mkdir -p "${{ github.workspace }}/build/hive_staging"
+          docker run -d --name hive-ci \
+            -p 10000:10000 \
+            -e SERVICE_NAME=hiveserver2 \
+            -e TZ=UTC \
+            -v "${{ github.workspace }}/.github/hive/hive-site.xml:/opt/hive/conf/hive-site.xml:ro" \
+            -v "${{ github.workspace }}/build/hive_staging:/opt/dataagent_staging" \
+            apache/hive:4.0.0
+          # /tmp/hive 权限坑：Hadoop 权限检查失败进入 60s 重试，先放行权限
+          docker exec hive-ci bash -c "mkdir -p /tmp/hive && chmod 1777 /tmp/hive"
+          for i in $(seq 1 40); do
+            if docker exec hive-ci beeline \
+              -u "jdbc:hive2://localhost:10000/default;transportMode=http;httpPath=cliservice" \
+              -n hive --silent=true --outputformat=tsv2 -e "SELECT 1" 2>/dev/null | grep -q "^1"; then
+              echo "HiveServer2 ready"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "HiveServer2 启动超时"
+          docker logs hive-ci
+          docker exec hive-ci tail -50 /tmp/hive/hive.log || true
+          exit 1
+      - name: Create database
+        run: |
+          docker exec hive-ci beeline \
+            -u "jdbc:hive2://localhost:10000/default;transportMode=http;httpPath=cliservice" \
+            -n hive --silent=true -e "CREATE DATABASE IF NOT EXISTS gmall"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Build Hive warehouse (DDL transpiled + same-source data via CSV staging)
+        run: python -m mock.init_hive
+        env:
+          HIVE_HOST: 127.0.0.1
+          HIVE_PORT: "10000"
+          HIVE_USER: hive
+          HIVE_PASSWORD: ""
+          HIVE_DATABASE: gmall
+          HIVE_STAGING_CLIENT_DIR: ${{ github.workspace }}/build/hive_staging
+          HIVE_STAGING_SERVER_DIR: /opt/dataagent_staging
+      - name: Dump schema on failure (diagnostic)
+        if: failure()
+        run: |
+          docker exec hive-ci beeline \
+            -u "jdbc:hive2://localhost:10000/default;transportMode=http;httpPath=cliservice" \
+            -n hive --silent=true -e "SHOW CREATE TABLE gmall.user_info" || true
+      - name: Dual-backend parity tests (golden DSLs + Review Focus)
+        run: python -m pytest tests/test_hive_backend_parity.py -q
+        env:
+          HIVE_TEST_HOST: 127.0.0.1
+          HIVE_TEST_PORT: "10000"
+          HIVE_TEST_USER: hive
+          HIVE_TEST_PASSWORD: ""
+          HIVE_TEST_DATABASE: gmall
+      - name: Catalog refresh smoke (physical columns from real backend)
+        run: |
+          python -m semantic.catalog_loader | tee /tmp/catalog_smoke.txt
+          grep -q "^fact_table=order_detail" /tmp/catalog_smoke.txt
+        env:
+          DB_BACKEND: hive
+          HIVE_HOST: 127.0.0.1
+          HIVE_PORT: "10000"
+          HIVE_USER: hive
+          HIVE_PASSWORD: ""
+          HIVE_DATABASE: gmall
 
   nightly:
     if: github.event_name == 'schedule'

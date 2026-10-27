@@ -1,7 +1,7 @@
 # PostgreSQL 执行后端支持 实施计划（二十二期）
 
 > 本计划交 dev-executing-plans 逐任务执行；步骤用 `- [ ]` 勾选跟踪。
-> 任务确认清单见 `2026-10-26-postgres-backend-tasks.md`。
+> 任务确认清单见 `../tasks/2026-10-26-postgres-backend-tasks.md`。
 
 **Goal:** 在二十一期双后端架构上新增 PostgreSQL 执行后端（`DB_BACKEND=postgres`），全量对齐 MySQL 交付模式：引擎 adapter + 编译方言 + PG 建仓 + parity 回归 + CI 门禁 + 评测冒烟。
 
@@ -9,7 +9,7 @@
 
 **Tech Stack:** psycopg3（`psycopg[binary]>=3.2,<4`）、sqlglot（DDL 转译 + 方言解析）、既有 exec.guards 护栏框架。
 
-**Spec:** [docs/superpowers/specs/2026-10-26-postgres-backend-design.md](../superpowers/specs/2026-10-26-postgres-backend-design.md)（决策 D1-D17；本计划从规格出发论证，执行者需同时读两者）
+**Spec:** [docs/designs/2026-10-26-postgres-backend-design.md](../designs/2026-10-26-postgres-backend-design.md)（决策 D1-D17；本计划从规格出发论证，执行者需同时读两者）
 
 ## Global Constraints
 

@@ -1,6 +1,6 @@
 """core 包：企业级 Data Agent 的四层核心（检索门面 / 编排器 / 沙箱 / 技能包）。
 
-分层职责与安全边界（与 docs/plans/20260909-enterprise-data-agent-plan.md 一致）：
+分层职责与安全边界（与 docs/plans/2026-09-09-enterprise-data-agent-plan.md 一致）：
 - ``core.retrieval``：既有问数防御链路（semantic -> compiler -> exec）的门面，
   把 DSL 查询包装为 typed Tool（execute_dsl_query -> ParquetRef），并守卫
   "LLM 永不产出裸 SQL"的确定性边界；

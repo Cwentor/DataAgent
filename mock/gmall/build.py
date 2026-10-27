@@ -71,8 +71,10 @@ def _insert_seed(conn: Any, seed_rows: dict[str, list[list]], adapter) -> None:
     # 占位符与执行通道随引擎：duckdb `?` + conn.executemany；
     # pymysql/psycopg `%s` + cursor.executemany；ClickHouse 无 cursor 协议
     # （驱动实测）：种子行走具名 DataFrame + insert_df Arrow 通道（spec D10，
-    # 列序 = SEED_COLUMNS 物理表列序）
-    if adapter.name == "clickhouse":
+    # 列序 = SEED_COLUMNS 物理表列序）；Hive（二十五期）INSERT VALUES 每条
+    # 语句一个 job 且 PyHive executemany 语义不可用——同样走 insert_dataframe
+    # （CSV staging + LOAD DATA 通道，spec D10）
+    if adapter.name in ("clickhouse", "hive"):
         for table, rows in seed_rows.items():
             cols = SEED_COLUMNS[table]
             converted = [
@@ -363,6 +365,10 @@ def build_gmall_tables(
         from mock.gmall.schema_clickhouse import create_clickhouse_tables
 
         create_clickhouse_tables(conn)
+    elif adapter.name == "hive":
+        from mock.gmall.schema_hive import create_hive_tables
+
+        create_hive_tables(conn)
     else:
         from mock.gmall.schema_mysql import create_mysql_tables
 

@@ -25,8 +25,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 # 本地开发零成本数仓文件（模块 C 生成）
 DB_PATH: Path = PROJECT_ROOT / "analytics_sandbox.duckdb"
 
-# 查询执行后端（二十一期起，二十三期四值）：duckdb（默认，零破坏）| mysql |
-# postgres | clickhouse
+# 查询执行后端（二十一期起，二十五期五值）：duckdb（默认，零破坏）| mysql |
+# postgres | clickhouse | hive
 DB_BACKEND: str = os.getenv("DB_BACKEND", "duckdb")
 # SQL 方言（编译器渲染目标，二十一期）：缺省跟随 DB_BACKEND 推导；
 # 可独立覆盖（测试/排查用，如 duckdb 后端下单独产出 mysql 方言 SQL）
@@ -64,6 +64,24 @@ CLICKHOUSE_PORT: int = int(os.getenv("CLICKHOUSE_PORT", "8123"))
 CLICKHOUSE_USER: str = os.getenv("CLICKHOUSE_USER", "dataagent_ro")
 CLICKHOUSE_PASSWORD: str = os.getenv("CLICKHOUSE_PASSWORD", "")
 CLICKHOUSE_DATABASE: str = os.getenv("CLICKHOUSE_DATABASE", "gmall")
+
+# Hive 执行后端连接配置（二十五期 spec §7，DB_BACKEND=hive 时生效）
+# 运行时查询用只读账号（部署要求仅 GRANT SELECT，两账号分离见 spec §9）；
+# 建仓（python -m mock.init_hive）复用本组配置但要求账号具备 CREATE/INSERT/DROP
+# 权限。传输通道走 HiveServer2 HTTP transport（spec D2：三平台统一 requirements
+# 的唯一通道，SASL binary 为部署备选）
+HIVE_HOST: str = os.getenv("HIVE_HOST", "127.0.0.1")
+HIVE_PORT: int = int(os.getenv("HIVE_PORT", "10000"))
+HIVE_USER: str = os.getenv("HIVE_USER", "dataagent_ro")
+HIVE_PASSWORD: str = os.getenv("HIVE_PASSWORD", "")
+HIVE_DATABASE: str = os.getenv("HIVE_DATABASE", "gmall")
+# 建仓 staging（二十五期 spec D10）：CSV 先写到 client 目录（本机路径），再经
+# LOAD DATA LOCAL INPATH 从 server 目录（hiveserver2 进程可见路径）加载——
+# LOCAL 语义是服务端本地路径，CI/docker 部署中两目录经卷映射为同一内容
+HIVE_STAGING_CLIENT_DIR: str = os.getenv(
+    "HIVE_STAGING_CLIENT_DIR", str(PROJECT_ROOT / "build" / "hive_staging")
+)
+HIVE_STAGING_SERVER_DIR: str = os.getenv("HIVE_STAGING_SERVER_DIR", "/opt/dataagent_staging")
 
 # 编排器沙箱工作区根目录（Data Agent：Parquet 交换区 / 沙箱脚本 / 产物）
 WORKSPACE_ROOT: Path = PROJECT_ROOT / "logs" / "workspaces"
@@ -206,7 +224,7 @@ if PROVIDER_STREAM_MAX_SECONDS <= 0:
 # 最坏总延迟不高于单次 PROVIDER_TIMEOUT 上限；运行时对 <=0 钳制为 1（防非法配置）
 PROVIDER_HANDSHAKE_TIMEOUT: int = int(os.getenv("PROVIDER_HANDSHAKE_TIMEOUT", "30"))
 # 握手期超时安全重试次数：仅限未收到任何响应字节的超时（防重复计费假设见
-# docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md §前提假设）；<=0 关闭
+# docs/designs/2026-10-05-llm-handshake-retry-design.md §前提假设）；<=0 关闭
 PROVIDER_HANDSHAKE_RETRY_MAX: int = int(os.getenv("PROVIDER_HANDSHAKE_RETRY_MAX", "1"))
 
 # 报告综合（Synthesizer）专用读超时（秒）：长文生成耗时 > 常规调用，独立预算；

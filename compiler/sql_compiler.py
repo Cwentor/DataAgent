@@ -70,6 +70,19 @@ def _quote_ident(name: str) -> str:
     return get_renderer().quote_ident(name)
 
 
+def _internal_alias(key: str) -> str:
+    """编译器内部别名（__spine/__agg/__ranked/__rn）按方言取渲染形态。
+
+    缺省保持裸 dunder 名（既有四方言产物逐字节不变）；Hive 等裸标识符
+    禁下划线开头的方言经 renderer.internal_aliases() 覆盖（方法存在性
+    分派，对齐 exploration.install_secure_views 先例）。
+    """
+    getter = getattr(get_renderer(), "internal_aliases", None)
+    if getter is None:
+        return "__" + key
+    return getter()[key]
+
+
 # --------------------------------------------------------------------------- #
 # 时间窗口解析
 # --------------------------------------------------------------------------- #
@@ -704,9 +717,10 @@ def _compile_with_top_n(dsl: QueryDSL) -> str:
     if dsl.time_filter is not None:
         where.append(_time_window_sql(dsl.time_filter))
 
+    rn_name = _internal_alias("rn")
     inner_sql = "SELECT " + ", ".join(inner_selects)
     inner_sql += ",\n         ROW_NUMBER() OVER (PARTITION BY " + ", ".join(partition_exprs)
-    inner_sql += " ORDER BY " + ", ".join(order_exprs) + ") AS __rn"
+    inner_sql += " ORDER BY " + ", ".join(order_exprs) + f") AS {rn_name}"
     inner_sql += "\n" + _from_clause(dsl)
     if where:
         inner_sql += "\nWHERE " + " AND ".join(where)
@@ -727,8 +741,8 @@ def _compile_with_top_n(dsl: QueryDSL) -> str:
     ]
 
     sql = "SELECT " + ", ".join(outer_selects)
-    sql += "\nFROM (\n" + inner_sql + "\n) AS __ranked"
-    sql += f"\nWHERE __rn <= {int(top.n)}"
+    sql += "\nFROM (\n" + inner_sql + "\n) AS " + _internal_alias("ranked")
+    sql += f"\nWHERE {rn_name} <= {int(top.n)}"
     sql += "\nORDER BY " + ", ".join(outer_order)
     sql += f"\nLIMIT {int(dsl.limit)}"
     return sql
@@ -785,9 +799,11 @@ def _compile_with_fill_gaps(dsl: QueryDSL) -> str:
     end_incl_s = end_incl.strftime("%Y-%m-%d %H:%M:%S")
 
     spine_body = get_renderer().spine_cte_sql(time_alias, start_s, end_incl_s, step)
-    spine = f"__spine AS (\n" f"  {spine_body}\n" ")"
+    spine_name = _internal_alias("spine")
+    agg_name = _internal_alias("agg")
+    spine = f"{spine_name} AS (\n" f"  {spine_body}\n" ")"
     agg = (
-        "__agg AS (\n"
+        f"{agg_name} AS (\n"
         "  SELECT " + ", ".join(inner_selects) + "\n"
         f"  {_from_clause(dsl)}\n"
         "  WHERE " + " AND ".join(where) + "\n"
@@ -804,7 +820,7 @@ def _compile_with_fill_gaps(dsl: QueryDSL) -> str:
     sql = f"{get_renderer().with_keyword()} " + spine + ",\n" + agg
     sql += "\nSELECT " + ", ".join(outer_selects)
     qt = _quote_ident(time_alias)
-    sql += f"\nFROM __spine s\nLEFT JOIN __agg a ON a.{qt} = s.{qt}"
+    sql += f"\nFROM {spine_name} s\nLEFT JOIN {agg_name} a ON a.{qt} = s.{qt}"
     sql += f"\nORDER BY s.{qt} ASC"
     sql += f"\nLIMIT {int(dsl.limit)}"
     return sql

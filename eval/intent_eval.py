@@ -90,7 +90,7 @@ def main() -> int:
             failures.append(question)
             print(f"       report head: {report[:200]!r}")
 
-    # 多轮混排回归锚点（docs/reviews/20261002-audit-clarify-pending-hijack.md）：
+    # 多轮混排回归锚点（docs/reviews/2026-10-02-audit-clarify-pending-hijack.md）：
     # 恢复"共享会话连续提问"场景——澄清挂起后新问题必须按新查询独立作答、
     # 旧澄清卡仍可在本轮线程恢复（checkpointer 线程按轮隔离）。严禁用每用例
     # 隔离会话掩盖多轮误路由。

@@ -1,6 +1,6 @@
 """LLM 流式握手期超时安全重试测试。
 
-spec: docs/superpowers/specs/2026-10-05-llm-handshake-retry-design.md
+spec: docs/designs/2026-10-05-llm-handshake-retry-design.md
 覆盖：异常体系兼容性、配置默认值、指标计数器、握手期判定与独立预算、
 mid-stream 禁重试、重试包装（成功 / 双失败 / 开关关闭 / 鉴权头一致）、
 三协议适配器接入。

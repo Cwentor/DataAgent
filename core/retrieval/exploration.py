@@ -76,10 +76,11 @@ def rewrite_sql_to_views(sql: str, principal: str | None) -> tuple[str | None, l
             rejects.append(f"越权表 {name!r}（主体 {policy.name!r} 无安全投影，拒绝执行）")
             continue
         view = _view_name(name)
-        if dialect in ("mysql", "clickhouse"):
-            # MySQL 无 TEMP VIEW、ClickHouse readonly=1 下无 DDL 权限（均无临时
-            # 视图能力）：基表替换为内联派生表（spec D8/D9）——投影/RLS/禁列
-            # 物理缺席与视图版单一实现，无 DDL 权限要求
+        if dialect in ("mysql", "clickhouse", "hive"):
+            # MySQL 无 TEMP VIEW、ClickHouse readonly=1 / Hive 只读账号（二十
+            # 五期）无 DDL 权限（均无临时视图能力）：基表替换为内联派生表
+            # （spec D8/D9）——投影/RLS/禁列物理缺席与视图版单一实现，无 DDL
+            # 权限要求
             inner = f"SELECT {', '.join(proj.select_list)} FROM {proj.from_sql}"
             if proj.where_sql:
                 inner += f" WHERE {proj.where_sql}"

@@ -1,10 +1,10 @@
-"""跨后端目录一致性（二十四期 T8，Review Focus 2 / spec D1）。
+"""跨后端目录一致性（二十四期 T8，Review Focus 2 / spec D1；二十五期增 hive）。
 
-不变量：**四后端同源数据 → 同一份语义目录**（逻辑字段 / 表 / 列 / dtype 三元组
+不变量：**五后端同源数据 → 同一份语义目录**（逻辑字段 / 表 / 列 / dtype 三元组
 全等）。破坏该不变量意味着"同一张表在 PG 上被当成 float、在 CH 上被当成 str"，
 字面量安全转义会走错分支。
 
-用例纯本地可跑（不需真库）：以 DuckDB 真实建仓的物理面为基准，另外三个后端用
+用例纯本地可跑（不需真库）：以 DuckDB 真实建仓的物理面为基准，其他后端用
 "各自驱动实际报告的原生类型形态"模拟——原始形态经 `physical_from_rows` →
 `exec.engine.type_map.map_dtype` 归一，正是生产链路本身。
 
@@ -48,6 +48,14 @@ _BACKEND_RAW_TYPES: dict[str, dict[str, str]] = {
         "float": "Nullable(Decimal(16, 2))",
         "str": "LowCardinality(Nullable(String))",
         "timestamp": "Nullable(DateTime)",
+    },
+    # Hive DESCRIBE 实报形态（二十五期，apache/hive:4.0.0 实测小写）：
+    # int/string/timestamp；金额列 DDL DECIMAL(16,2) 转译保真报 decimal(16,2)
+    "hive": {
+        "int": "int",
+        "float": "decimal(16,2)",
+        "str": "string",
+        "timestamp": "timestamp",
     },
 }
 

@@ -49,7 +49,7 @@
 
 ## 文档与回归
 
-- 规格文档 `docs/plans/2026-10-07-semantic-decoupling-spec.md`；AGENTS.md 关键约定更新（"业务语义映射严禁散落代码，一律登记 semantic.json"）；
+- 规格文档 `docs/designs/2026-10-07-semantic-decoupling-design.md`；AGENTS.md 关键约定更新（"业务语义映射严禁散落代码，一律登记 semantic.json"）；
 - 每期完成跑：`pytest -q` 全绿 + `eval.eval_runner` oracle/离线 agent 双 31/31 + `black`/`ruff` 绿；P1 完成后额外手测一次 Web LLM 路径（prompt 渲染变化）。
 
 ## 风险与对策

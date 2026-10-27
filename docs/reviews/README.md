@@ -10,15 +10,15 @@
 ## 文件命名规范
 
 ```
-yyyymmdd-<类型>-<主题关键词>.md
+YYYY-MM-DD-<类型>-<主题关键词>.md
 ```
 
-- `yyyymmdd`：评审归档日期（文件首次入库日，8 位数字前缀，保证目录按时间排序）；
+- `YYYY-MM-DD`：评审归档日期（文件首次入库日，ISO 8601 日期前缀，保证目录按时间排序；与全仓文档命名规范一致，见 `docs/README.md`）；
 - 类型使用小写 kebab-case 英文关键词，例如：
   - `pr-review-*`：Pull Request / 变更全量评审
   - `audit-*`：深度审计（架构 / 性能 / 安全等）
   - `readiness-*`：生产就绪度评审
-- 示例：`20260905-pr-review-multi-tool-agent.md`、`20260905-code-depth-audit.md`、`20260906-readiness-final-signoff.md`
+- 示例：`2026-09-05-pr-review-multi-tool-agent.md`、`2026-09-05-code-depth-audit.md`、`2026-09-06-readiness-final-signoff.md`
 
 ## 标题统一格式
 
@@ -54,17 +54,23 @@ yyyymmdd-<类型>-<主题关键词>.md
 
 | 文件 | 评审报告 | 日期 |
 | --- | --- | --- |
-| [20260905-pr-review-multi-tool-agent.md](20260905-pr-review-multi-tool-agent.md) | PR 评审：多工具编排升级 | 2026-09 |
-| [20260905-code-depth-audit.md](20260905-code-depth-audit.md) | 深度审计：代码深度与生产健壮性 | 2026-09 |
-| [20260905-production-readiness-audit.md](20260905-production-readiness-audit.md) | 就绪度评审：生产就绪度 | 2026-09 |
-| [20260906-audit-chatbi-domain-specificity.md](20260906-audit-chatbi-domain-specificity.md) | 深度审计：ChatBI 领域专业性与问数能力穿透 | 2026-09 |
-| [20260906-repair-chatbi-domain-specificity.md](20260906-repair-chatbi-domain-specificity.md) | 缺陷修复：ChatBI 领域专业性整改闭环 | 2026-09 |
-| [20260906-audit-authentication-error-null-root.md](20260906-audit-authentication-error-null-root.md) | 深度审计：AuthenticationError 空根遗留风险项核实 | 2026-09 |
-| [20260906-readiness-final-signoff.md](20260906-readiness-final-signoff.md) | 就绪度评审：终态生产就绪度综合审计与防退化验收 | 2026-09 |
-| [20260909-changelog-enterprise-data-agent.md](20260909-changelog-enterprise-data-agent.md) | 升级变更记录：企业级 Data Agent 重型升级 | 2026-09 |
-| [20260910-benchmark-judge-data-agent-e2e.md](20260910-benchmark-judge-data-agent-e2e.md) | 质量验收：Data Agent 全链路基准裁决（六维度 69 分 FAIL） | 2026-09 |
-| [20261002-audit-clarify-pending-hijack.md](20261002-audit-clarify-pending-hijack.md) | 深度审计：clarify 挂起对新问题的误路由隐患（待审核） | 2026-10 |
-| [20261003-pr-review-capability-boundary-m1-m5.md](20261003-pr-review-capability-boundary-m1-m5.md) | PR 评审：十九期能力边界扩展 M1-M5 | 2026-10 |
-| [20261003-security-review-capability-boundary-m1-m6.md](20261003-security-review-capability-boundary-m1-m6.md) | 安全评审：十九期能力边界扩展 M1-M6 | 2026-10 |
-| [20261024-repair-ci-duckdb2-scan-cap-bypass.md](20261024-repair-ci-duckdb2-scan-cap-bypass.md) | 缺陷修复：CI 扫描行熔断被 DuckDB 2.0 计划渲染变更打穿 | 2026-10 |
-| [20261024-repair-win32-sqlite-create-race.md](20261024-repair-win32-sqlite-create-race.md) | 缺陷修复：Windows 并发首次创建文件竞争导致本地测试稳定失败 | 2026-10 |
+| [2026-09-05-pr-review-multi-tool-agent.md](2026-09-05-pr-review-multi-tool-agent.md) | PR 评审：多工具编排升级 | 2026-09 |
+| [2026-09-05-code-depth-audit.md](2026-09-05-code-depth-audit.md) | 深度审计：代码深度与生产健壮性 | 2026-09 |
+| [2026-09-05-production-readiness-audit.md](2026-09-05-production-readiness-audit.md) | 就绪度评审：生产就绪度 | 2026-09 |
+| [2026-09-06-audit-chatbi-domain-specificity.md](2026-09-06-audit-chatbi-domain-specificity.md) | 深度审计：ChatBI 领域专业性与问数能力穿透 | 2026-09 |
+| [2026-09-06-repair-chatbi-domain-specificity.md](2026-09-06-repair-chatbi-domain-specificity.md) | 缺陷修复：ChatBI 领域专业性整改闭环 | 2026-09 |
+| [2026-09-06-audit-authentication-error-null-root.md](2026-09-06-audit-authentication-error-null-root.md) | 深度审计：AuthenticationError 空根遗留风险项核实 | 2026-09 |
+| [2026-09-06-readiness-final-signoff.md](2026-09-06-readiness-final-signoff.md) | 就绪度评审：终态生产就绪度综合审计与防退化验收 | 2026-09 |
+| [2026-09-09-changelog-enterprise-data-agent.md](2026-09-09-changelog-enterprise-data-agent.md) | 升级变更记录：企业级 Data Agent 重型升级 | 2026-09 |
+| [2026-09-10-benchmark-judge-data-agent-e2e.md](2026-09-10-benchmark-judge-data-agent-e2e.md) | 质量验收：Data Agent 全链路基准裁决（六维度 69 分 FAIL） | 2026-09 |
+| [2026-09-11-audit-pi-agent-harness-gap-analysis.md](2026-09-11-audit-pi-agent-harness-gap-analysis.md) | 架构审计：pi-agent-harness 对齐差距分析 | 2026-09 |
+| [2026-09-26-audit-orchestration-concurrency.md](2026-09-26-audit-orchestration-concurrency.md) | 审计：编排层并发安全前置审计 | 2026-09 |
+| [2026-09-26-readiness-harness-migration-parity.md](2026-09-26-readiness-harness-migration-parity.md) | 生产就绪度：十七期底座迁移双跑对比 | 2026-09 |
+| [2026-10-02-audit-clarify-pending-hijack.md](2026-10-02-audit-clarify-pending-hijack.md) | 深度审计：clarify 挂起对新问题的误路由隐患（待审核） | 2026-10 |
+| [2026-10-03-pr-review-capability-boundary-m1-m5.md](2026-10-03-pr-review-capability-boundary-m1-m5.md) | PR 评审：十九期能力边界扩展 M1-M5 | 2026-10 |
+| [2026-10-03-security-review-capability-boundary-m1-m6.md](2026-10-03-security-review-capability-boundary-m1-m6.md) | 安全评审：十九期能力边界扩展 M1-M6 | 2026-10 |
+| [2026-10-04-pr-review-capability-boundary-m1-m7.md](2026-10-04-pr-review-capability-boundary-m1-m7.md) | 全项代码评审：十九期能力边界扩展 M1-M7 | 2026-10 |
+| [2026-10-05-test-suite-dedup-cleanup.md](2026-10-05-test-suite-dedup-cleanup.md) | 测试套件清理：冗余单测合并与无效测试修复 | 2026-10 |
+| [2026-10-07-plan-review-semantic-decoupling.md](2026-10-07-plan-review-semantic-decoupling.md) | 方案评审：语义层去耦与评测分层三期规格 | 2026-10 |
+| [2026-10-24-repair-ci-duckdb2-scan-cap-bypass.md](2026-10-24-repair-ci-duckdb2-scan-cap-bypass.md) | 缺陷修复：CI 扫描行熔断被 DuckDB 2.0 计划渲染变更打穿 | 2026-10 |
+| [2026-10-24-repair-win32-sqlite-create-race.md](2026-10-24-repair-win32-sqlite-create-race.md) | 缺陷修复：Windows 并发首次创建文件竞争导致本地测试稳定失败 | 2026-10 |

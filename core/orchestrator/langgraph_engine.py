@@ -1,9 +1,9 @@
 """LangGraph 引擎适配层：六节点语义原样平移，节点/路由函数零改动复用。
 
-设计纪律（设计文档 §3.2/§4.2，docs/plans/2026-09-26-agent-harness-evolution-m0-m4.md Task 4）：
+设计纪律（设计文档 §3.2/§4.2，docs/plans/2026-09-26-agent-harness-evolution-m0-m4-plan.md Task 4）：
 - 事件总线不动：节点内仍用 events.emit_event（contextvar 观察者）；
   观察者经 config["configurable"]["observer"] 显式传入执行线程——contextvar
-  不跨线程传播，这是 M0 前置审计（docs/reviews/20260926-audit-orchestration-concurrency.md）
+  不跨线程传播，这是 M0 前置审计（docs/reviews/2026-09-26-audit-orchestration-concurrency.md）
   确认的必须项，不是防御性冗余；
 - 中断泛化：clarify 与后续 plan_review 共用 interrupt() 原语，中断一律放
   独立轻量 gate 节点——LangGraph resume 会从头重执行 gate 所在节点，

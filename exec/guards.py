@@ -131,6 +131,10 @@ _FORBIDDEN_FUNCTION_RE = re.compile(
 # DuckDB 字符串字面量表引用（FROM '<path>'）：等价直接读取本地文件，拒绝。
 _FROM_STRING_TABLE_RE = re.compile(r"""\bFROM\s*['"]""", re.IGNORECASE)
 
+# 合法标识符名（AST 层区分 quoted 合法表名与字符串字面量表引用的判据，二十五期：
+# sqlglot 二者同构，名字含路径特征字符即字面量来源）
+_SAFE_IDENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # --------------------------------------------------------------------------- #
 # 方言增量黑名单（二十一期 spec D11）：通用黑名单之外按引擎追加
 # --------------------------------------------------------------------------- #
@@ -197,6 +201,34 @@ _DIALECT_EXTRA_KEYWORDS: dict[str, frozenset[str]] = {
             "OUTFILE",
         }
     ),
+    # HiveQL 语句族（二十五期 spec D4）：DFS 任意 Hadoop 文件系统命令（Hive
+    # 侧最危险面）；MSCK 分区元数据修复；TRUNCATE 清表；USE 切库越局面；
+    # SHOW/DESCRIBE 元数据枚举（管道内元数据走 adapter 专路，spec D11）；
+    # LOCK/UNLOCK 表锁；GRANT/REVOKE 权限变更；ANALYZE 统计收集（写
+    # metastore）；ARCHIVE/UNARCHIVE 分区归档；KILL 杀会话；ABORT 事务族；
+    # MERGE INTO 写表（Hive 4 ACID）。CREATE/DROP/ALTER/LOAD/SET/RESET/
+    # INSERT 等已由通用黑名单覆盖不重复；Hive 无会话级只读（spec D4），
+    # 黑名单为账号防线外的全部语句层防线
+    "hive": frozenset(
+        {
+            "DFS",
+            "MSCK",
+            "TRUNCATE",
+            "USE",
+            "SHOW",
+            "DESCRIBE",
+            "LOCK",
+            "UNLOCK",
+            "GRANT",
+            "REVOKE",
+            "ANALYZE",
+            "ARCHIVE",
+            "UNARCHIVE",
+            "KILL",
+            "ABORT",
+            "MERGE",
+        }
+    ),
 }
 # MySQL 函数族：load_file 读服务器文件 / sleep、benchmark DoS / 锁滥用族
 _DIALECT_EXTRA_FUNC_RE: dict[str, re.Pattern[str]] = {
@@ -236,6 +268,13 @@ _DIALECT_EXTRA_FUNC_RE: dict[str, re.Pattern[str]] = {
         r"|input|generateRandom"
         r"|sleep|sleepEachRow"
         r")\s*\(",
+        re.IGNORECASE,
+    ),
+    # Hive 函数族（二十五期 spec D4）：reflect/reflect2/java_method 反射任意
+    # Java 类（Hive 侧最危险函数族，RCE 面）；system:<udf> 注册形态（任意 jar
+    # 类调用入口）；sleep DoS 防御（UDF 可注册面）
+    "hive": re.compile(
+        r"\b(?:reflect|reflect2|java_method|sleep)\s*\(" r"|\bsystem:[a-zA-Z0-9_.]+\s*\(",
         re.IGNORECASE,
     ),
 }
@@ -340,7 +379,15 @@ def _assert_read_only_structure(sql: str, dialect: str = "duckdb") -> None:
         elif isinstance(node, exp.Table):
             this = node.this
             if isinstance(this, exp.Identifier) and this.quoted:
-                raise UnsafeSqlError(f"拒绝字符串/引号字面量表引用: {node.sql()}")
+                # sqlglot 把 `FROM '<path>'` 与合法 quoted 标识符归一为同构 AST
+                # （quoted Identifier），唯一区分是名字的标识符合法性——路径类
+                # 字面量必含 / . 等非法字符。duckdb 产物从不产生 quoted 表名
+                # （quoted 即字面量来源，保持原严格语义零弱化）；Hive 反引号是
+                # 唯一合法表名形态（裸标识符禁下划线开头，二十五期），其余方言
+                # 产物表名同样裸名——quoted 合法标识符名放行仅命中 Hive 编译
+                # 产物（内部 CTE 名），catalog 白名单表名无注入面
+                if dialect == "duckdb" or not _SAFE_IDENT_NAME_RE.match(this.name):
+                    raise UnsafeSqlError(f"拒绝字符串/引号字面量表引用: {node.sql()}")
 
 
 def assert_read_only_sql(sql: str, dialect: str | None = None) -> None:

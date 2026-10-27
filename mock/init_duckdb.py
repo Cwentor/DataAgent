@@ -12,7 +12,7 @@
 - 固定随机种子 42 与锚点 AS_OF_DATE=2024-06-30，保证数据可复现。
 
 生成器实现见 mock/gmall/ 包，反向解析规格见
-docs/plans/2026-10-06-gmall-mock-reverse-spec.md。
+docs/designs/2026-10-06-gmall-mock-reverse-design.md。
 """
 
 from __future__ import annotations

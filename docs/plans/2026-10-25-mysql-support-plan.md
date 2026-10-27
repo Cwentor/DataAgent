@@ -1,8 +1,8 @@
 # MySQL 支持实施计划（二十一期）
 
 > 本计划交 dev-executing-plans 逐任务执行；步骤用 `- [ ]` 勾选跟踪。
-> 设计依据：`docs/plans/2026-10-25-mysql-support-spec.md`（下称 spec），
-> 执行者需同时读两者。任务状态汇总见 `2026-10-25-mysql-support-tasks.md`。
+> 设计依据：`docs/designs/2026-10-25-mysql-support-design.md`（下称 spec），
+> 执行者需同时读两者。任务状态汇总见 `../tasks/2026-10-25-mysql-support-tasks.md`。
 
 **Goal:** 新增 MySQL 8.0 作为可选查询执行后端（`DB_BACKEND=duckdb|mysql`），治理管道全量等价生效。
 
@@ -10,7 +10,7 @@
 
 **Tech Stack:** PyMySQL >= 1.1.1（MIT，纯 Python）；sqlglot（既有，mysql 方言内置）。
 
-**Spec:** `docs/plans/2026-10-25-mysql-support-spec.md`
+**Spec:** `docs/designs/2026-10-25-mysql-support-design.md`
 
 ## Global Constraints
 

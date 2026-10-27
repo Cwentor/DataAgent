@@ -40,6 +40,7 @@ _RENDERER_FACTORIES: dict[str, Callable[[], Any]] = {
     "mysql": _lazy_factory("compiler.dialect.mysql", "MySqlRenderer"),
     "postgres": _lazy_factory("compiler.dialect.postgres", "PostgresRenderer"),
     "clickhouse": _lazy_factory("compiler.dialect.clickhouse", "ClickHouseRenderer"),
+    "hive": _lazy_factory("compiler.dialect.hive", "HiveRenderer"),
 }
 
 

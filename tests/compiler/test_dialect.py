@@ -557,3 +557,163 @@ def test_three_existing_renderers_unchanged_byte_wise():
             assert fn(get_renderer()) == expected, name
     finally:
         settings.SQL_DIALECT = old
+
+
+# --------------------------------------------------------------------------- #
+# Hive 方言渲染器（二十五期 spec D6/D7，口径均经 apache/hive:4.0.0 容器实测）
+# --------------------------------------------------------------------------- #
+class TestHiveRenderer:
+    """Hive 方言十原语 + posexplode spine 边界。"""
+
+    def _r(self):
+        from compiler.dialect.hive import HiveRenderer
+
+        return HiveRenderer()
+
+    def test_quote_ident_escapes_backtick(self):
+        assert self._r().quote_ident("a`b") == "`a``b`"
+
+    def test_quote_column(self):
+        assert self._r().quote_column("t", "col") == "`t`.`col`"
+
+    def test_timestamp_literal_cast(self):
+        # Hive 无 toDateTime 简写：CAST('...' AS TIMESTAMP)（spec D6）
+        assert (
+            self._r().timestamp_literal("2025-06-01 00:00:00")
+            == "CAST('2025-06-01 00:00:00' AS TIMESTAMP)"
+        )
+
+    def test_date_trunc_equivalents_all_granularities(self):
+        # Hive 无 date_trunc 函数（spec §0 M1 实测）：四档等价式
+        r = self._r()
+        assert r.date_trunc("day", "d") == "to_date(d)"
+        assert r.date_trunc("week", "d") == ("date_sub(d, pmod(datediff(d, '1970-01-05'), 7))")
+        assert r.date_trunc("month", "d") == "trunc(d, 'MM')"
+        assert r.date_trunc("quarter", "d") == "trunc(d, 'Q')"
+
+    def test_date_trunc_unknown_granularity_rejected(self):
+        import pytest
+
+        from compiler.errors import CompileError
+
+        with pytest.raises(CompileError):
+            self._r().date_trunc("hour", "d")
+
+    def test_date_add_day_native_month_year_via_add_months(self):
+        # DAY 原生 date_add；MONTH/YEAR 走 add_months 月历算术（spec D6）
+        r = self._r()
+        assert r.date_add("d", "INTERVAL 1 DAY") == "date_add(d, 1)"
+        assert r.date_add("d", "INTERVAL 3 MONTH") == "add_months(d, 3)"
+        assert r.date_add("d", "INTERVAL 1 YEAR") == "add_months(d, 12)"
+
+    def test_date_add_unknown_interval_form_rejected(self):
+        import pytest
+
+        from compiler.errors import CompileError
+
+        with pytest.raises(CompileError):
+            self._r().date_add("d", "INTERVAL 1 HOUR")
+
+    def test_having_metric_ref_uses_alias(self):
+        # HAVING 别名实测可用（spec §0 M7，同 MySQL/CH 路线）
+        assert self._r().having_metric_ref("gmv", "sum(x)") == "`gmv`"
+
+    def test_spine_day_1826_buckets(self):
+        sql = self._r().spine_cte_sql(
+            "ts", "2021-01-01 00:00:00", "2025-12-31 00:00:00", "INTERVAL 1 DAY"
+        )
+        assert sql == (
+            "SELECT date_add('2021-01-01', idx * 1) AS `ts` "
+            "FROM (SELECT 1) one "
+            "LATERAL VIEW posexplode(split(space(1825), ' ')) seq AS idx, val"
+        )
+
+    def test_spine_week_step_normalized_to_7_days(self):
+        # 2021-01-04 ~ 2021-02-01 = 28 天差 / 7 + 1 = 5 桶（space(N-1)=space(4)）
+        sql = self._r().spine_cte_sql(
+            "ts", "2021-01-04 00:00:00", "2021-02-01 00:00:00", "INTERVAL 1 WEEK"
+        )
+        assert "date_add('2021-01-04', idx * 7)" in sql and "space(4)" in sql
+
+    def test_spine_quarter_3month_buckets(self):
+        sql = self._r().spine_cte_sql(
+            "ts", "2021-01-01 00:00:00", "2021-10-01 00:00:00", "INTERVAL 3 MONTH"
+        )
+        assert "add_months('2021-01-01', idx * 3)" in sql and "space(3)" in sql
+
+    def test_spine_month_end_boundary(self):
+        # 月历算术边界与 CH 同源（_bucket_count 复用）：2021-01-31 起步长 1 月
+        # 至 2021-03-01 → 2 桶
+        sql = self._r().spine_cte_sql(
+            "ts", "2021-01-31 00:00:00", "2021-03-01 00:00:00", "INTERVAL 1 MONTH"
+        )
+        assert "space(1)" in sql
+
+    def test_spine_unknown_interval_form_rejected(self):
+        import pytest
+
+        from compiler.errors import CompileError
+
+        with pytest.raises(CompileError):
+            self._r().spine_cte_sql(
+                "ts", "2021-01-01 00:00:00", "2021-02-01 00:00:00", "INTERVAL 1 HOUR"
+            )
+
+    def test_spine_negative_window_rejected(self):
+        import pytest
+
+        from compiler.errors import CompileError
+
+        with pytest.raises(CompileError):
+            self._r().spine_cte_sql(
+                "ts", "2021-02-01 00:00:00", "2021-01-01 00:00:00", "INTERVAL 1 DAY"
+            )
+
+    def test_with_keyword_non_recursive(self):
+        assert self._r().with_keyword() == "WITH"
+
+    def test_escape_string_literal_backslash_family(self):
+        # 反斜杠转义系（Hive 默认，无会话 pin；spec D6）
+        assert self._r().escape_string_literal("a'b\\c") == "'a\\'b\\\\c'"
+
+    def test_internal_aliases_backticked(self):
+        # Hive 裸标识符禁下划线开头（__spine 实测 ParseException，spec §0 M3）：
+        # 内部别名统一反引号包裹（__rn 为 TopN ROW_NUMBER 别名，golden parity 实锤）
+        assert self._r().internal_aliases() == {
+            "spine": "`__spine`",
+            "agg": "`__agg`",
+            "ranked": "`__ranked`",
+            "rn": "`__rn`",
+        }
+
+
+def test_hive_registry(monkeypatch):
+    """方言注册表：SQL_DIALECT=hive 返回 HiveRenderer（惰性工厂）。"""
+    import config.settings as settings
+    from compiler.dialect.hive import HiveRenderer
+
+    monkeypatch.setattr(settings, "SQL_DIALECT", "hive")
+    assert isinstance(get_renderer(), HiveRenderer)
+
+
+def test_compile_hive_fill_gaps_uses_posexplode_and_backticked_cte():
+    """端到端：fill_gaps 在 Hive 方言下产 posexplode spine + 反引号 CTE 名。
+
+    Hive 裸标识符禁下划线开头（spec §0 M3 实测），编译器内部别名经
+    internal_aliases 覆盖点反引号化；其余方言保持裸名（见
+    test_three_existing_renderers_unchanged_byte_wise 与既有 fill_gaps 快照）。
+    """
+    import sqlglot
+
+    sql = _compile_dsl(_fill_gaps_dsl(), "hive")
+    assert "LATERAL VIEW posexplode(split(space(" in sql
+    assert "`__spine` AS (" in sql and "`__agg` AS (" in sql
+    assert "FROM `__spine` s\nLEFT JOIN `__agg` a" in sql
+    assert sqlglot.parse_one(sql, read="hive") is not None
+
+
+def test_compile_dialects_anchored_fill_gaps_cte_names_unchanged():
+    """golden 红线：既有方言 fill_gaps 的 CTE 名保持裸 dunder（internal_alias 缺省路径）。"""
+    for dialect in ("duckdb", "mysql", "postgres", "clickhouse"):
+        sql = _compile_dsl(_fill_gaps_dsl(), dialect)
+        assert "__spine AS (" in sql and "__agg AS (" in sql, dialect
