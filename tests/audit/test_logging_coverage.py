@@ -65,6 +65,11 @@ def test_scan_cap_logs_warning_when_plan_unmeasurable(big_conn, caplog, monkeypa
     回归背景（CI 2026-10-22，duckdb 2.0.0）：EXPLAIN ANALYZE 只渲染 Summary 块时
     parse_scan_rows 退化为 0，熔断静默失效。此处桩掉解析结果，断言护栏
     在"测不到"时仍有可采集的 warning，而非无声放行。
+
+    两段式（二十六期）后本用例**仍然有效**，且仍然有意义：`max_scan_rows=100`
+    远小于 `est × SCAN_PRECHECK_SAFETY_FACTOR`（20 万 × 32），第一段不会放行，
+    走的正是被桩掉的第二段。⚠️ 若将来把该阈值调大到能命中估算放行，本用例会
+    失去覆盖——届时要么显式 `SCAN_PRECHECK_TWO_STAGE=0`，要么把桩点挪到第一段。
     """
     import exec.engine.duckdb_adapter as duckdb_adapter
     from exec.guards import reset_unmeasurable_warnings
@@ -88,6 +93,11 @@ def test_scan_cap_unmeasurable_warns_once_per_backend(big_conn, caplog, monkeypa
 
     回归背景（2026-10-27 审计 P1）：ClickHouse / Hive 恒不可计量，原实现每条查询
     都刷一条 warning，长期掩盖真正异常。首次保留 WARNING，后续降为 DEBUG。
+
+    两段式后「不可计量」告警**只允许由第二段触发**（第一段拿不到可信估算是常态
+    分支，不许消耗去重额度）；本用例两条 SQL 的估算都不足以放行，故仍走第二段，
+    断言不变。去重额度不被第一段污染的专门用例见
+    `tests/exec/test_scan_precheck.py::test_first_stage_failure_does_not_consume_warning_quota`。
     """
     import exec.engine.duckdb_adapter as duckdb_adapter
     from exec.guards import reset_unmeasurable_warnings
