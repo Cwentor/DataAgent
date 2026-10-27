@@ -111,3 +111,17 @@ def default_pool() -> ReadOnlyConnectionPool:
 
                 _default_pool = ReadOnlyConnectionPool(get_adapter(), settings.DB_POOL_SIZE)
     return _default_pool
+
+
+def reset_default_pool() -> None:
+    """关闭并清空进程内默认连接池（后端切换 / 多后端体检脚本用）。
+
+    池按 DB_BACKEND 惰性绑定 adapter，后端切换后必须重建——否则仍持有上一
+    后端的连接（例如体检脚本在同一进程内串行跑 duckdb → mysql → hive）。
+    幂等：池不存在时为空操作。
+    """
+    global _default_pool
+    with _pool_lock:
+        if _default_pool is not None:
+            _default_pool.close()
+            _default_pool = None
