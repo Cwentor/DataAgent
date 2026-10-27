@@ -6,7 +6,13 @@ pydantic>=2.6
 # 无上界的 pip 解析自动升级。
 duckdb>=1.5.6,<2.0
 python-dotenv>=1.0
-sqlglot>=25.0
+# sqlglot 主版本上界锁定（2026-10-27 审计 P1）：本包是 compiler/ 方言转译的核心，
+# 所有后端渲染都经它的 AST 与 generator。大版本会改 AST 结构与生成行为，产出
+# 「语法合法但语义错误」的方言 SQL，而单测断言的是当前版本的输出、捕不到这类
+# 漂移——与 duckdb 2.0 折叠执行计划（见下方 duckdb 注释）同属「静默失准」风险。
+# 升级须走独立 PR：先跑全量 pytest + 四个后端 parity（tests/test_*_backend_parity.py），
+# 再人工核对 compiler 各 renderer 的产物 diff。
+sqlglot>=25.0,<31
 # MySQL 执行后端（二十一期）：纯 Python 驱动，MIT 许可；支持区间 mysql 8.0
 # （>= 8.0.18，spec §8.1 版本演进跟随策略——升级前须跑全量回归与双后端一致性测试）
 pymysql>=1.1.1,<2

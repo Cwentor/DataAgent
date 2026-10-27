@@ -500,6 +500,46 @@ def cache_scan_rows(sql: str, scan_rows: int, cache: dict[str, int] | None = Non
 
 
 # --------------------------------------------------------------------------- #
+# 「不可计量」告警去重（2026-10-27 审计 P1）
+# --------------------------------------------------------------------------- #
+# 可计量性对给定引擎是恒定的——ClickHouse / Hive 恒不可计量（无 actual rows 口径），
+# 逐查询重复 WARNING 会把日志淹掉、掩盖真正的异常。首次告警保留完整口径说明，
+# 后续降为 DEBUG。
+_unmeasurable_warned: set[str] = set()
+_unmeasurable_lock = threading.Lock()
+
+
+def reset_unmeasurable_warnings() -> None:
+    """清空告警去重状态（测试用：验证「首次 WARNING、后续 DEBUG」行为）。"""
+    with _unmeasurable_lock:
+        _unmeasurable_warned.clear()
+
+
+def _warn_unmeasurable_once(adapter: EngineAdapter) -> None:
+    """同一后端只 WARNING 一次（后续 DEBUG）：引擎能力恒定，重复告警无信息增量。"""
+    key = str(getattr(adapter, "name", "unknown"))
+    with _unmeasurable_lock:
+        first = key not in _unmeasurable_warned
+        _unmeasurable_warned.add(key)
+    if not first:
+        logger.debug(
+            "扫描行数预检不可计量（本后端已告警过，降级 debug）",
+            extra={"error": f"backend={key}"},
+        )
+        return
+    logger.warning(
+        "扫描行数预检不可计量：执行计划未包含算子行数，本轮跳过扫描行熔断" "（同一后端仅告警一次）",
+        extra={
+            "error": (
+                f"plan 无 'N rows' 渲染，请核验 {key} 版本与计划格式"
+                "（duckdb 侧 requirements.txt 锁定 <2.0；ClickHouse/Hive 的兜底"
+                "见 docs/reviews/2026-10-27-audit-project-issues.md §3.1）"
+            )
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 受控执行入口
 # --------------------------------------------------------------------------- #
 
@@ -568,15 +608,7 @@ def execute_sql(
             else:
                 # 计划不含任何算子行数：护栏本轮不可计量（引擎版本/计划格式变更）。
                 # 不缓存——避免把"测不到"固化成"扫了 0 行"的假事实，也不静默放行。
-                logger.warning(
-                    "扫描行数预检不可计量：执行计划未包含算子行数，本轮跳过扫描行熔断",
-                    extra={
-                        "error": (
-                            f"plan 无 'N rows' 渲染，请核验 {adapter.name} 版本与计划格式"
-                            "（duckdb 侧 requirements.txt 锁定 <2.0）"
-                        )
-                    },
-                )
+                _warn_unmeasurable_once(adapter)
         scan_rows = scanned
         if scanned > max_scan_rows:
             logger.error(
@@ -633,4 +665,5 @@ __all__ = [
     "execute_sql",
     "parse_scan_rows",
     "plan_rows_measurable",
+    "reset_unmeasurable_warnings",
 ]
