@@ -395,6 +395,7 @@ skip 属预期（CI 承担），但 `tests/exec/test_guards_clickhouse.py` /
 > 子集运行的残留子目录，复用会报 `1412 errors` 的伪失败——本文件 Global
 > Constraints 已预警此坑，实测确认）。结果 **1412 passed / 28 skipped**，
 > 跑完两个目录均已删除。用例账目：1385 + 6（解析器）+ 17（判定链）+ 4（adapter）。
+> 后续 PR CI 首轮抓出 PG 取消缺陷、补 2 条 cancel 单测后为 **1414 passed / 28 skipped**。
 
 - [x] **Step 4: 文档收口**
 
