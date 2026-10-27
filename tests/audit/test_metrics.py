@@ -77,3 +77,16 @@ def test_clarify_trigger_counts():
         clarify_filled=True,
     )
     assert reg.snapshot()["clarify_triggers"] == 1
+
+
+def test_audit_write_failure_counter_visible_in_snapshot():
+    """审计落库失败必须可观测（2026-10-27 审计 P2）。
+
+    审计失败被设计为「不影响主链路」，代价是静默丢数据——畸形列 bug 曾因此
+    潜伏数周（JSONL 有、库无）。计数进 /api/metrics 才能被运维告警发现。
+    """
+    reg = MetricsRegistry()
+    assert reg.snapshot()["audit_write_failures"] == 0
+    assert reg.record_audit_write_failure() == 1
+    assert reg.record_audit_write_failure() == 2
+    assert reg.snapshot()["audit_write_failures"] == 2

@@ -56,3 +56,28 @@ def test_agent_run_audit_failure_does_not_break_main(client, monkeypatch):
 
     resp = client.post("/api/agent/run", json={"query": "列举全部省份"})
     assert resp.status_code == 200
+
+
+def test_agent_run_audit_failure_increments_metric(client, monkeypatch):
+    """审计落库失败必须计数（2026-10-27 审计 P2）。
+
+    失败不阻断主链路是刻意的，但没有任何可观测信号就会让「审计静默丢库」长期
+    潜伏——畸形列 bug 就是这样存活数周的。计数经 /api/metrics 暴露。
+    """
+    from audit.metrics import default_registry
+    from audit.store import AuditStore
+    from config import settings
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+
+    def _boom(self, record):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(AuditStore, "write", _boom)
+    monkeypatch.setattr("web.api._default_audit_store", lambda: AuditStore())
+
+    reg = default_registry()
+    before = reg.snapshot()["audit_write_failures"]
+    resp = client.post("/api/agent/run", json={"query": "列举全部省份"})
+    assert resp.status_code == 200
+    assert reg.snapshot()["audit_write_failures"] == before + 1

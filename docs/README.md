@@ -61,6 +61,7 @@
 | 二十五期 | Hive 执行后端（PyHive HTTP transport） | [design](designs/2026-10-27-hive-backend-design.md) | [plan](plans/2026-10-27-hive-backend-plan.md) | [tasks](tasks/2026-10-27-hive-backend-tasks.md) |
 | 选型复盘 | 全期技术栈选型对比矩阵（一至二十二期集中补记；二十三期起各期 design §4 自带） | [analysis](designs/2026-10-26-tech-stack-selection-retrospective-analysis.md) | — | — |
 | 穿插审计 | 五后端本地 Docker 实测（连通性/实用性/调度链路稳定性） | — | — | 报告见 [reviews](reviews/2026-10-27-audit-five-backend-docker-matrix.md) |
+| 穿插审计 | 全项目问题诊断（P0 超时脏连接 / P1 熔断与依赖缺口 / P2 技术债） | — | — | 报告见 [reviews](reviews/2026-10-27-audit-project-issues.md) |
 
 > 评审归档清单见 [reviews/README.md](reviews/README.md)。
 > 运行期产物（`logs/`、根目录 `analytics_sandbox.duckdb`）不入 docs 分类体系。
