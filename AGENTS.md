@@ -103,6 +103,13 @@ python -m pytest tests/test_pg_backend_parity.py -q
 # 双后端一致性回归（需 CLICKHOUSE_TEST_* 指向已 init_clickhouse 的测试库，未配置自动跳过）
 python -m pytest tests/test_clickhouse_backend_parity.py -q
 
+# 五后端本地实测矩阵（Docker 起 mysql/postgres/clickhouse/hive 四容器，
+# 跑连通性 / 实用性 / 调度链路稳定性三档体检；端口偏移 3307/5433/8124/10001，
+# 说明见 docker/README.md，实测结论见
+# docs/reviews/2026-10-27-audit-five-backend-docker-matrix.md）
+docker compose -f docker/docker-compose.backends.yml up -d
+python scripts/backend_matrix.py
+
 # 启动 Web 可视化 UI（默认 8000）
 python -m web.server 8000
 ```

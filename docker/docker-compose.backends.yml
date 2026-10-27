@@ -1,0 +1,115 @@
+# 五后端本地实测编排（MySQL / PostgreSQL / ClickHouse / Hive）
+#
+# 用途：在单机 Docker 上一次性拉起四个外部数据源容器，供
+#   python -m mock.init_<backend>   建仓
+#   python scripts/backend_matrix.py  连通性 / 实用性 / 调度链路稳定性体检
+# 使用。DuckDB 是进程内文件库，不需要容器，体检脚本以它作为一致性基线。
+#
+# 设计约束（与 .github/workflows/ci.yml 的服务级门禁同源，勿各自演化）：
+# - ClickHouse 的 readonly profile、Hive 的 hive-site.xml 直接复用 .github/ 下的
+#   文件——CI 与本地是同一份配置，避免两处漂移；
+# - **端口一律偏移**（3307/5433/8124/10001），不占用各引擎默认端口，避免与开发者
+#   本机既有服务冲突（实测本机 10000 已被百度网盘 YunDetectService 占用）；
+#   体检脚本用同一套默认值注入环境变量，无需改 .env；
+# - Hive 单容器 + 内嵌 Derby（apache/hive 官方镜像），HTTP transport 是跨平台
+#   唯一通道（PyHive 的 SASL 二进制传输在 Windows 无可用 wheel，spec D2）；
+# - staging 卷双向映射：LOAD DATA LOCAL INPATH 的 LOCAL 是 hiveserver2 进程视角
+#   的本地路径，宿主机 build/hive_staging 与容器 /opt/dataagent_staging 必须是
+#   同一份内容（spec D10）。
+#
+# 起停：
+#   docker compose -f docker/docker-compose.backends.yml up -d
+#   docker compose -f docker/docker-compose.backends.yml down -v
+#
+# 账号口径（仅本地/CI 演示，禁止复用到生产）：建仓账号具备写权限，运行时账号
+# dataagent_ro 仅 SELECT——两账号分离由体检脚本在建仓后创建。
+
+name: dataagent-backends
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: dataagent-mysql
+    command:
+      # utf8mb4 与运行时口径一致；本地开发放宽密码策略以免只读账号被拒
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: gmall
+      TZ: UTC
+    ports:
+      - "${MYSQL_HOST_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  postgres:
+    image: postgres:16
+    container_name: dataagent-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: gmall
+      TZ: UTC
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gmall"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: dataagent-clickhouse
+    environment:
+      # 显式给出 default 账号密码：官方 entrypoint 在两者都为空时会禁用网络访问
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ch_local_pwd
+      # 只读账号要用 SQL 建（users_xml 存储对 GRANT 只读），故必须开启访问管理
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      TZ: UTC
+    ports:
+      - "${CLICKHOUSE_HOST_PORT:-8124}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9001}:9000"
+    volumes:
+      # 单文件挂载而非整目录 :ro——entrypoint 启动时要往 users.d 写
+      # default-user.xml，整目录只读会触发 "Read-only file system"
+      - ../.github/clickhouse/users.d/dataagent_ro.xml:/etc/clickhouse-server/users.d/dataagent_ro.xml:ro
+      # 建库 + 只读账号：initdb.d 的 .sql 在 server 就绪后执行，此时 profile 已加载
+      - ./clickhouse/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "default", "--password", "ch_local_pwd", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  hive:
+    image: apache/hive:4.0.0
+    container_name: dataagent-hive
+    environment:
+      SERVICE_NAME: hiveserver2
+      TZ: UTC
+    ports:
+      - "${HIVE_HOST_PORT:-10001}:10000"
+    volumes:
+      # 单文件挂载是整体替换：文件必须含镜像默认的全部配置（warehouse.dir /
+      # tez local 模式等），只写 transport 四项会把 warehouse 打回 /user/hive
+      - ../.github/hive/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
+      # staging 双向映射（LOAD DATA LOCAL INPATH 的服务端视角）
+      - ../build/hive_staging:/opt/dataagent_staging
+    # 启动约 60-120s（内嵌 Derby + Tez local 初始化），健康检查只探端口，
+    # 真正可用性由体检脚本的 beeline/PyHive 探活承担
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/10000' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
