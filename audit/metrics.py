@@ -40,6 +40,9 @@ class MetricsRegistry:
         # Multi-Tool Agent：工具调用次数与失败次数
         self._tools_called = 0
         self._tool_errors = 0
+        # 审计落库失败次数（2026-10-27 审计 P2）：审计写失败被刻意设计为
+        # 「不影响主链路」，代价是静默丢审计——必须有可观测计数兜住。
+        self._audit_write_failures = 0
         self._latencies: deque[float] = deque(maxlen=latency_window)
 
     # ------------------------------------------------------------------ #
@@ -103,6 +106,16 @@ class MetricsRegistry:
             if not success:
                 self._tool_errors += 1
 
+    def record_audit_write_failure(self) -> int:
+        """登记一次审计落库失败，返回累计次数（供调用方做阈值告警）。
+
+        审计写入失败不阻断主链路是刻意设计，但"静默"会让缺陷长期潜伏——
+        2026-10-27 审计发现的畸形列 bug 正是这样存活了数周（只有 JSONL 有数据）。
+        """
+        with self._lock:
+            self._audit_write_failures += 1
+            return self._audit_write_failures
+
     # ------------------------------------------------------------------ #
     # 聚合
     # ------------------------------------------------------------------ #
@@ -145,6 +158,9 @@ class MetricsRegistry:
                         else None
                     ),
                 },
+                # 审计落库失败累计：非零即代表审计链路有真实缺陷（JSONL 有、
+                # 库无），运维应据此告警而非等到查历史时才发现缺数据
+                "audit_write_failures": self._audit_write_failures,
                 "latency_ms": {
                     "p50": round(statistics.median(latencies), 3) if latencies else None,
                     "p95": _percentile(latencies, 0.95),

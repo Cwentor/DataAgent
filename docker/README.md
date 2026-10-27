@@ -43,6 +43,20 @@ docker compose -f docker/docker-compose.backends.yml down -v
 
 密码是本地/CI 演示值，禁止复用到生产。生产按各期 spec 的部署要求收窄授权。
 
+## 生产接入前置条件
+
+本地这套编排是**演示口径**，直接搬生产会留下防线空洞。接入前必须补齐：
+
+| 项 | 为什么本地能省、生产不能省 |
+|---|---|
+| **Hive 认证（Kerberos / LDAP 或前置网关）** | 本地单容器 `authentication=NONE`，只读完全靠"没人写"；生产必须把"两账号分离 + 只读"变成可强制的机制。代码层无校验手段（HiveServer2 无会话级只读设置面），这是硬前置 |
+| **Hive 扫描量上限（资源池 / 配额）** | Hive 拿不到扫描行数（`EXPLAIN` 无统计，需 `ANALYZE TABLE`），`explain_scan_rows` 恒返回不可计量。会话超时（`hive.query.timeout.seconds`，由 adapter 的 harden 自动设置）只能限时间，不能限读取量 |
+| **ClickHouse 授权收窄到 `gmall.*`** | 本地 `GRANT SELECT ON *.*`；生产应收窄并走两账号分离 |
+| **审计落库可观测** | 看 `/api/metrics` 的 `audit_write_failures`，非零即代表审计写不进库（只有 JSONL）。这条不是部署项，但接入时最容易漏 |
+
+详细论证与实测数据见
+[2026-10-27 问题诊断审计](../docs/reviews/2026-10-27-audit-project-issues.md)。
+
 ## 配置文件来源
 
 ClickHouse 的只读 profile 与 Hive 的 `hive-site.xml` **直接复用 `.github/` 下的文件**

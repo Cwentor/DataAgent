@@ -40,7 +40,7 @@ from web.server import (
     _bound_session_id,
     _cookie_session_id,
 )
-from web.service import _default_audit_store, run_query
+from web.service import _default_audit_store, run_query, write_audit_safely
 from web.tasks import default_task_manager
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -592,20 +592,18 @@ async def post_agent_run(request: Request) -> Response:
     # 审计写入失败绝不影响主链路（RF4）
     store = _default_audit_store()
     if store is not None:
-        try:
-            store.write(
-                AuditRecord(
-                    request_id=request.headers.get("X-Request-ID") or _uuid.uuid4().hex,
-                    session_id=ctx.session_id or ctx.username,
-                    user=ctx.username,
-                    prompt=query,
-                    detected_intent=result.detected_intent,
-                    answered_by=result.answered_by or None,
-                    planner_llm_error=result.planner_llm_error,
-                )
-            )
-        except Exception:
-            logger.exception("audit_write_failed", extra={"event": "audit_write_failed"})
+        write_audit_safely(
+            store,
+            AuditRecord(
+                request_id=request.headers.get("X-Request-ID") or _uuid.uuid4().hex,
+                session_id=ctx.session_id or ctx.username,
+                user=ctx.username,
+                prompt=query,
+                detected_intent=result.detected_intent,
+                answered_by=result.answered_by or None,
+                planner_llm_error=result.planner_llm_error,
+            ),
+        )
     # default=str：结果行含 DECIMAL 金额，裸 dumps 抛 TypeError
     return Response(
         content=json.dumps(result_dict, ensure_ascii=False, default=str),

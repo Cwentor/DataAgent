@@ -210,6 +210,41 @@ _store_lock = threading.Lock()
 # P0-6 并发闸：全局信号量限制同时执行的查询数（超配额排队等待，配合连接池）
 _query_gate = threading.BoundedSemaphore(settings.MAX_CONCURRENT_QUERIES)
 
+# 审计落库失败告警间隔：首次带完整栈，之后每 N 次汇总一条（避免刷屏又保留趋势）
+_AUDIT_FAILURE_WARN_EVERY = 100
+
+
+def write_audit_safely(store: AuditStore, record: AuditRecord) -> bool:
+    """写审计并吞掉失败（不影响主链路），但留下可观测信号；返回是否成功。
+
+    「审计失败绝不影响主链路」是刻意设计，代价是静默丢审计——畸形列 bug 曾因此
+    潜伏数周（JSONL 有数据、库无数据，无人发现）。故失败必须计数（进
+    /api/metrics）并留日志：首次带完整栈便于定位，之后每 N 次汇总一条避免刷屏。
+
+    抽成公共函数是因为审计写入有两个入口（本模块的 ``run_query`` 与
+    ``web/api.py`` 的 ``/api/agent/run``）——2026-10-27 修复时实测：只改一处时
+    另一处路径的失败完全没有被计数，重复实现会让改进只覆盖一半。
+    """
+    try:
+        store.write(record)
+        return True
+    except Exception:
+        failures = default_registry().record_audit_write_failure()
+        if failures == 1:
+            logger.exception(
+                "audit_write_failed",
+                extra={"event": "audit_write_failed", "error": f"累计 {failures} 次"},
+            )
+        elif failures % _AUDIT_FAILURE_WARN_EVERY == 0:
+            logger.warning(
+                "audit_write_failed",
+                extra={
+                    "event": "audit_write_failed",
+                    "error": f"累计 {failures} 次（审计持续落库失败）",
+                },
+            )
+        return False
+
 
 def _default_audit_store() -> AuditStore | None:
     """进程内复用的默认审计存储（按配置启用，双写 JSONL + DuckDB）。"""
@@ -618,10 +653,7 @@ def run_query(
 
     store = audit_store if audit_store is not None else _default_audit_store()
     if store is not None:
-        try:
-            store.write(record)
-        except Exception:  # 审计失败绝不影响主链路
-            logger.exception("audit_write_failed", extra={"event": "audit_write_failed"})
+        write_audit_safely(store, record)
 
     # 请求级模型切换上下文清理（正常 / 异常路径共用此出口）
     pop_request_model()
