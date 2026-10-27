@@ -20,8 +20,12 @@ import queue
 import threading
 from typing import Any
 
+from audit.logging import get_logger
 from config import settings
+from exec.engine import connstate
 from exec.engine.base import EngineAdapter
+
+logger = get_logger("exec.pool")
 
 
 class ReadOnlyConnectionPool:
@@ -55,11 +59,53 @@ class ReadOnlyConnectionPool:
         return self._queue.get()
 
     def release(self, conn: Any) -> None:
-        """归还连接；池已关闭则直接关闭连接。"""
+        """归还连接；已被标记不可复用（超时/中断）则转废弃，不复用。
+
+        调用方无需感知连接状态：``exec.engine.watchdog`` 在超时分支会给连接打标，
+        此处自动分流。这是刻意选择——5 个归还点（web/service、tools/builtins、
+        retrieval 的 exploration/profiling/tools）逐个改容易漏，而漏掉一处就等于
+        留一条脏连接复用通道。
+        """
+        if connstate.is_unusable(conn):
+            self.discard(conn)
+            return
         if self._closed:
             conn.close()
             return
         self._queue.put(conn)
+
+    def discard(self, conn: Any) -> None:
+        """废弃连接：关闭并回收容量名额，必要时补建一条唤醒排队者。
+
+        超时/中断后的连接上可能仍有活跃查询（外部后端 ``cancel`` 为空操作），
+        归还复用会与残留查询争用同一连接，故直接关闭而非入队。
+
+        容量名额必须回收，否则池会永久少一条可用连接、逐步缩容到 0。回收后若
+        仍有阻塞在 ``acquire`` 的等待者，需要主动补建一条放回队列——否则它们
+        等的是「有人归还」，而这条连接已经不会再归还了，会永久阻塞。
+        """
+        connstate.clear(conn)
+        try:
+            conn.close()
+        except Exception:  # 关闭失败不影响容量回收与补位
+            logger.warning("废弃连接关闭失败（忽略，容量照常回收）", exc_info=True)
+
+        with self._lock:
+            if self._created > 0:
+                self._created -= 1
+            if self._closed or self._created >= self._max:
+                return
+            # 预留名额后再建连（避免并发 acquire 同时越过容量上限）
+            self._created += 1
+
+        try:
+            fresh = self._adapter.connect_readonly()
+        except Exception:
+            with self._lock:
+                self._created -= 1
+            logger.warning("废弃后补建连接失败，容量名额已退回（等待者继续排队）", exc_info=True)
+            return
+        self._queue.put(fresh)
 
     def close(self) -> None:
         """关闭池与全部连接（幂等）。"""
