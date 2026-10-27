@@ -8,9 +8,40 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from exec.errors import SqlExecutionError
+
+
+@dataclass(frozen=True)
+class ScanPrecheck:
+    """一次扫描行预检的结果（估算口径或实测口径，扫描行预检两段式 spec D3/D6）。
+
+    `estimated` 是**必须可分辨**的字段：`scan_rows` 的语义已从"实测"变成
+    "实测或估算"，下游（审计、报表、排障）拿估算值当实测值做趋势对比就会失真。
+    """
+
+    rows: int = 0
+    measurable: bool = False
+    estimated: bool = False
+    operator: str = ""
+
+    @property
+    def usable(self) -> bool:
+        """能否作为「跳过 EXPLAIN ANALYZE」的判据（spec D3）。
+
+        四个条件缺一不可：
+
+        - `estimated`：只有估算口径才谈得上"跳过"（实测分支本身就是结论）；
+        - `measurable`：计划里有可解析的行数行；
+        - `rows >= 1`：`~0 rows` 按不可信处理（统计显示空集时 DuckDB 通常已折叠
+          为 `EMPTY_RESULT`，残留的 0 估算不该被当成"没数据"）；
+        - `operator` 非空：行数必须来自白名单真实扫描算子。`COLUMN_DATA_SCAN`
+          报的 `~1 row` 是"输出 1 行"而不是"扫了 1 行"，当估算用等于给全表
+          `count(*)` 开绿灯。
+        """
+        return self.estimated and self.measurable and self.rows >= 1 and bool(self.operator)
 
 
 def physical_from_rows(rows: Iterable[tuple[Any, ...]]) -> dict[str, dict[str, str]]:
@@ -54,8 +85,20 @@ class EngineAdapter(Protocol):
 
         不可计量（计划格式变更等）返回 (0, False)，由上层 warning 留痕，
         严禁静默当成 0 行放行。
+
+        注意：`EXPLAIN ANALYZE` 会**真的执行一遍查询**，这是"先计量后放行"的成本。
+        能只做规划的引擎可另实现 `explain_scan_estimate`（见下），由上层决定是否
+        用它跳过本次实测。
         """
         ...
+
+    # `explain_scan_estimate` 是**可选**能力，故意不写进本协议的必选集：
+    # 只做规划就能拿到可信估算的引擎才实现它（当前仅 DuckDB），其余后端由调用方
+    # 用 `getattr(adapter, "explain_scan_estimate", None)` 探测为 None 并恒走
+    # `explain_scan_rows`——强迫四个后端写空实现只会制造无意义的噪音。
+    #
+    # 实现方契约：只允许发 `EXPLAIN`（不带 ANALYZE），返回 `ScanPrecheck`；
+    # 拿不到可信估算时返回 `rows=0 / measurable=False`，**不得**猜测。
 
     def engine_error(self, exc: BaseException) -> SqlExecutionError | None:
         """引擎异常归一；非本引擎异常返回 None（调用方原样重抛）。"""
@@ -85,4 +128,4 @@ class EngineAdapter(Protocol):
         ...
 
 
-__all__ = ["EngineAdapter", "physical_from_rows"]
+__all__ = ["EngineAdapter", "ScanPrecheck", "physical_from_rows"]
