@@ -179,3 +179,40 @@ def test_pool_discard_is_idempotent_on_closed_pool(db_path):
     c = pool.acquire()
     pool.close()
     pool.discard(c)  # 不抛即通过
+
+
+def test_timeout_through_pool_discards_connection(db_path):
+    """端到端：execute_sql 超时 -> 打标 -> 归还即废弃（审计 §9.3 的 CI 兜底）。
+
+    真实后端版本在 tests/test_*_parity.py::test_timeout_discards_connection
+    （需容器）；本用例用 DuckDB 把「watchdog 打标 + pool.release 分流」这条链
+    在无容器环境也钉住——否则一旦有人把 release 改回无条件入队，默认 CI 全绿
+    也发现不了。
+    """
+    from exec.errors import QueryTimeoutError
+    from exec.guards import execute_sql
+
+    adapter = DuckDbAdapter(db_path)
+    pool = ReadOnlyConnectionPool(adapter, max_connections=1)
+    try:
+        conn = pool.acquire()
+        with pytest.raises(QueryTimeoutError):
+            execute_sql(
+                conn,
+                "SELECT sum(range) FROM range(20000000000)",
+                statement_timeout_ms=300,
+                adapter=adapter,
+            )
+        assert connstate.is_unusable(conn) is True, "超时后连接未被标记为不可复用"
+
+        pool.release(conn)  # 调用方不感知状态，池自动转废弃
+        assert pool.size == 1, "废弃后容量名额未回收"
+
+        fresh = pool.acquire()
+        try:
+            assert fresh is not conn, "池把超时连接重新发出（P0 回归）"
+            assert connstate.is_unusable(fresh) is False
+        finally:
+            pool.release(fresh)
+    finally:
+        pool.close()

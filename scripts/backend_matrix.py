@@ -537,8 +537,20 @@ def check_usefulness(backend: str) -> CheckResult:
         # adapter，**不能**带 DB_BACKEND——否则测试的 DuckDB 建库 fixture 会
         # 按目标后端的占位符风格灌数（%s 打到 DuckDB → Parser Error）。CI 的
         # 同名 job 也是这个口径。
+        #
+        # --basetemp 必须显式给：默认落在系统临时目录，pytest 每轮清理上一次的
+        # 残留时，文件数超过批量删除保护的阈值（50）就会被拦下，退出码变 1——
+        # 而用例全绿，表现为"L2 假失败"。2026-10-27 实测 ClickHouse 一档即如此
+        # （62 个文件被拦）。落到 logs/ 下既绕开该阈值，也便于失败时留现场。
         proc = _run(
-            [sys.executable, "-m", "pytest", test_file, "-q"],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                test_file,
+                "-q",
+                f"--basetemp={PROJECT_ROOT / 'logs' / f'.pytest_parity_{backend}'}",
+            ],
             env=test_env(backend),
         )
         detail["parity_returncode"] = proc.returncode

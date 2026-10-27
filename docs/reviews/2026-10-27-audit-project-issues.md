@@ -8,7 +8,7 @@
   有效」——即既有机制在数据增长、双写失败、并发压力下会不会自己失效（§九，2 个 P1 已修）
 - **结论**：工程质量基线良好。第一轮的 1 个 P0 + 3 个 P1 已修；第二轮另发现
   **2 个 P1**（扫描行缓存过时致熔断失效、审计双写不一致且无恢复手段）与 6 项 P2，
-  其中 2 个 P1 与 2 项 P2 已修，其余记债。
+  其中 2 个 P1 与 3 项 P2 已修，其余记债。
 
 ## 一、结论摘要
 
@@ -22,7 +22,7 @@
 | **P1** | 审计双写无一致性保证、无 JSONL→DB 重建工具，实测缺 21% 记录（§9.2） | **已修**（`scripts/audit_rebuild.py`，历史 3469 条已补齐） |
 | **P2** | 审计失败无计数告警 | **已修**（`/api/metrics` 计数 + 阈值告警） |
 | **P2** | Hive `ensure_db` 启动 9.4s、`nodes.py` 3301 行、限流仅覆盖登录、超时路径零测试覆盖 | 部分修（超时路径已补用例，其余记债） |
-| **P2** | duckdb 预检使冷查询延迟翻倍、Hive 设计文档漂移、12 项配置未入 `.env.example`、SSE 线程无上限、审计写入全局串行、P0 修复无集成测试（§9.3） | 部分修（文档漂移与配置项已修，其余记债） |
+| **P2** | duckdb 预检使冷查询延迟翻倍、Hive 设计文档漂移、12 项配置未入 `.env.example`、SSE 线程无上限、审计写入全局串行、P0 修复无集成测试（§9.3） | 部分修（文档漂移、配置项、P0 集成测试已修，其余 3 项记债） |
 
 修复过程中另外撞出三个**新的真实缺陷**（详见 §八），一并修掉：
 
@@ -526,7 +526,7 @@ DuckDB 行数: 12992
 | **12 项运行时配置未入 `.env.example`** | `AGENT_RUN_*`（5 项）、`ASYNC_TASK_*`（3 项）、`SESSION_MEMORY_*`（3 项）、`MAX_SCAN_CACHE_SIZE` | 运维不知道这些参数存在，也就不会去调 | **已修**（见 9.3.1） |
 | **SSE 每连接一个线程** | `web/api.py:746` 直接 `Thread(target=_pump, daemon=True).start()`，无并发上限 | 客户端大量连接时线程数线性增长；FastAPI 场景本可用 async 生成器 | 待修（见 §9.5） |
 | **审计写入是全局串行点** | `AuditStore._lock` 覆盖 JSONL 追加 + DuckDB 插入，每次查询末尾都过这把锁 | 高并发下审计写入成为吞吐瓶颈 | 待修（见 §9.5） |
-| **本轮 P0 修复只有单测** | parity / 矩阵都不测超时场景 | 真实后端"超时后连接是否被废弃"无 CI 验证——正是原缺陷能潜伏那么久的原因 | 待修（见 §9.5） |
+| **本轮 P0 修复只有单测** | parity / 矩阵都不测超时场景 | 真实后端"超时后连接是否被废弃"无 CI 验证——正是原缺陷能潜伏那么久的原因 | **已修**（见 9.3.2） |
 
 #### 9.3.1 已修的两项
 
@@ -542,6 +542,50 @@ DuckDB 行数: 12992
 **配置项缺失**：`.env.example` 补 12 项（`MAX_SCAN_CACHE_SIZE`、`SCAN_CACHE_TTL_SECONDS`、
 `AGENT_RUN_*` 5 项、`ASYNC_TASK_*` 3 项、`SESSION_MEMORY_*` 3 项），并逐项与
 `config/settings.py` 的默认值核对一致（第一版凭印象写错了 7 项，已按源码改正并加校验）。
+
+#### 9.3.2 P0 修复的集成测试（第三项已修）
+
+原问题不是「没测」，而是**测的位置不对**：单测覆盖了「watchdog 打标」与
+「`pool.release` 分流」两段，却没有任何用例跑真实驱动——而原缺陷恰恰只在真实
+后端上确定性复现（四个外部后端的 `cancel()` 全是空操作，worker 线程会继续阻塞
+在同一条连接上）。用 mock 连接测这段，等于只验了自己写的标记函数。
+
+新增三层覆盖：
+
+| 层 | 位置 | 验什么 |
+|---|---|---|
+| 无容器兜底 | `tests/exec/test_pool.py::test_timeout_through_pool_discards_connection` | `execute_sql` 超时 → 打标 → 归还即废弃 → 下次拿到**新**连接（DuckDB，默认 CI 就跑） |
+| 真实后端 ×4 | `tests/test_{dual,pg,clickhouse,hive}_backend_parity.py::test_timeout_discards_connection` | 同一条链路的真驱动版本；矩阵 L2 跑 parity 文件时自动带上 |
+| 变异验证 | 手工（见下） | 把 `watchdog.mark_unusable` 换成空操作，用例按预期失败——证明断言不是空转 |
+
+四个后端实测（`statement_timeout_ms=300`，慢查询各自 3 秒）：
+
+```
+MySQL       SELECT SLEEP(3)                                 1 passed in 4.19s
+PostgreSQL  SELECT pg_sleep(3)                              1 passed in 3.55s
+ClickHouse  SELECT sleep(3)                                 1 passed in 3.88s
+Hive        SELECT reflect('java.lang.Thread','sleep',3000)  1 passed in 3.15s
+```
+
+变异验证（把打标改回空操作，模拟 P0 修复被回退）：
+
+```
+$ python -c "import exec.engine.watchdog as wd; wd.mark_unusable = lambda c: None; ..."
+变异后按预期失败 -> 超时后连接未被标记为不可复用
+```
+
+慢查询的选型不是随手写的：**不拿笛卡尔积做首选**——Hive `hive.mapred.mode=strict`
+会直接拒绝交叉连接，且 `execute_sql` 前置的 GuardrailAgent 会把笛卡尔积升级为
+执行前熔断（`tests/test_exec_audit.py` 已钉住这一点）。Hive 无 sleep 内建函数，
+故用 `reflect` 调 java `Thread.sleep`（不启 Tez 作业），并保留交叉连接作候选
+回退——`tests/parity_utils.py::SLOW_SQLS` 的列表语义就是「前一条被后端拒绝就换
+下一条」，失败原因不会被误报成超时失败。
+
+顺带修掉一个让矩阵**不可信**的缺陷：`check_usefulness` 调 pytest 时未传
+`--basetemp`，临时目录落在系统 `%TEMP%`，pytest 清理上一轮残留时文件数（62）
+超过批量删除保护阈值（50）被拦，退出码变 1——而用例全绿，表现为「L2 假失败」。
+ClickHouse 一档实测复现（`[safe-delete]...count:62,threshold:50` + 全点号输出 +
+rc=1），补 `--basetemp=logs/.pytest_parity_<backend>` 后复跑 L2 PASS。
 
 ### 9.4 复现方法
 
@@ -582,5 +626,6 @@ PY
 | ClickHouse profile 预算与 `MAX_SCAN_ROWS` 一致 | `adapter.harden` 会 fail-closed 拒绝漂移 |
 | 审计落库是否真的在写 | 看 `/api/metrics` 的 `audit_write_failures`，非零即代表 JSONL 有、库无 |
 | **数据量大幅增长后熔断是否还有效** | 扫描行缓存有 TTL（`SCAN_CACHE_TTL_SECONDS`，默认 300s，§9.1）：超过 TTL 会重新预检；重建数据后可主动 `clear_scan_cache()` 立即失效 |
+| **超时后连接是否被废弃** | `pytest tests/test_<backend>_backend_parity.py -k timeout`（需 `*_TEST_*` 环境变量，§9.3.2）：断言链为「超时 → 打标 → 归还即废弃 → 下次拿到新连接」 |
 | **审计两通道是否对得上** | `wc -l logs/audit.jsonl` 与 `SELECT count(*) FROM audit_log` 对比；不一致就跑 `python scripts/audit_rebuild.py` 幂等回灌（§9.2） |
 | 端口是否与宿主冲突 | 本机 10000 被百度网盘占用，故 compose 偏移到 10001 |

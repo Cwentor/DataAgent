@@ -20,8 +20,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.parity_utils import SLOW_SQLS as _SLOW_SQLS
 from tests.parity_utils import abs_window_dsl as _abs_window_dsl
 from tests.parity_utils import assert_rows_equal as _assert_rows_equal
+from tests.parity_utils import assert_timeout_discards_connection as _assert_timeout_discards
 from tests.parity_utils import compile_dsl as _compile_dsl
 
 pytestmark = pytest.mark.skipif(
@@ -163,3 +165,16 @@ def test_pool_reuse_session_identity_stable():
         if conn2 is not None:
             pool.release(conn2)
         pool.close()
+
+
+def test_timeout_discards_connection():
+    """超时后的连接必须被废弃而非归还复用（2026-10-27 审计 §9.3 的真实后端验证）。
+
+    这是原 P0 在真实后端上**确定性**复现的那一条：PyHive 无 TCancelOperation
+    封装，``cancel()`` 是空操作，看门狗抛超时后 worker 仍阻塞在同一连接上。
+    慢查询首选 ``reflect`` 调 java Thread.sleep（不启 Tez 作业），被 UDF 黑名单
+    拒绝时退回交叉连接。
+    """
+    from exec.engine.hive_adapter import HiveAdapter
+
+    _assert_timeout_discards(HiveAdapter(_test_dsn()), _SLOW_SQLS["hive"])
