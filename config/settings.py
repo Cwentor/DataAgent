@@ -130,6 +130,20 @@ MAX_SCAN_CACHE_SIZE: int = int(os.getenv("MAX_SCAN_CACHE_SIZE", "512"))
 # 默认 300s：数据量以小时/天级变化，5 分钟足以避免同一会话内重复预检（每次预检
 # 等于把查询真的执行一遍），又不至于让过时值长期生效。缓存键同时按后端+数据源隔离。
 SCAN_CACHE_TTL_SECONDS: int = int(os.getenv("SCAN_CACHE_TTL_SECONDS", "300"))
+# 扫描行预检两段式开关（0/1，默认开）：先 EXPLAIN 拿估算，估算足够小就跳过实测，
+# 否则再走 EXPLAIN ANALYZE。置 0 回退「直接 EXPLAIN ANALYZE」的旧行为，用于线上
+# 出现疑似误熔断时快速定位。见 docs/designs/2026-10-27-scan-precheck-two-stage-design.md D7
+SCAN_PRECHECK_TWO_STAGE: int = int(os.getenv("SCAN_PRECHECK_TWO_STAGE", "1"))
+# 估算放大倍数（两段式放行条件 est * SF < MAX_SCAN_ROWS）：估算只做"能否跳过实测"
+# 的判据，绝不做熔断值（最大高估 750x 会误杀合法查询）。默认 32 由
+# scripts/scan_precheck_calibration.py 校准得出——golden 最大低估 3.21x，但同一张表上
+# 「全命中的比较过滤」（`col > 0` / `col <> ''`）实测 5.0x，一个普通过滤就吃掉 8 的 5/8；
+# 而默认阈值下 SF 取 32/64 的跳过率不变（35/35），安全边际是白送的。见 spec D2
+SCAN_PRECHECK_SAFETY_FACTOR: int = int(os.getenv("SCAN_PRECHECK_SAFETY_FACTOR", "32"))
+# 跳过路径的强制复核采样比例（0 = 关闭）：命中即走第二段并按实测熔断，同时记录
+# est/actual 偏差。只缓存实测值意味着跳过路径永远不产生实测，SF 是否还够用在运行期
+# 完全不可观测——这个采样就是那个观测口。见 spec D4
+SCAN_PRECHECK_AUDIT_RATE: float = float(os.getenv("SCAN_PRECHECK_AUDIT_RATE", "0.01"))
 # 澄清槽位上下文 TTL（秒）：用户回答"最近30天"等短语的合并窗口（P0-5）
 CLARIFY_SLOT_TTL: int = int(os.getenv("CLARIFY_SLOT_TTL", "1800"))
 # 会话上下文记忆（Session Memory & Multi-turn Context）——见 agent/memory.py
