@@ -12,10 +12,25 @@ from typing import Any
 import duckdb
 
 from config import settings
-from exec.engine.base import physical_from_rows
-from exec.engine.plan_text import parse_scan_rows, plan_rows_measurable
+from exec.engine.base import ScanPrecheck, physical_from_rows
+from exec.engine.plan_text import (
+    parse_estimated_scan_rows,
+    parse_scan_rows,
+    plan_rows_measurable,
+)
 from exec.engine.watchdog import run_with_timeout
 from exec.errors import SqlExecutionError
+
+
+def _plan_text(plan_rows: list[list[Any]]) -> str:
+    """从 EXPLAIN 的结果集取计划文本（`explain_scan_rows` / `explain_scan_estimate` 共用）。
+
+    DuckDB 的 `EXPLAIN` 单行两列（`explain_key` / `explain_value`），
+    故优先取第 2 列；老版本或 profiling 形态只有一列时退回第 1 列。
+    """
+    if not plan_rows:
+        return ""
+    return str(plan_rows[0][1]) if len(plan_rows[0]) > 1 else str(plan_rows[0][0])
 
 
 class DuckDbAdapter:
@@ -43,12 +58,27 @@ class DuckDbAdapter:
     def explain_scan_rows(self, conn: Any, sql: str, timeout_ms: int | None) -> tuple[int, bool]:
         plan_sql = "EXPLAIN ANALYZE " + sql
         _, plan_rows = run_with_timeout(self, conn, plan_sql, timeout_ms)
-        plan_text = (
-            str(plan_rows[0][1])
-            if plan_rows and len(plan_rows[0]) > 1
-            else (str(plan_rows[0][0]) if plan_rows else "")
-        )
+        plan_text = _plan_text(plan_rows)
         return parse_scan_rows(plan_text), plan_rows_measurable(plan_text)
+
+    def explain_scan_estimate(self, conn: Any, sql: str, timeout_ms: int | None) -> ScanPrecheck:
+        """只做规划（不执行）的扫描行估算（扫描行预检两段式 spec D2/D3）。
+
+        与 `explain_scan_rows` 的区别只在 `EXPLAIN` 与 `EXPLAIN ANALYZE` 一个词，
+        但语义差一整次执行：DuckDB 的 `EXPLAIN ANALYZE` 会真的把查询跑完。
+
+        拿不到可信估算时返回 `rows=0 / measurable=False`，由上层走实测——
+        `count(*)` 的元数据快路径（`COLUMN_DATA_SCAN ~1 row`）与空结果折叠
+        （`EMPTY_RESULT`）都在 `parse_estimated_scan_rows` 里被判为不可用。
+        """
+        _, plan_rows = run_with_timeout(self, conn, "EXPLAIN " + sql, timeout_ms)
+        rows, operator = parse_estimated_scan_rows(_plan_text(plan_rows))
+        return ScanPrecheck(
+            rows=rows,
+            measurable=rows >= 1,
+            estimated=True,
+            operator=operator,
+        )
 
     def engine_error(self, exc: BaseException) -> SqlExecutionError | None:
         if isinstance(exc, duckdb.Error):
