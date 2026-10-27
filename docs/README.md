@@ -49,7 +49,7 @@
 | 穿插特性 | 报告叙述化 | [design](designs/2026-09-29-analysis-report-narrative-design.md) | [plan](plans/2026-09-29-analysis-report-narrative-plan.md) | — |
 | 穿插特性 | 分层降级兜底 | [design](designs/2026-09-29-degraded-fallback-design.md) | [plan](plans/2026-09-29-degraded-fallback-plan.md) | — |
 | 穿插特性 | LLM 流式改造 | [design](designs/2026-09-30-llm-streaming-transport-design.md) | [plan](plans/2026-09-30-llm-streaming-transport-plan.md) | — |
-| 十九期 | 能力边界扩展（三层同心圆，M1-M6） | [design](designs/2026-10-02-capability-boundary-expansion-design.md) | m1-m6：`plans/2026-10-02~03-capability-boundary-m{1..6}-plan.md` | — |
+| 十九期 | 能力边界扩展（三层同心圆，M1-M6） | [design](designs/2026-10-02-capability-boundary-expansion-design.md) | m1-m6：`plans/2026-10-02~03-capability-boundary-m{1..6}-plan.md`；收口 [m7](plans/2026-10-03-capability-boundary-m7-plan.md) | — |
 | 穿插特性 | 握手期超时安全重试 | [design](designs/2026-10-05-llm-handshake-retry-design.md) | [plan](plans/2026-10-05-llm-handshake-retry-plan.md) | — |
 | 穿插特性 | 枚举作答审计握手 | [design](designs/2026-10-07-enum-answer-audit-handshake-design.md) | [plan](plans/2026-10-07-enum-answer-audit-handshake-plan.md) | — |
 | 二十期 | Gmall mock 数仓全量替换（jar 反向解析） | [design](designs/2026-10-06-gmall-mock-reverse-design.md) | — | — |
