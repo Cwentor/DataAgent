@@ -8,6 +8,7 @@ import time
 import duckdb
 import pytest
 
+from exec.engine import connstate
 from exec.engine.duckdb_adapter import DuckDbAdapter
 from exec.pool import ReadOnlyConnectionPool
 
@@ -89,3 +90,92 @@ def test_pool_uses_read_only(db_path):
         pool.release(c)
     finally:
         pool.close()
+
+
+# --------------------------------------------------------------------------- #
+# 废弃语义（2026-10-27 审计 P0：超时后连接脏归还）
+# --------------------------------------------------------------------------- #
+
+
+def test_pool_release_discards_marked_connection(db_path):
+    """被标记不可复用的连接不得入队：归还即关闭，容量回收，下次拿新连接。
+
+    复现原缺陷：watchdog 超时后 worker 仍阻塞在同一连接上，若照常 release，
+    下一个请求会拿到这条「仍有活跃查询」的连接。
+    """
+    pool = ReadOnlyConnectionPool(DuckDbAdapter(db_path), max_connections=1)
+    try:
+        c1 = pool.acquire()
+        assert pool.size == 1
+        connstate.mark_unusable(c1)
+        pool.release(c1)
+
+        # 脏连接不入队，而是被关闭并回收名额
+        assert pool.size == 1, "容量应已通过补建恢复为 1"
+        c2 = pool.acquire()
+        assert c2 is not c1, "废弃后必须拿到新连接，不能复用脏连接"
+        assert connstate.is_unusable(c2) is False
+        pool.release(c2)
+    finally:
+        pool.close()
+
+
+def test_pool_discard_wakes_blocked_waiter(db_path):
+    """废弃后必须补建，否则阻塞在 acquire 的等待者永远等不到归还。"""
+    pool = ReadOnlyConnectionPool(DuckDbAdapter(db_path), max_connections=1)
+    try:
+        c1 = pool.acquire()
+        got: list = []
+        done = threading.Event()
+
+        def _worker():
+            conn = pool.acquire()  # 池满，阻塞等待
+            got.append(conn)
+            done.set()
+            pool.release(conn)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        assert not done.is_set()
+
+        pool.discard(c1)  # 废弃而不是归还：等待者必须被唤醒
+        assert done.wait(3.0), "废弃后等待者未被唤醒（会永久阻塞）"
+        assert got and got[0] is not c1
+        t.join(1.0)
+    finally:
+        pool.close()
+
+
+def test_pool_discard_returns_capacity_when_reconnect_fails(db_path):
+    """补建失败时容量名额必须退回，否则池会逐步缩容到 0。"""
+
+    class _FlakyAdapter(DuckDbAdapter):
+        fail_next = False
+
+        def connect_readonly(self):
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("后端暂不可用")
+            return super().connect_readonly()
+
+    adapter = _FlakyAdapter(db_path)
+    pool = ReadOnlyConnectionPool(adapter, max_connections=2)
+    try:
+        c1 = pool.acquire()
+        adapter.fail_next = True
+        pool.discard(c1)
+        # 容量退回：下一次 acquire 仍能建连，池不会因一次失败永久少一条
+        c2 = pool.acquire()
+        assert c2 is not None
+        pool.release(c2)
+    finally:
+        pool.close()
+
+
+def test_pool_discard_is_idempotent_on_closed_pool(db_path):
+    """池关闭后废弃连接不应抛错（关闭路径与废弃路径可能重叠）。"""
+    pool = ReadOnlyConnectionPool(DuckDbAdapter(db_path), max_connections=1)
+    c = pool.acquire()
+    pool.close()
+    pool.discard(c)  # 不抛即通过

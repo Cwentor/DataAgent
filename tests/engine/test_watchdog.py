@@ -10,8 +10,13 @@ import time
 
 import pytest
 
+from exec.engine import connstate
 from exec.engine.watchdog import run_with_timeout
 from exec.errors import QueryTimeoutError
+
+
+class _FakeConn:
+    """可弱引用的假连接（用于验证超时后打标）。"""
 
 
 class _FakeAdapter:
@@ -68,3 +73,23 @@ def test_run_with_timeout_cancel_failure_still_raises():
 def test_run_with_timeout_passthrough_exception():
     with pytest.raises(ValueError, match="boom"):
         run_with_timeout(_FakeAdapter(fail_with=ValueError("boom")), object(), "SELECT 1", None)
+
+
+def test_run_with_timeout_marks_connection_unusable():
+    """超时后连接必须被打标（2026-10-27 审计 P0）。
+
+    外部后端的 cancel 是空操作，超时时 worker 可能仍阻塞在同一连接上；不打标
+    就会让 pool.release 把脏连接放回池，下一个请求与残留查询争用同一连接。
+    """
+    conn = _FakeConn()
+    assert connstate.is_unusable(conn) is False
+    with pytest.raises(QueryTimeoutError):
+        run_with_timeout(_FakeAdapter(sleep_seconds=5.0), conn, "SELECT 1", 100)
+    assert connstate.is_unusable(conn) is True
+
+
+def test_run_with_timeout_does_not_mark_on_success():
+    """正常执行不得打标：否则每次查询都会废弃连接，池退化为直连。"""
+    conn = _FakeConn()
+    run_with_timeout(_FakeAdapter(sleep_seconds=0), conn, "SELECT 1", 5000)
+    assert connstate.is_unusable(conn) is False
