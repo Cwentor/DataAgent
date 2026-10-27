@@ -5,7 +5,7 @@
 
   <sub><a href="README.md">中文</a> · <b>English</b></sub>
 
-  **An enterprise-grade Data Agent: natural language → governed DSL → deterministic SQL → DuckDB**
+  **An enterprise-grade Data Agent: natural language → governed DSL → deterministic SQL → DuckDB** (switchable to MySQL / PostgreSQL / ClickHouse / Hive)
 
   The LLM only emits contract-bound JSON — it never writes raw SQL. Zero hallucinated queries, zero injection, zero arbitrary joins.
 
@@ -86,6 +86,12 @@
     Markdown/HTML export), autonomy level selection (L1 per-step confirm / L2 plan confirm /
     L3 high-risk confirm / L4 fully autonomous, persisted per session and sent with the stream), session history, the knowledge catalog (`/api/schema/summary`
     semantic field listing), and settings / user center — no frontend framework (vanilla JS + vendored ECharts/PrismJS)
+- **Multiple execution backends (phases 21–25, `exec/engine/` + `compiler/dialect/`)**:
+  - **Engine abstraction**: the `EngineAdapter` protocol pushes connection / execution / cancellation / plan parsing / error normalization / connection hardening / bulk load / physical metadata down to each engine; `DialectRenderer` carries dialect differences (identifier quoting, date truncation and shifting, HAVING aliases, gap-filling spine, string escaping). Adding a backend means registering one line in each, with zero changes to the guardrail framework or consumers
+  - **Five backends, one contract**: `DB_BACKEND=duckdb|mysql|postgres|clickhouse|hive` (duckdb by default, zero breakage); warehouse DDL is reused from the DuckDB version and transpiled at runtime, with row-identical source data
+  - **Physical metadata pushed down (phase 24)**: catalog physical columns are always read live via `physical_columns()` — `information_schema.columns` for DuckDB/MySQL/PostgreSQL, `system.columns` for ClickHouse, `DESCRIBE` parsing for Hive; type normalization converges in `exec/engine/type_map.py`, where unknown types fail closed (never silently degraded to `str`)
+  - **Hive path (phase 25)**: PyHive HTTP transport (sidestepping `sasl`, which has no Windows wheel), `posexplode` spine for gap filling, CSV staging + `LOAD DATA` for warehouse builds, and a guardrail denylist for HiveQL-specific statements (DFS/MSCK/USE/SHOW/DESCRIBE/LOCK/GRANT…)
+  - **Service-level gates**: every non-default backend has its own CI parity job — full golden-DSL cross-backend parity plus week-boundary / five-year recursive gap filling / comparison pairing / connection-pool reuse cases
 - **Multi-provider gateway (`providers/`)**: four protocol adapters — OpenAI Chat, OpenAI Responses, Anthropic, Gemini —
   with JSON-Mode smoothing (the control plane exposes visual configuration for the first three; the Gemini adapter is ready);
   API keys are encrypted at rest, list responses never echo secrets, and the workspace settings page offers visual CRUD plus connectivity probes
@@ -261,11 +267,12 @@ python -m eval.eval_runner --print-sql
 
 ### 7. Code quality checks
 
-Make sure these are all green before committing:
+Make sure these are all green before committing (the CI lint job runs each of them):
 
 ```bash
 black --check .
 ruff check .
+python scripts/check_docs_links.py   # relative links and docs references
 python -m pytest -q
 ```
 
@@ -276,7 +283,20 @@ black .
 ruff check --fix .
 ```
 
-### 8. API examples
+### 8. Continuous integration gates
+
+`.github/workflows/ci.yml` runs on pull requests, pushes to master, and a nightly schedule:
+
+| Job | Contents |
+|---|---|
+| `lint` | black + ruff + docs link check |
+| `test` | rebuild the DuckDB warehouse → full pytest → golden evaluation (both modes) → intent routing evaluation |
+| `mysql-parity` / `postgres-parity` / `clickhouse-parity` / `hive-parity` | start a real service container → build the warehouse → full golden-DSL cross-backend parity + Review Focus cases → catalog build smoke |
+| `nightly` | schedule only: full test suite + three evaluations + boundary evaluation + RLS adversarial matrix |
+
+> The four parity jobs are **service-level** verification: locally those cases are skipped when the engine is absent, so a green PR is the only proof that the backend path was actually executed.
+
+### 9. API examples
 
 **Log in and get a token**:
 
@@ -308,7 +328,7 @@ curl -X POST http://127.0.0.1:8000/api/query \
 
 The response contains the DSL, the SQL, column metadata, row count, a narrative explanation and visualization suggestions.
 
-### 9. Production deployment notes
+### 10. Production deployment notes
 
 1. **JWT secret**: replace it with a strong random value (`secrets.token_hex(32)`)
 2. **Strict mode**: with `AUTH_STRICT=1`, a weak secret or disabled auth makes startup fail
@@ -329,19 +349,25 @@ DataAgent/
 │                 # replanning error context), sandbox (AST guard + privilege-limited runner + Docker/subprocess backends),
 │                 # skills (entropy drill-down / decomposition trees / DTW / Holt-Winters / Shapley)
 ├── providers/    # Multi-provider gateway: four protocol adapters / encrypted API keys / connectivity probes
-├── compiler/     # DSL -> deterministic SQL
-├── exec/         # SQL execution: read-only AST check / pre-execution audit (cartesian breaker) / timeout / breakers / pool / self-healing
+├── compiler/     # DSL -> deterministic SQL; dialect/ holds five renderers (duckdb / mysql / postgres / clickhouse / hive)
+├── exec/         # SQL execution: read-only AST check / pre-execution audit (cartesian breaker) / timeout / breakers / pool / self-healing;
+│                 # engine/ is the engine abstraction: EngineAdapter protocol + five adapters + type mapping + plan parsing + watchdog
 ├── tools/        # Multi-tool orchestration: query / trend / export / metric explanation
 ├── present/      # Explanation + adaptive chart recommendation
 ├── security/     # Permissions: table/column/row-level RLS (config-driven) + secure view layer
 ├── auth/         # Authentication: JWT + Session + login rate limiting
 ├── audit/        # Audit snapshots + observability metrics + structured logs
 ├── web/          # Web UI / HTTP service / async queries / orchestration endpoints
-├── eval/         # Golden evaluation (31 Gmall cases, dual mode) + intent routing evaluation (12 cases incl. enumeration pre-routing)
+├── eval/         # Golden evaluation (31 Gmall cases, oracle / agent dual mode) + intent routing evaluation (12 cases)
+│                 #   + boundary evaluation + per-backend connectivity smoke (--backend mysql|postgres|clickhouse|hive)
 ├── mock/         # Deterministic DuckDB warehouse (Gmall e-commerce model: seed extraction / session chains / event JSON logs / parsing)
-├── tests/        # 59 test files (mirroring the source packages across 14 subdirectories: agent / audit / auth / compiler / core / eval / exec /
-│                 #   persistence / present / providers / security / semantic / tools / web)
-└── docs/         # Project docs (guides/designs/plans/tasks/reviews, see docs/README.md)
+│                 #   + per-backend build entries (init_mysql / init_postgres / init_clickhouse / init_hive, DDL transpiled at runtime)
+├── tests/        # 81 test files mirroring the source packages across 16 subdirectories (agent / audit / auth / compiler / core /
+│                 #   engine / eval / exec / mock / persistence / present / providers / security / semantic /
+│                 #   tools / web); cross-layer regressions and four-backend parity live at the root
+├── scripts/      # Scripts: one-off verification entrypoints (P0-1 e2e / pen-test / Top10 review) + the docs link checker
+├── .github/      # CI workflows (lint / test / four parity gates / nightly) and container configs (clickhouse users.d, hive-site)
+└── docs/         # Project docs (guides / designs / plans / tasks / reviews — rules and phase index in docs/README.md)
 ```
 
 ## 🧩 Key technical choices
@@ -350,12 +376,13 @@ The selection philosophy that runs through the project: **zero framework depende
 
 | Area | Choice | Rationale |
 | --- | --- | --- |
-| Runtime & dependencies | Python 3.11+ (pinned to 3.12) + Miniconda; only 4 production dependencies | The dependency surface is both the attack surface and the upgrade cost; numpy / pandas / pyarrow are dev-only (numerics for the sandbox and skill packs) and never sit on the production retrieval path |
+| Runtime & dependencies | Python 3.11+ (pinned to 3.12) + Miniconda; **4 core dependencies** (pydantic / duckdb / python-dotenv / sqlglot), plus one driver per optional backend (pymysql / psycopg / clickhouse-connect / pyhive+thrift) | The dependency surface is both the attack surface and the upgrade cost: the default DuckDB path pulls in no database driver, and a driver only participates when its backend is enabled. numpy / pandas / pyarrow are dev-only (numerics for the sandbox and skill packs) and never sit on the production retrieval path |
 | Semantic layer `semantic/` | Pydantic V2 strong contracts (`extra="forbid"`) + `catalog.py` field whitelist as SSOT | The contract *is* the constraint: the LLM can only emit registered fields / operators / aggregations, and undeclared fields are rejected before compilation |
 | Intelligence `agent/` | LLM / heuristic dual path + intent routing + multi-turn slot filling; RAG via character bigrams + TF-IDF cosine | Deterministic fallback without a key, safe degradation on LLM failure; retrieval needs no tokenizer, no vector store, no external model — identical, reproducible results on any machine |
 | Orchestration `core/orchestrator/` | Single LangGraph engine (converged in phase 17 M4): six-node semantic port + generalized interrupts (clarify / plan_review gates) + L1-L4 autonomy levels + subagent fan-out; checkpointer support (ORCHESTRATOR_CHECKPOINT_DB, persist to disk in production) | Long tasks / multi-step plans / multi-agent fan-out need checkpointing, interrupts and Send; the domain kernel keeps its 4 dependencies, while the orchestration layer is pinned exactly and gated by full regression; `AgentState` keeps `extra="forbid"` and the event bus (nine SSE event types) is untouched |
 | Compiler `compiler/` | Deterministic SQL compiler (generation driven by the Pydantic contract) | SQL comes only from the compiler and the LLM never submits raw SQL — reproducible, unit-testable, injection-free |
 | Execution `exec/` | sqlglot AST static audit + thread watchdog `conn.interrupt()` timeout + `EXPLAIN ANALYZE` scan pre-check breaker + hard LIMIT | Auditing and resource governance are fully deterministic; compiler/engine errors are fed back to the LLM to rewrite the DSL (bounded retries) |
+| Engine abstraction `exec/engine/` | `EngineAdapter` protocol (connect / execute / cancel / plan parsing / error normalization / hardening / bulk load / physical metadata) + five lazily registered adapters + `type_map` normalization (unknown types fail closed) + per-engine dialect primitives pushed into `compiler/dialect/` | The guardrail framework is engine-agnostic: a new backend registers two lines, with zero changes to governance logic or consumers; dialect differences stay in the renderer, and compiled output for the existing backends stays byte-identical (golden anchored on DuckDB) |
 | Retrieval facade `core/retrieval/` | typed Tool (`execute_dsl_query -> ParquetRef`) + PII masking (column heuristics + value-shape regex + deterministic hash masking) + sha256 Parquet materialization + four DataQA assertions | The sandbox has no network and no DB socket, and data exchange is fully auditable; quality findings never veto execution — they are traced end to end, with no false kills and no swallowed errors |
 | Sandbox `core/sandbox/` | Python `ast` static guard + privilege-limited runner (module allowlist imports + workspace-restricted `open`) + pluggable backends (Docker `--net=none --cap-drop=ALL` / subprocess fallback) | Defense in depth: a single bypassed layer still leaves you safe; when Docker is unavailable the *features* degrade, never the security |
 | Attribution `core/skills/` | Entropy drill-down / decomposition trees / DTW / Holt-Winters / Shapley, depending only on numpy + stdlib | No heavy scientific stack; correctness is cross-checked against known closed-form solutions |
@@ -364,7 +391,7 @@ The selection philosophy that runs through the project: **zero framework depende
 | Web layer `web/` | FastAPI + uvicorn service layer (converged in phase 17 M4, pinned exactly) + vanilla JS with no frontend framework + vendored ECharts / PrismJS + SSE streaming | The service layer borrows a mature framework's concurrency and SSE primitives, pinned and regression-gated; the frontend has no build chain, and windowed virtual rendering beyond 50 steps keeps long sessions smooth |
 | Warehouse `mock/` | Deterministic DuckDB warehouse (Gmall e-commerce model: business tables + parsed event logs, `AS_OF_DATE=2025-12-31`, seed 42) | Embedded, zero deployment; evaluation and demos are fully reproducible |
 | Evaluation `eval/` | Golden Dataset (31 Gmall cases, oracle / agent dual mode, layered contract/snapshot assertions) + intent routing evaluation (12 behavioral cases incl. enumeration pre-routing) + deterministic anchors | One dataset measures both the compiler's ceiling (oracle) and end-to-end accuracy (agent); off-target rate and fabrication risk are monitored continuously in CI |
-| Quality `tests/` | pytest (59 test files mirroring source packages across 14 subdirectories) + black + ruff + CI | Contract / compilation / audit / self-healing / observability are all covered by regression tests |
+| Quality `tests/` | pytest (81 test files mirroring source packages across 16 subdirectories) + black + ruff + docs link check + CI (lint / test / four backend parity gates / nightly) | Contract / compilation / audit / self-healing / observability are all covered by regression tests; each of the four non-default backends has a service-level gate, so a green PR means that backend path was really executed |
 
 ---
 
@@ -378,7 +405,8 @@ The selection philosophy that runs through the project: **zero framework depende
 | [Web UI & API](docs/guides/api.md) | Endpoints, auth and query examples |
 | [Security model](docs/guides/security.md) | Authentication, data permissions, demo accounts |
 | [Quality assurance](docs/guides/quality.md) | Golden evaluation, CI, reproducibility anchors |
-| [Roadmap](docs/guides/roadmap.md) | Capability evolution across phases |
+| [Roadmap](docs/guides/roadmap.md) | Capability evolution across phases 1–25, with each phase's key decisions |
+| [Docs taxonomy & index](docs/README.md) | Five-category rules, naming conventions and the phase index (where new docs get registered) |
 | [Production readiness review](./docs/reviews/2026-09-05-production-readiness-audit.md) | Readiness assessment and remediation items |
 | [Review archive](./docs/reviews/README.md) | Central archive of all review reports |
 | [Engineering conventions](./AGENTS.md) | Runtime environment and commands for AI collaborators |
@@ -390,8 +418,13 @@ Issues and pull requests are welcome. Read [AGENTS.md](./AGENTS.md) before you s
 ```bash
 black --check .
 ruff check .
+python scripts/check_docs_links.py
 python -m pytest -q
 ```
+
+> Keep both language versions in sync when touching documentation
+> ([README.md](README.md) / [README.en.md](README.en.md)), and file new docs under the five-category
+> taxonomy in [docs/README.md](docs/README.md), registering them in the phase index.
 
 ## 📄 License
 

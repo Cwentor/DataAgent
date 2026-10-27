@@ -5,7 +5,7 @@
 
   <sub><b>中文</b> · <a href="README.en.md">English</a></sub>
 
-  **企业级 Data Agent：自然语言 → 受控 DSL → 确定性 SQL → DuckDB**
+  **企业级 Data Agent：自然语言 → 受控 DSL → 确定性 SQL → DuckDB**（可切换 MySQL / PostgreSQL / ClickHouse / Hive）
 
   LLM 只产出受控 JSON，绝不直接生成裸 SQL —— 零幻觉、零注入、零随意 Join。
 
@@ -86,6 +86,12 @@
     Markdown/HTML 导出经侧边栏切换查看）、自主性分级选择（L1 每步确认 / L2 计划确认 /
     L3 高危确认 / L4 全自动，按会话持久化随流上送）、会话历史、知识目录（`/api/schema/summary`
     语义目录字段清单）与设置/用户中心，零前端框架（原生 JS + vendored ECharts/PrismJS）
+- **多执行后端（二十一至二十五期，`exec/engine/` + `compiler/dialect/`）**：
+  - **引擎抽象层**：`EngineAdapter` 协议把连接 / 执行 / 取消 / 计划解析 / 异常归一 / 连接加固 / 灌数 / 物理元数据按引擎下沉；`DialectRenderer` 承载方言差异（标识符引号、时间截断与平移、HAVING 别名、补零 spine、字符串转义）。新增后端 = adapter 与 renderer 各登记一行，护栏框架与消费方零改动
+  - **五后端统一**：`DB_BACKEND=duckdb|mysql|postgres|clickhouse|hive`（默认 duckdb，零破坏）；建仓 DDL 复用 DuckDB 版在运行时转译，数据与 DuckDB 版逐行同源
+  - **物理元数据面下沉（二十四期）**：语义目录的物理列一律经 `physical_columns()` 实读——DuckDB/MySQL/PostgreSQL 走 `information_schema.columns`、ClickHouse 走 `system.columns`、Hive 走 `DESCRIBE` 解析；物理类型归一收敛到 `exec/engine/type_map.py`，未知类型 fail-closed 抛错（不静默降级为 `str`）
+  - **Hive 链路（二十五期）**：PyHive HTTP transport（绕开 Windows 无官方 wheel 的 sasl）、`posexplode` spine 补零、CSV staging + `LOAD DATA` 建仓、HiveQL 特有语句族（DFS/MSCK/USE/SHOW/DESCRIBE/LOCK/GRANT…）护栏黑名单
+  - **服务级门禁**：每个非默认后端各有 CI parity job——golden 全量 DSL 双后端一致性 + 周边界 / 5 年递归补零 / comparison 配对 / 连接池复用专项
 - **多模型供应商网关（providers/）**：OpenAI Chat、OpenAI Responses、Anthropic、Gemini
   四协议适配与 JSON Mode 抹平（控制面支持前三种协议的可视化配置，Gemini 协议适配层就绪）；
   API Key 落盘加密存储、列表响应零密钥回传，工作台设置页可视化 CRUD + 连通性探测
@@ -260,11 +266,12 @@ python -m eval.eval_runner --print-sql
 
 ### 七、代码质量检查
 
-提交前确保以下检查全绿：
+提交前确保以下检查全绿（CI lint job 逐项执行）：
 
 ```bash
 black --check .
 ruff check .
+python scripts/check_docs_links.py   # 文档相对链接与 docs 引用完整性
 python -m pytest -q
 ```
 
@@ -275,7 +282,20 @@ black .
 ruff check --fix .
 ```
 
-### 八、API 使用示例
+### 八、持续集成门禁
+
+`.github/workflows/ci.yml` 在 PR / master push / 每日夜跑三种事件下运行：
+
+| Job | 内容 |
+|---|---|
+| `lint` | black + ruff + 文档链接检查 |
+| `test` | 重建 DuckDB 数仓 → 全量 pytest → golden 双模式 → 意图路由评测 |
+| `mysql-parity` / `postgres-parity` / `clickhouse-parity` / `hive-parity` | 起真实服务容器 → 建仓 → golden 全量 DSL 双后端一致性 + Review Focus 专项 → 目录构建 smoke |
+| `nightly` | 仅定时触发：全量测试 + 三套评测 + 能力边界评测 + RLS 对抗矩阵 |
+
+> 四个 parity job 是**服务级**验证：本地不跑这些引擎时对应用例自动跳过，PR 上的绿灯才代表该后端链路被真实执行过。
+
+### 九、API 使用示例
 
 **登录获取 Token**：
 
@@ -307,7 +327,7 @@ curl -X POST http://127.0.0.1:8000/api/query \
 
 响应包含：DSL、SQL、列信息、行数、中文解释、可视化建议。
 
-### 九、生产部署注意事项
+### 十、生产部署注意事项
 
 1. **JWT 密钥**：必须替换为强随机密钥（`secrets.token_hex(32)`）
 2. **启用严格模式**：`AUTH_STRICT=1` 时，弱密钥或关闭鉴权会拒绝启动
@@ -328,19 +348,25 @@ DataAgent/
 │                 # 重规划错误上下文）、sandbox（AST 守卫 + 限权 runner + Docker/子进程后端）、
 │                 # skills（熵下钻 / 分解树 / DTW / HW / Shapley）
 ├── providers/    # 多模型供应商网关：四协议适配 / API Key 加密存储 / 连通性探测
-├── compiler/     # DSL -> 确定性 SQL
-├── exec/         # SQL 执行层：只读 AST 校验 / 执行前审计（笛卡尔积熔断）/ 超时 / 熔断 / 连接池 / 自愈
+├── compiler/     # DSL -> 确定性 SQL；dialect/ 五方言渲染器（duckdb / mysql / postgres / clickhouse / hive）
+├── exec/         # SQL 执行层：只读 AST 校验 / 执行前审计（笛卡尔积熔断）/ 超时 / 熔断 / 连接池 / 自愈；
+│                 # engine/ 引擎抽象层：EngineAdapter 协议 + 五 adapter + 类型归一 + 计划解析 + 看门狗
 ├── tools/        # 多工具编排：查数 / 趋势 / 导出 / 口径解释
 ├── present/      # 解释 + 图表自适应推荐
 ├── security/     # 权限：表级 / 列级 / 行级 RLS（配置驱动）+ 安全视图层
 ├── auth/         # 身份认证：JWT + Session + 登录限流
 ├── audit/        # 审计快照 + 可观测性指标 + 结构化日志
 ├── web/          # Web UI / HTTP 服务 / 异步查询 / 编排端点
-├── eval/         # Golden 评测（31 条 Gmall 用例，双模式）+ 意图路由评测（12 用例，含枚举预路由）
+├── eval/         # Golden 评测（31 条 Gmall 用例，oracle / agent 双模式）+ 意图路由评测（12 用例）
+│                 #   + 能力边界评测 + 各后端连通性冒烟（--backend mysql|postgres|clickhouse|hive）
 ├── mock/         # 确定性 DuckDB 数仓（Gmall 电商模型：种子提取 / 会话行为链模拟 / 埋点 JSON 日志 / 解析入仓）
-├── tests/        # 59 个测试文件（与源码包一一对应 14 个子目录：agent / audit / auth / compiler / core / eval / exec /
-│                 #   persistence / present / providers / security / semantic / tools / web）
-└── docs/         # 项目文档（guides/designs/plans/tasks/reviews 五类，见 docs/README.md）
+│                 #   + 各后端建仓入口（init_mysql / init_postgres / init_clickhouse / init_hive，DDL 运行时转译）
+├── tests/        # 81 个测试文件，与源码包一一对应 16 个子目录（agent / audit / auth / compiler / core /
+│                 #   engine / eval / exec / mock / persistence / present / providers / security / semantic /
+│                 #   tools / web）；跨层回归与四后端 parity 用例留在根目录
+├── scripts/      # 脚本：一次性验证入口（P0-1 端到端 / 渗透用例 / Top10 复核）+ 文档链接检查器
+├── .github/      # CI 工作流（lint / test / 四个 parity 门禁 / 夜跑）与容器配置（clickhouse users.d、hive-site）
+└── docs/         # 项目文档（guides / designs / plans / tasks / reviews 五类，规范与期次索引见 docs/README.md）
 ```
 
 ## 🧩 关键技术选型
@@ -349,12 +375,13 @@ DataAgent/
 
 | 部分 | 关键选型 | 选型理由 |
 | --- | --- | --- |
-| 运行时与依赖 | Python 3.11+（锁定 3.12）+ Miniconda；生产运行时仅 4 个依赖 | 依赖面即攻击面与升级成本面；numpy / pandas / pyarrow 仅作开发依赖（沙箱与技能包数值栈），生产检索链路不经过 |
+| 运行时与依赖 | Python 3.11+（锁定 3.12）+ Miniconda；**核心 4 个依赖**（pydantic / duckdb / python-dotenv / sqlglot），可选后端各增一个驱动（pymysql / psycopg / clickhouse-connect / pyhive+thrift） | 依赖面即攻击面与升级成本面：默认 DuckDB 路径不引入任何数据库驱动；驱动仅在启用对应后端时才参与运行时。numpy / pandas / pyarrow 仅作开发依赖（沙箱与技能包数值栈），生产检索链路不经过 |
 | 语义层 `semantic/` | Pydantic V2 强契约（`extra="forbid"`）+ `catalog.py` 字段白名单 SSOT | 契约即约束：LLM 只能产出已登记的字段 / 操作符 / 聚合，未声明字段在编译前即被拒绝 |
 | 智能层 `agent/` | LLM / 启发式双路径 + 意图路由 + 多轮槽位回填；RAG 用字符 bigram + TF-IDF 余弦 | 离线无 Key 时确定性兜底、LLM 故障安全降级；检索零分词 / 零向量库 / 零外部模型，任意机器结果一致可复现 |
 | 编排层 `core/orchestrator/` | LangGraph 单引擎（十七期 M4 收敛）：六节点语义平移 + interrupt 泛化（clarify / plan_review 审批门）+ L1-L4 自主性分级 + Subagent fan-out；checkpointer 支持（ORCHESTRATOR_CHECKPOINT_DB，生产建议落盘） | 长任务 / 多步规划 / 多智能体（fan-out）需要 checkpointing、interrupt、Send 等成熟原语；领域内核 4 依赖不变，编排层依赖精确 pin + 全量回归门；`AgentState` 保持 `extra="forbid"`，事件总线（SSE 九类事件）不动 |
 | 编译层 `compiler/` | 确定性 SQL 编译器（Pydantic 契约驱动生成） | SQL 只由编译器产出、LLM 永不提交裸 SQL——可复现、可单测、零注入 |
 | 执行层 `exec/` | sqlglot AST 静态审计 + 线程看门狗 `conn.interrupt()` 超时取消 + `EXPLAIN ANALYZE` 扫描预检熔断 + LIMIT 硬上限 | 审计与资源治理全部确定性实现；编译 / 引擎报错喂回 LLM 重写 DSL 自愈（受控重试上限） |
+| 引擎抽象 `exec/engine/` | `EngineAdapter` 协议（连接 / 执行 / 取消 / 计划解析 / 异常归一 / 加固 / 灌数 / 物理元数据）+ 五 adapter 惰性注册 + `type_map` 类型归一（未知类型 fail-closed）+ 各引擎方言原语下沉 `compiler/dialect/` | 护栏框架引擎无关：新增后端只登记两行，治理逻辑与消费方零改动；方言差异集中在 renderer，编译产物对既有四后端逐字节不变（golden 锚定 DuckDB） |
 | 检索门面 `core/retrieval/` | typed Tool（`execute_dsl_query -> ParquetRef`）+ PII 脱敏（列名启发式 + 值形态正则 + 确定性哈希掩码）+ sha256 Parquet 物化 + DataQA 四类结果断言 | 沙箱零网络零 DB socket、数据交换全程可审计；质检发现不否决执行，全链路留痕、不误杀不吞错 |
 | 沙箱 `core/sandbox/` | Python `ast` 静态守卫 + 限权 runner（模块白名单 import + workspace 受限 open）+ 可插拔后端（Docker `--net=none --cap-drop=ALL` / 子进程兜底） | 纵深防御：单层被绕过仍安全；Docker 不可用时功能降级而非安全降级 |
 | 归因技能 `core/skills/` | 熵下钻 / 指标分解树 / DTW / Holt-Winters / Shapley，仅依赖 numpy + 标准库 | 零重型科学计算栈；全部与已知解析解对拍保证正确性 |
@@ -363,7 +390,7 @@ DataAgent/
 | Web 层 `web/` | FastAPI + uvicorn 服务层（十七期 M4 单引擎收敛，依赖精确 pin）+ 原生 JS 零前端框架 + vendored ECharts / PrismJS + SSE 流式 | 服务层借力成熟框架的并发与 SSE 原语并精确 pin + 全量回归门；前端零构建链，>50 步窗口化虚拟渲染保证长会话流畅 |
 | 数仓 `mock/` | DuckDB 确定性数仓（Gmall 电商模型：业务表 + 埋点日志解析入仓，`AS_OF_DATE=2025-12-31`、随机种子 42） | 嵌入式零部署；评测与演示完全可复现 |
 | 评测 `eval/` | Golden Dataset（31 条 Gmall 用例，oracle / agent 双模式，断言分层 contract/snapshot）+ 意图路由评测（12 用例行为断言，含枚举预路由直答）+ 确定性锚点 | 同一份数据同时考核编译器上限（oracle）与端到端正确率（agent）；答非所问率与虚构风险进 CI 持续监控 |
-| 质量保障 `tests/` | pytest（59 个测试文件，测试目录与源码包一一对应 14 个子目录）+ black + ruff + CI | 契约 / 编译 / 审计 / 自愈 / 可观测全路径回归覆盖 |
+| 质量保障 `tests/` | pytest（81 个测试文件，与源码包一一对应 16 个子目录）+ black + ruff + 文档链接检查 + CI（lint / test / 四个后端 parity 门禁 / 夜跑） | 契约 / 编译 / 审计 / 自愈 / 可观测全路径回归覆盖；四个非默认后端各有服务级门禁，PR 绿即代表该后端链路真实验证过 |
 
 ---
 
@@ -377,7 +404,8 @@ DataAgent/
 | [Web UI 与 API](docs/guides/api.md) | 端点、鉴权与查询示例 |
 | [安全模型](docs/guides/security.md) | 认证、数据权限、演示账号 |
 | [质量保障](docs/guides/quality.md) | Golden 评测、CI、可复现锚点 |
-| [演进里程碑](docs/guides/roadmap.md) | 二十期能力演进 |
+| [演进里程碑](docs/guides/roadmap.md) | 一至二十五期能力演进（含各期关键技术决策） |
+| [文档分类规范与索引](docs/README.md) | 五类目录规范、命名规范、期次总索引（新增文档的登记入口） |
 | [生产就绪评审](./docs/reviews/2026-09-05-production-readiness-audit.md) | 生产就绪度评估与整改项 |
 | [评审归档](./docs/reviews/README.md) | 历次评审落盘文件统一归档目录 |
 | [工程约定](./AGENTS.md) | 面向 AI 协作者的运行环境与命令 |
@@ -389,8 +417,12 @@ DataAgent/
 ```bash
 black --check .
 ruff check .
+python scripts/check_docs_links.py
 python -m pytest -q
 ```
+
+> 文档改动请同步维护中英双版（[README.md](README.md) / [README.en.md](README.en.md)），
+> 新增 docs 文档按 [docs/README.md](docs/README.md) 的五类规范归档并登记期次索引。
 
 ## 📄 License
 
