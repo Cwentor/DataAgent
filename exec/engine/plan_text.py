@@ -39,4 +39,82 @@ def plan_rows_measurable(plan_text: str) -> bool:
     return _ROWS_LINE_RE.search(plan_text) is not None
 
 
-__all__ = ["parse_scan_rows", "plan_rows_measurable"]
+# --------------------------------------------------------------------------- #
+# 估算计划解析（扫描行预检两段式，design 2026-10-27 §D3）
+# --------------------------------------------------------------------------- #
+
+# 真实扫描算子白名单：只有计划里出现过这些算子，`~N rows` 才代表"要读多少行基表
+# 数据"。未知算子 fail-closed（调用方走 EXPLAIN ANALYZE 实测），新增算子名只会
+# 让查询慢一点，不会让熔断失效。
+SCAN_OPERATORS: frozenset[str] = frozenset(
+    {
+        "SEQ_SCAN",
+        "INDEX_SCAN",
+        "TABLE_SCAN",
+        "PARQUET_SCAN",
+        "READ_PARQUET",
+        "READ_CSV",
+        "CSV_SCAN",
+        "DELIM_SCAN",
+        "JSON_SCAN",
+        "ARROW_SCAN",
+    }
+)
+
+_SCAN_OPERATOR_RE = re.compile(r"\b(" + "|".join(sorted(SCAN_OPERATORS)) + r")\b")
+
+# 只认带 `~` 前缀的行数行：不带 `~` 的裸 `N rows` 是 EXPLAIN ANALYZE 的实测口径，
+# 误读等于把实测当估算，整条判定链错位。
+_ESTIMATE_ROW_RE = re.compile(r"~\s*([\d,]+)\s+rows?", re.IGNORECASE)
+
+# 计划图的边框字符。**不能包含空格**——"~3,003 rows" 去掉空格会变成
+# "~3,003rows"，行数正则的 `\s+` 就匹配不上，估算会静默归零（踩过一次）。
+_BOX_CHARS = "│┌┐└┘├┤┬┴┼─"
+
+
+def _strip_boxes(line: str) -> str:
+    """去掉 box-drawing 边框字符（保留空格，见 _BOX_CHARS 注释）。"""
+    for char in _BOX_CHARS:
+        line = line.replace(char, "")
+    return line.strip()
+
+
+def parse_estimated_scan_rows(plan_text: str) -> tuple[int, str]:
+    """从 ``EXPLAIN`` 计划文本解析扫描估算行数与真实扫描算子。
+
+    **为什么不做逐算子归属**：DuckDB 的计划是二维 box 布局，join 的两个子算子会
+    **并排**画在同一批行上（``│ SEQ_SCAN ││ SEQ_SCAN │``）。按"行"扫描再归属到最近
+    算子名的做法会在并排处崩掉——实测 35 条 golden 里有 16 条含 join，逐算子归属
+    版本把它们全部判成"不可用"，而且错得**方向危险**：某条查询的 order_detail 估算
+    ``~3,755 rows`` 被丢掉，只剩 base_province 的 ``~34 rows`` 被采信，估算被低估
+    110 倍——正好是"该熔断却放行"的那种错。
+
+    改用**布局无关**的两步判定：
+
+    1. **存在性**：计划里出现过白名单扫描算子（子串匹配，并排布局照样命中）。只有
+       ``COLUMN_DATA_SCAN``（元数据快路径，``count(*)`` 类，报的是"输出 1 行"而不是
+       "扫了 1 行"）或 ``EMPTY_RESULT`` 的计划在这里就出局；
+    2. **取最大**：全文本所有 ``~N row(s)`` 取最大值。max 只会**高估**不会低估
+       （各算子估算的最大值 ≥ 任一扫描算子的估算值），因此判定 ``est × SF < 阈值``
+       仍然安全，代价是偶尔多走一次实测。
+
+    返回 ``(rows, operator)``；``rows=0`` 且 ``operator=""`` 表示不可用。
+    """
+    scan = _SCAN_OPERATOR_RE.search(plan_text)
+    if scan is None:
+        return 0, ""
+    best = 0
+    for raw in plan_text.splitlines():
+        for match in _ESTIMATE_ROW_RE.finditer(_strip_boxes(raw)):
+            rows = int(match.group(1).replace(",", ""))
+            if rows > best:
+                best = rows
+    return best, scan.group(1)
+
+
+__all__ = [
+    "SCAN_OPERATORS",
+    "parse_estimated_scan_rows",
+    "parse_scan_rows",
+    "plan_rows_measurable",
+]

@@ -148,7 +148,9 @@ tests/      测试（子目录与源码包一一对应：tests/core、tests/comp
 tools/      生产工具包（工具注册中心、内置工具等）
 web/        Web 服务与工作台（FastAPI 服务 + service 编排链路 + static 前端）
 scripts/    脚本（生产验证一次性入口：P0-1 端到端 / 渗透用例 / Top10 复核；
-            常驻工具：check_docs_links.py 文档链接完整性检查，CI lint job 已挂）
+            常驻工具：check_docs_links.py 文档链接完整性检查，CI lint job 已挂；
+            scan_precheck_calibration.py 扫描行预检安全系数校准，见
+            designs/2026-10-27-scan-precheck-two-stage-design.md §6）
 docs/       项目文档（分类规范与总索引见 docs/README.md：guides 稳定指南 /
             designs 设计方案 / plans 实施计划 / tasks 任务记录 / reviews 评审归档 /
             assets 静态资源；logs/ 与根目录 analytics_sandbox.duckdb 为运行期产物）
