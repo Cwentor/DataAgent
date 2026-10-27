@@ -3,6 +3,8 @@
 
   # DataAgent
 
+  <sub><b>中文</b> · <a href="README.en.md">English</a></sub>
+
   **企业级 Data Agent：自然语言 → 受控 DSL → 确定性 SQL → DuckDB**
 
   LLM 只产出受控 JSON，绝不直接生成裸 SQL —— 零幻觉、零注入、零随意 Join。
@@ -139,7 +141,16 @@ pip install -r requirements-dev.txt
 python -m mock.init_duckdb
 ```
 
-**MySQL 后端（可选，二十一期）**：支持 MySQL 8.0（>= 8.0.18）作为查询执行后端。
+**可选执行后端（`DB_BACKEND`）**：默认 `duckdb`；另支持 `mysql` / `postgres` / `clickhouse` / `hive` 四种服务端引擎。DDL 均复用 DuckDB 版并在运行时转译，数据逐行同源；每个后端各有服务级 CI 门禁（golden 全量 DSL 双后端一致性 + Review Focus 专项）。
+
+| 后端 | 初始化 | 一致性回归 | CI 镜像 |
+|---|---|---|---|
+| MySQL | `python -m mock.init_mysql` | `tests/test_dual_backend_parity.py` | `mysql:8.0` |
+| PostgreSQL | `python -m mock.init_postgres` | `tests/test_pg_backend_parity.py` | `postgres:16` |
+| ClickHouse | `python -m mock.init_clickhouse` | `tests/test_clickhouse_backend_parity.py` | `clickhouse-server:24.8` |
+| Hive | `python -m mock.init_hive` | `tests/test_hive_backend_parity.py` | `apache/hive:4.0.0` |
+
+MySQL 配置示例（其余后端把 `MYSQL_*` 前缀换成 `POSTGRES_*` / `CLICKHOUSE_*` / `HIVE_*`）：
 
 ```bash
 # 1. .env 配置（建仓账号需 CREATE/INSERT 权限；运行时查询另用只读账号）
@@ -156,11 +167,11 @@ python -m mock.init_mysql
 # 3. 查询账号最小权限（部署要求）
 # GRANT SELECT ON gmall.* TO dataagent_ro@'%';
 
-# 4. 连通性冒烟（golden 评测锚定 DuckDB 方言，MySQL 正确性回归见下）
+# 4. 连通性冒烟（golden 评测锚定 DuckDB 方言）
 python -m eval.eval_runner --backend mysql
 ```
 
-双后端一致性回归（需要本地 MySQL 测试库，未配置时自动跳过）：
+双后端一致性回归（需要本地测试库，未配置时自动跳过）：
 
 ```bash
 MYSQL_TEST_HOST=127.0.0.1 MYSQL_TEST_USER=root MYSQL_TEST_PASSWORD=... \
@@ -168,7 +179,7 @@ python -m pytest tests/test_dual_backend_parity.py -q
 ```
 
 **版本演进跟随（重要）**：治理管道依赖引擎行为（EXPLAIN ANALYZE 输出格式、
-max_execution_time、sql_mode 默认值），MySQL 版本升级须先跑全量测试 + 双后端
+max_execution_time、sql_mode 默认值），任一后端版本升级须先跑全量测试 + 双后端
 一致性回归再放行——这是多引擎支持的必然代价（详见
 `docs/designs/2026-10-25-mysql-support-design.md` §8.1）。
 
