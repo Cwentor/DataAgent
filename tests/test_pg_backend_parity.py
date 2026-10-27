@@ -15,8 +15,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.parity_utils import SLOW_SQLS as _SLOW_SQLS
 from tests.parity_utils import abs_window_dsl as _abs_window_dsl
 from tests.parity_utils import assert_rows_equal as _assert_rows_equal
+from tests.parity_utils import assert_timeout_discards_connection as _assert_timeout_discards
 from tests.parity_utils import compile_dsl as _compile_dsl
 
 pytestmark = pytest.mark.skipif(
@@ -139,3 +141,14 @@ def test_pool_reuse_session_still_readonly():
         if conn2 is not None:
             pool.release(conn2)
         pool.close()
+
+
+def test_timeout_discards_connection():
+    """超时后的连接必须被废弃而非归还复用（2026-10-27 审计 §9.3 的真实后端验证）。
+
+    psycopg3 的 ``cancel`` 未在适配器封装（``cancel()`` 空操作），看门狗超时后
+    worker 线程仍阻塞在同一条连接上——照常归还就会把这条连接发给下一个请求。
+    """
+    from exec.engine.postgres_adapter import PostgresAdapter
+
+    _assert_timeout_discards(PostgresAdapter(_test_dsn()), _SLOW_SQLS["postgres"])

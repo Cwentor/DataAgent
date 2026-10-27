@@ -18,8 +18,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.parity_utils import SLOW_SQLS as _SLOW_SQLS
 from tests.parity_utils import abs_window_dsl as _abs_window_dsl
 from tests.parity_utils import assert_rows_equal as _assert_rows_equal
+from tests.parity_utils import assert_timeout_discards_connection as _assert_timeout_discards
 from tests.parity_utils import compile_dsl as _compile_dsl
 
 pytestmark = pytest.mark.skipif(
@@ -148,3 +150,14 @@ def test_pool_reuse_session_still_readonly():
         if conn2 is not None:
             pool.release(conn2)
         pool.close()
+
+
+def test_timeout_discards_connection():
+    """超时后的连接必须被废弃而非归还复用（2026-10-27 审计 §9.3 的真实后端验证）。
+
+    clickhouse-connect 的取消依赖 query_id + 另发 KILL，适配器未封装，故超时后
+    连接上仍有活跃查询；用 ``sleep(3)``（CH 单次上限 3s）稳定越过 300ms 预算。
+    """
+    from exec.engine.clickhouse_adapter import ClickHouseAdapter
+
+    _assert_timeout_discards(ClickHouseAdapter(_test_dsn()), _SLOW_SQLS["clickhouse"])

@@ -18,10 +18,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.parity_utils import SLOW_SQLS as _SLOW_SQLS
+
 # 共享工具自 parity_utils 导入（二十二期提取）：别名保留下划线前缀，
 # 本文件其余断言逻辑逐字不变（tests/ 为包，用包内绝对导入）
 from tests.parity_utils import abs_window_dsl as _abs_window_dsl
 from tests.parity_utils import assert_rows_equal as _assert_rows_equal
+from tests.parity_utils import assert_timeout_discards_connection as _assert_timeout_discards
 from tests.parity_utils import compile_dsl as _compile_dsl
 from tests.parity_utils import norm_cell as _norm_cell  # noqa: F401
 
@@ -140,3 +143,15 @@ def test_pool_reuse_session_still_readonly():
         if conn2 is not None:
             pool.release(conn2)
         pool.close()
+
+
+def test_timeout_discards_connection():
+    """超时后的连接必须被废弃而非归还复用（2026-10-27 审计 §9.3 的真实后端验证）。
+
+    MySQL 的 ``cancel`` 是空操作（KILL QUERY 需另开连接，适配器未封装），所以
+    看门狗超时后 worker 线程仍阻塞在同一条连接上——若照常归还，下一个请求会
+    拿到这条「仍有活跃查询」的连接，正是原 P0 的失败形态。
+    """
+    from exec.engine.mysql_adapter import MySqlAdapter
+
+    _assert_timeout_discards(MySqlAdapter(_test_dsn()), _SLOW_SQLS["mysql"])
