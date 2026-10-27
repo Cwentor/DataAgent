@@ -33,9 +33,10 @@ T5 依赖 T4；T6 依赖 T4+T5；T7 收口。
 `None` 即恒走第二段）。
 
 - [x] `tests/exec/test_guards_clickhouse.py` / `test_guards_postgres.py`（fake 连接）
-      绿——它们实际验证"未实现新方法的 adapter 恒走旧路径"（含在 1412 passed 内）
-- [ ] CI 四个 parity job 无回归（本地无四后端环境，由 CI 承担；待推送后确认）
-- [x] 全量 `pytest -q` 本地绿：**1412 passed / 28 skipped**（CI `test` job 待推送确认）
+      绿——它们实际验证"未实现新方法的 adapter 恒走旧路径"（含在 1414 passed 内）
+- [x] CI 四个 parity job 无回归：`mysql-parity` / `postgres-parity` /
+      `clickhouse-parity` / `hive-parity` 全 success（PR #21 第二轮，head `d8e2a1e`）
+- [x] 全量 `pytest -q` 本地绿：**1414 passed / 28 skipped**；CI `test` job 同绿
 
 ## Review Focus 专项核对（T7 收尾时逐条打勾）
 
