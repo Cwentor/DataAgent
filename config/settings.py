@@ -125,6 +125,11 @@ SQL_SELF_HEAL_MAX_RETRIES: int = int(os.getenv("SQL_SELF_HEAL_MAX_RETRIES", "3")
 # EXPLAIN ANALYZE 扫描行预检缓存容量上限（整改指令3-3 降本项；原硬编码 512 改配置化）；
 # 超出按"清空防膨胀"策略处理（扫描行数随数据变化，无 LRU 精度必要，只防无限增长）
 MAX_SCAN_CACHE_SIZE: int = int(os.getenv("MAX_SCAN_CACHE_SIZE", "512"))
+# 扫描行预检缓存 TTL（秒，0 = 不过期）：缓存的是「这条 SQL 当时扫了多少行」，
+# 数据增长后该值会偏小，导致 MAX_SCAN_ROWS 熔断静默失效（2026-10-27 审计 §9.1）。
+# 默认 300s：数据量以小时/天级变化，5 分钟足以避免同一会话内重复预检（每次预检
+# 等于把查询真的执行一遍），又不至于让过时值长期生效。缓存键同时按后端+数据源隔离。
+SCAN_CACHE_TTL_SECONDS: int = int(os.getenv("SCAN_CACHE_TTL_SECONDS", "300"))
 # 澄清槽位上下文 TTL（秒）：用户回答"最近30天"等短语的合并窗口（P0-5）
 CLARIFY_SLOT_TTL: int = int(os.getenv("CLARIFY_SLOT_TTL", "1800"))
 # 会话上下文记忆（Session Memory & Multi-turn Context）——见 agent/memory.py

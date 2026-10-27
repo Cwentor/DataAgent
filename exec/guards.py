@@ -454,41 +454,94 @@ class ExecutionResult:
 
 # --------------------------------------------------------------------------- #
 # 扫描行预算缓存（整改指令3-3：同一 SQL 自愈重试不重复 EXPLAIN 预检降本）
+#
+# 2026-10-27 审计 §9.1 修正：原实现只按 SQL 文本 hash 做键、条目无时间戳，导致
+#   ① 数据从 1000 行涨到 200 万行后仍用旧值 1000 判断，熔断静默失效（实证见审计
+#      报告 §9.1；与 duckdb 2.0 折叠计划事故同一失败模式，但那次至少打 warning）；
+#   ② 同一进程串多后端（体检脚本即如此）时跨引擎复用同一份扫描行数。
+# 现改为「作用域（后端 + 数据源）+ SQL」做键，条目带写入时间并按 TTL 过期。
 # --------------------------------------------------------------------------- #
-_SCAN_CACHE: dict[str, int] = {}
+_SCAN_CACHE: dict[str, tuple[int, float]] = {}
 _SCAN_CACHE_LOCK = threading.Lock()
 
 
-def _scan_cache_key(sql: str) -> str:
-    """SQL 规范化哈希（空白折叠后 sha256），同一编译产物只预检一次。"""
+def _scan_cache_key(sql: str, scope: str = "") -> str:
+    """缓存键：作用域 + SQL 规范化哈希（空白折叠后 sha256）。
+
+    scope 由 ``_adapter_scope`` 生成（后端名 + 数据源标识）。空 scope 仅用于
+    单元测试直接调用，生产路径一律显式传入。
+    """
     normalized = " ".join(sql.strip().lower().split())
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    payload = f"{scope}\x00{normalized}" if scope else normalized
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def cached_scan_rows(sql: str, cache: dict[str, int] | None = None) -> int | None:
-    """读取 SQL 的已缓存扫描行数；未命中返回 None。"""
+def _adapter_scope(adapter: EngineAdapter) -> str:
+    """缓存作用域：后端名 + 数据源标识（同 SQL 在不同库/引擎上行数完全不同）。
+
+    外部后端取 dsn 的 host:port/database；DuckDB 取文件路径（同一进程可能连
+    多个 .duckdb 文件，如测试与建仓链路）。
+    """
+    name = str(getattr(adapter, "name", "unknown"))
+    dsn = getattr(adapter, "_dsn", None)
+    if isinstance(dsn, dict):
+        ident = f"{dsn.get('host', '')}:{dsn.get('port', '')}/{dsn.get('database', '')}"
+    else:
+        ident = str(getattr(adapter, "_db_path", "") or "")
+    return f"{name}|{ident}"
+
+
+def clear_scan_cache() -> None:
+    """清空扫描行预检缓存（建仓/重灌数据后必须调用，否则旧行数继续放行）。
+
+    除 TTL 过期外的手动出口：批量导入数据、切换数据源、跑完 parity 测试后都应清，
+    以免后续查询按过时行数判断预算。
+    """
+    with _SCAN_CACHE_LOCK:
+        _SCAN_CACHE.clear()
+
+
+def cached_scan_rows(
+    sql: str, cache: dict[str, tuple[int, float]] | None = None, *, scope: str = ""
+) -> int | None:
+    """读取 SQL 的已缓存扫描行数；未命中或已过期返回 None。"""
     store = cache if cache is not None else _SCAN_CACHE
-    key = _scan_cache_key(sql)
-    lock = None if cache is not None else _SCAN_CACHE_LOCK
-    if lock is not None:
-        with lock:
-            return store.get(key)
-    return store.get(key)
+    key = _scan_cache_key(sql, scope)
+    if cache is not None:  # 注入的缓存由调用方自己保证线程安全（测试用）
+        entry = store.get(key)
+    else:
+        with _SCAN_CACHE_LOCK:
+            entry = store.get(key)
+    if entry is None:
+        return None
+    scan_rows, cached_at = entry
+    ttl = settings.SCAN_CACHE_TTL_SECONDS
+    if ttl > 0 and (time.time() - cached_at) > ttl:
+        # 过期即视为未命中（不清除：让下一次 cache_scan_rows 覆盖，避免额外加锁）
+        return None
+    return scan_rows
 
 
-def cache_scan_rows(sql: str, scan_rows: int, cache: dict[str, int] | None = None) -> None:
+def cache_scan_rows(
+    sql: str,
+    scan_rows: int,
+    cache: dict[str, tuple[int, float]] | None = None,
+    *,
+    scope: str = "",
+) -> None:
     """写入 SQL 的扫描行数缓存（容量上限读 settings.MAX_SCAN_CACHE_SIZE，超限清空防膨胀）。"""
     store = cache if cache is not None else _SCAN_CACHE
-    key = _scan_cache_key(sql)
+    key = _scan_cache_key(sql, scope)
     lock = None if cache is not None else _SCAN_CACHE_LOCK
     max_size = settings.MAX_SCAN_CACHE_SIZE
+    entry = (scan_rows, time.time())
     if lock is not None:
         with lock:
-            store[key] = scan_rows
+            store[key] = entry
             if len(store) > max_size:
                 store.clear()
         return
-    store[key] = scan_rows
+    store[key] = entry
     if len(store) > max_size:
         store.clear()
 
@@ -589,9 +642,12 @@ def execute_sql(
     scan_rows = 0
 
     # 1) 扫描行预算预检（EXPLAIN ANALYZE 在超时看门狗内运行；解析口径由 adapter 决定）
-    #    整改指令3-3：同一 SQL（自愈重试同编译产物）命中缓存则跳过重复预检降本
+    #    整改指令3-3：同一 SQL（自愈重试同编译产物）命中缓存则跳过重复预检降本。
+    #    缓存按「后端 + 数据源」隔离并带 TTL：同一 SQL 在不同引擎/库上行数完全不同，
+    #    且数据增长后旧行数会让熔断静默失效（2026-10-27 审计 §9.1）。
     if max_scan_rows is not None:
-        scanned = cached_scan_rows(sql)
+        scope = _adapter_scope(adapter)
+        scanned = cached_scan_rows(sql, scope=scope)
         if scanned is None:
             try:
                 scanned, measurable = adapter.explain_scan_rows(conn, sql, statement_timeout_ms)
@@ -604,7 +660,7 @@ def execute_sql(
                     raise norm from exc
                 raise
             if measurable:
-                cache_scan_rows(sql, scanned)
+                cache_scan_rows(sql, scanned, scope=scope)
             else:
                 # 计划不含任何算子行数：护栏本轮不可计量（引擎版本/计划格式变更）。
                 # 不缓存——避免把"测不到"固化成"扫了 0 行"的假事实，也不静默放行。
@@ -662,6 +718,9 @@ __all__ = [
     "SqlExecutionError",
     "UnsafeSqlError",
     "assert_read_only_sql",
+    "cache_scan_rows",
+    "cached_scan_rows",
+    "clear_scan_cache",
     "execute_sql",
     "parse_scan_rows",
     "plan_rows_measurable",

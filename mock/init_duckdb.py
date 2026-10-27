@@ -74,6 +74,11 @@ def main() -> None:
         print(f"[init_duckdb] 埋点日志目录: {settings.APPLOG_DIR}")
     finally:
         conn.close()
+    # 重建数据后旧的扫描行预检缓存必然过时（会让 MAX_SCAN_ROWS 熔断失效，
+    # 2026-10-27 审计 §9.1），重建即失效是唯一正确语义
+    from exec.guards import clear_scan_cache
+
+    clear_scan_cache()
 
 
 if __name__ == "__main__":
