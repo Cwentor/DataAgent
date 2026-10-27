@@ -159,7 +159,7 @@ def test_run_agent_hitl_flow(tmp_path, monkeypatch):
 
 
 def test_clarify_pending_then_new_question_routes_fresh(tmp_path, monkeypatch):
-    """澄清挂起后新问题按新查询路由（docs/reviews/20261002-audit-clarify-pending-hijack.md 回归锚点）。
+    """澄清挂起后新问题按新查询路由（docs/reviews/2026-10-02-audit-clarify-pending-hijack.md 回归锚点）。
 
     同会话内上一轮以 phase=clarify 挂起后，用户忽略澄清直接提出的新问题
     必须独立成轮作答，严禁被合并进旧查询（答非所问禁区）；同时旧澄清卡

@@ -290,7 +290,7 @@ def _run_agent_langgraph_path(
                 resume_state,
                 {"kind": "clarify", "resume_value": reply},
                 # 恢复经挂起态自带的 turn_id 找回同轮线程（线程按轮隔离，
-                # 见 docs/reviews/20261002-audit-clarify-pending-hijack.md）
+                # 见 docs/reviews/2026-10-02-audit-clarify-pending-hijack.md）
                 thread_id=_checkpoint_thread_id(principal, session_id, resume_state.turn_id),
             )
         except GraphRecursionError:
