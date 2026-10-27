@@ -7,7 +7,7 @@
 | 路径与锚点 | `DB_PATH`、`WORKSPACE_ROOT`、`AS_OF_DATE`、`DATA_DOMAIN_END`、`APPLOG_DIR` | 数仓路径（默认 `analytics_sandbox.duckdb`）、沙箱工作区根目录（默认 `logs/workspaces`）、评测与时间锚点（`AS_OF_DATE=2025-12-31`，`DATA_DOMAIN_END` 为时间域守卫上界）、埋点日志目录（Gmall 埋点 JSON 日志落盘路径，运行时自动创建） |
 | LLM | `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`、`LLM_TEMPERATURE`、`LLM_TIMEOUT`、`LLM_MAX_RETRIES`、`PROVIDER_HANDSHAKE_TIMEOUT`、`PROVIDER_HANDSHAKE_RETRY_MAX`、`PROVIDER_STREAM_MAX_SECONDS` | OpenAI 兼容模型接入；握手期独立预算与安全重试（首字节到达前专用超时与重试上限）、流式调用整体最大时长 |
 | 执行层 | `QUERY_TIMEOUT_MS`、`MAX_SCAN_ROWS`、`MAX_RESULT_ROWS`、`SQL_SELF_HEAL_MAX_RETRIES`（默认 3） | 超时、扫描熔断、结果上限与自愈 |
-| 资源与缓存 | `DB_POOL_SIZE`、`MAX_CONCURRENT_QUERIES`、`QUERY_CACHE_ENABLED`（默认关）、`QUERY_CACHE_TTL_SECONDS`、`QUERY_CACHE_MAX_ENTRIES`、`MAX_SCAN_CACHE_SIZE`、`SANDBOX_BACKEND`（默认 subprocess） | 连接池容量、全局并发闸、按主体隔离的查询结果缓存与扫描预检缓存；沙箱执行后端（`auto` = Docker 优先探测并缓存，`docker` = 显式要求容器强隔离，不可用如实降级并留日志） |
+| 资源与缓存 | `DB_POOL_SIZE`、`MAX_CONCURRENT_QUERIES`、`QUERY_CACHE_ENABLED`（默认关）、`QUERY_CACHE_TTL_SECONDS`、`QUERY_CACHE_MAX_ENTRIES`、`MAX_SCAN_CACHE_SIZE`、`SCAN_CACHE_TTL_SECONDS`、`SCAN_PRECHECK_TWO_STAGE`（默认开）、`SCAN_PRECHECK_SAFETY_FACTOR`（默认 32）、`SCAN_PRECHECK_AUDIT_RATE`（默认 0.01）、`SANDBOX_BACKEND`（默认 subprocess） | 连接池容量、全局并发闸、按主体隔离的查询结果缓存与扫描预检缓存（容量/TTL）、扫描行预检两段式开关与安全系数/复核采样比例；沙箱执行后端（`auto` = Docker 优先探测并缓存，`docker` = 显式要求容器强隔离，不可用如实降级并留日志） |
 | 澄清 | `CLARIFY_SLOT_TTL` | 多轮澄清槽位上下文 TTL（秒） |
 | 会话记忆 | `SESSION_MEMORY_TTL`、`SESSION_MEMORY_MAX_SESSIONS`、`SESSION_MEMORY_HISTORY_TURNS` | 多轮会话记忆的过期、容量与携带轮数 |
 | 编排与 Agent | `MAX_AGENT_STEPS`、`AGENT_REFLECTION_ENABLED`、`AGENT_DEFAULT_AUTONOMY`（默认 L2）、`ORCHESTRATOR_RECURSION_LIMIT`、`ORCHESTRATOR_CHECKPOINT_DB`、`SUBAGENT_MAX_PARALLEL`、`SUBAGENT_REDISPATCH_MAX`、`SYNTHESIZER_TIMEOUT` | 单轮工具链路步数与反思层开关；编排链路自主性分级默认档（L1 每步计划确认 / L2 计划确认 / L3 计划确认 + 沙箱代码执行高危确认 / L4 全自动通知）、迭代上限、checkpointer SQLite 落盘路径（空则内存）、Subagent 并发与重派上限、综合报告合成超时（秒） |
@@ -28,6 +28,36 @@
 - 生产环境必须替换 `AUTH_JWT_SECRET`。
 - `AUTH_STRICT=1` 或绑定非 localhost 地址时，启动会拒绝弱默认密钥与关闭鉴权。
 - `AUTH_ENABLED=0` 也不会信任客户端传入的 principal，服务端仍使用 `AUTH_DEFAULT_*`。
+
+## 扫描行预检两段式（`SCAN_PRECHECK_*`）
+
+DuckDB 的 `EXPLAIN ANALYZE` 会把查询**真的执行一遍**，所以"先计量后放行"的预检
+等于让每条冷查询跑两遍。两段式改成：先 `EXPLAIN` 拿估算，估算足够小就跳过实测，
+否则再走 `EXPLAIN ANALYZE`（设计见
+[../designs/2026-10-27-scan-precheck-two-stage-design.md](../designs/2026-10-27-scan-precheck-two-stage-design.md)）。
+
+- **估算只做"能否跳过实测"的判据，绝不做熔断值**：估算最大高估实测 750×，直接比
+  阈值会误杀合法查询；熔断判定一律用实测值。
+- **`SCAN_PRECHECK_SAFETY_FACTOR` 怎么调**：放行条件是 `est × SF < MAX_SCAN_ROWS`。
+  调低 SF 提高跳过率但压缩安全边际，调高反之。用
+  `python scripts/scan_precheck_calibration.py` 在**你的库**上重新校准，别照搬默认值。
+  当前库（35 条 golden + 38 条合成过滤族）实测：
+
+  | `MAX_SCAN_ROWS` | SF=4 | SF=8 | SF=32（默认） | SF=64 |
+  |---|---|---|---|---|
+  | 10,000,000（默认） | 35/35 | 35/35 | **35/35** | 35/35 |
+  | 1,000,000 | 35/35 | 35/35 | **35/35** | 35/35 |
+  | 100,000 | 35/35 | 32/35 | **8/35** | 0/35 |
+
+  即：默认阈值下加大 SF 不损失跳过率（安全边际白送）；只有把阈值收紧到十万级才需要
+  在"跳过率"与"安全边际"之间权衡。
+- **`SCAN_PRECHECK_AUDIT_RATE`**：跳过路径不产生实测值，SF 是否还够用在运行期不可
+  观测。该比例命中时强制走实测、按实测熔断，并记录 `est`/`actual` 偏差（超 SF 记
+  `WARNING: scan_precheck_estimate_drift`）。生产建议保持 0.01；排障可临时设 1.0。
+- **`SCAN_PRECHECK_TWO_STAGE=0`**：完全回退旧行为（只发 `EXPLAIN ANALYZE`），
+  调用序列、缓存写入与告警行为与改造前逐点一致，用于定位"是不是预检判据的问题"。
+- `count(*)` 这类走 DuckDB 元数据快路径的查询**恒走实测**（计划里只有
+  `COLUMN_DATA_SCAN ~1 row`，那个 1 行是"输出 1 行"不是"扫 1 行"），属预期。
 
 ## 模型供应商（providers）
 
