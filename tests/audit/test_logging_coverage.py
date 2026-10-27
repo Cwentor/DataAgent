@@ -67,6 +67,10 @@ def test_scan_cap_logs_warning_when_plan_unmeasurable(big_conn, caplog, monkeypa
     在"测不到"时仍有可采集的 warning，而非无声放行。
     """
     import exec.engine.duckdb_adapter as duckdb_adapter
+    from exec.guards import reset_unmeasurable_warnings
+
+    # 告警按后端去重（同一后端只 WARNING 一次），先清状态以免受用例顺序影响
+    reset_unmeasurable_warnings()
 
     # 模拟 duckdb 2.0 的计划渲染：无 "N rows" 算子行数（不可计量）+ 解析结果退化为 0
     # （二十一期：解析器迁 exec.engine.plan_text，执行路径经 duckdb_adapter 消费）
@@ -77,6 +81,31 @@ def test_scan_cap_logs_warning_when_plan_unmeasurable(big_conn, caplog, monkeypa
     result = execute_sql(big_conn, "SELECT count(*) FROM big", max_scan_rows=100)
     assert result.rows == [[200000]]
     assert any("扫描行数预检不可计量" in r.message for r in _records(caplog, "exec.guards"))
+
+
+def test_scan_cap_unmeasurable_warns_once_per_backend(big_conn, caplog, monkeypatch):
+    """同一后端只告警一次：可计量性对给定引擎恒定，逐查询重复 WARNING 会淹没日志。
+
+    回归背景（2026-10-27 审计 P1）：ClickHouse / Hive 恒不可计量，原实现每条查询
+    都刷一条 warning，长期掩盖真正异常。首次保留 WARNING，后续降为 DEBUG。
+    """
+    import exec.engine.duckdb_adapter as duckdb_adapter
+    from exec.guards import reset_unmeasurable_warnings
+
+    reset_unmeasurable_warnings()
+    monkeypatch.setattr(duckdb_adapter, "parse_scan_rows", lambda _plan: 0)
+    monkeypatch.setattr(duckdb_adapter, "plan_rows_measurable", lambda _plan: False)
+
+    # 两条不同 SQL（避开扫描行缓存），触发两次「不可计量」分支
+    execute_sql(big_conn, "SELECT count(*) FROM big", max_scan_rows=100)
+    execute_sql(big_conn, "SELECT count(*) FROM big WHERE 1=1", max_scan_rows=100)
+
+    warnings = [
+        r
+        for r in _records(caplog, "exec.guards")
+        if "扫描行数预检不可计量" in r.message and r.levelname == "WARNING"
+    ]
+    assert len(warnings) == 1, f"同一后端应只 WARNING 一次，实际 {len(warnings)} 次"
 
 
 def test_dataqa_findings_logged(tmp_path, monkeypatch, caplog):

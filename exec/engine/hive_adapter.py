@@ -33,6 +33,7 @@ DDL 语法无绑定参数，库名经反引号包裹 + 字符白名单校验（�
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -67,6 +68,27 @@ def _hive_error_base() -> type:
 
         _HIVE_ERROR_BASE = Error
     return _HIVE_ERROR_BASE
+
+
+def parse_set_echo(rows: list[tuple]) -> int | None:
+    """解析 ``SET <key>`` 的回显，取等号后的秒数；undefined/不可解析返回 None。
+
+    Hive 回显形态：``hive.query.timeout.seconds=2``（已设）或
+    ``hive.query.timeout.seconds is undefined``（未设）。用于 harden 的
+    fail-closed 校验——设置未生效等于服务端不终止超预算查询。
+    """
+    if not rows:
+        return None
+    _, sep, value = str(rows[0][0]).partition("=")
+    if not sep:
+        return None
+    value = value.strip()
+    if value.endswith("s"):  # Hive 部分版本回显带单位（2s）
+        value = value[:-1]
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def cell_to_csv_text(value: Any) -> str:
@@ -183,6 +205,11 @@ class HiveAdapter:
         cur = conn.cursor()
         try:
             cur.execute(sql)
+            # 无结果集语句（SET 赋值 / DDL / USE）：description 为 None，且
+            # fetchall 会抛 ProgrammingError("No result set")——加固语句与运维
+            # 脚本会走到这里，不能按「必有列」处理（2026-10-27 审计 P1）。
+            if not cur.description:
+                return [], []
             columns = [str(d[0]) for d in cur.description]
             types = [str(d[1]) for d in cur.description]
             rows = [
@@ -227,7 +254,9 @@ class HiveAdapter:
 
     def cancel(self, conn) -> None:
         # 同步执行模型（runAsync=False 阻塞在 ExecuteStatement）无可靠取消
-        # 通道（spec D5）：看门狗回调空操作，客户端读超时 + 部署侧查询超时兜底
+        # 通道（spec D5）：看门狗回调空操作，超时由会话级
+        # hive.query.timeout.seconds（harden 设置，服务端强制终止）+ 客户端读
+        # 超时双层兜底（2026-10-27 审计 P1 起服务端不再裸奔）。
         return None
 
     def engine_error(self, exc: BaseException) -> SqlExecutionError | None:
@@ -236,25 +265,44 @@ class HiveAdapter:
             return QueryTimeoutError(f"查询超时（Hive 客户端读超时）: {exc}")
         if isinstance(exc, _hive_error_base()):
             text = str(exc)
-            # TStatus 无结构化错误码，文本路线归一（同 CH；服务端查询超时
-            # 文本随部署配置存在，识别宽口径 "timeout"/"timed out"）
-            if "timeout" in text.lower() or "timed out" in text.lower():
+            # TStatus 无结构化错误码，文本路线归一（同 CH）。三种实测形态：
+            # 客户端 socket 读超时、HiveServer2 的 "TIMEDOUT" 状态（会话级
+            # hive.query.timeout.seconds 触发，实测文本
+            # "Expected states: [RUNNING, FINISHED], but found TIMEDOUT"）、
+            # 部分部署的 "timeout"/"timed out" 文案。
+            lowered = text.lower()
+            if any(tok in lowered for tok in ("timeout", "timed out", "timedout")):
                 return QueryTimeoutError(f"查询超时（Hive 服务端）: {text}")
             return SqlExecutionError(f"{type(exc).__name__}: {text}")
         return None
 
     def harden(self, conn) -> None:
-        """验证式加固（spec D4，fail-closed）：Hive 无会话级加固设置面。
+        """验证式加固（spec D4，fail-closed）：会话超时 + 身份回读。
 
-        可验证面 = 身份回读：``current_user()`` 必须与 dsn 用户一致——拦截
-        "用户名未生效" 的部署漂移。账号防线（只读）完全由部署侧授权承担
-        （SQL 标准授权 / Ranger，spec §9），此处为纵深防御最后一道回读校验。
+        加固项：
+
+        1. **会话级查询超时**（2026-10-27 审计 P1 修复）：``hive.query.timeout.seconds``
+           默认 ``0s`` 即**服务端永不终止任何查询**——Hive 此前只有客户端 socket
+           读超时（``QUERY_TIMEOUT_MS + 5s``），服务端对此一无所知，等于超时防线
+           完全裸奔。设为应用预算后查询在服务端被真正杀掉，同时把看门狗超时后的
+           连接污染窗口从约 3 秒压缩到亚秒级（配合 connstate 的废弃语义）。
+           实测（Hive 4.0.0）：设 2s 后 8 表笛卡尔积在 2.39s 被服务端终止。
+        2. **身份回读**：``current_user()`` 必须与 dsn 用户一致——拦截"用户名未
+           生效"的部署漂移。
+
+        账号防线（只读）仍完全由部署侧授权承担（SQL 标准授权 / Ranger，spec §9），
+        此处为纵深防御最后一道回读校验。
         """
         from security.errors import SecurityError
 
+        # 服务端超时按秒取整；向下取整会放大预算，故向上取整并至少 1 秒
+        timeout_s = max(1, math.ceil(settings.QUERY_TIMEOUT_MS / 1000.0))
         try:
             cur = conn.cursor()
             try:
+                cur.execute(f"SET hive.query.timeout.seconds={timeout_s}")
+                cur.execute("SET hive.query.timeout.seconds")
+                timeout_rows = cur.fetchall()
                 cur.execute("SELECT current_user()")
                 rows = cur.fetchall()
             finally:
@@ -263,6 +311,15 @@ class HiveAdapter:
             raise
         except Exception as exc:
             raise SecurityError(f"Hive 连接加固失败: {exc}") from exc
+
+        got_timeout = parse_set_echo(timeout_rows)
+        if got_timeout != timeout_s:
+            raise SecurityError(
+                f"Hive 会话超时设置未生效: hive.query.timeout.seconds={got_timeout!r}"
+                f"（期望 {timeout_s}s）——服务端将不会终止超预算查询，"
+                "fail-closed 拒绝连接"
+            )
+
         got = str(rows[0][0]) if rows else ""
         want = str(self._dsn["user"])
         if got != want:
@@ -272,7 +329,18 @@ class HiveAdapter:
             )
 
     def explain_scan_rows(self, conn, sql: str, timeout_ms: int | None) -> tuple[int, bool]:
-        """Hive EXPLAIN 无 actual rows：诚实不可计量（spec D3）；预算部署侧承载。"""
+        """Hive 无实际扫描行计量口径：诚实返回不可计量（spec D3）。
+
+        实测（Hive 4.0.0）：``EXPLAIN`` 输出不含 ``Statistics: Num rows``——
+        Hive 的 CBO 统计依赖 ``ANALYZE TABLE`` 显式收集，建仓链路未做，故
+        EXPLAIN 路线拿不到任何行数。不伪造估算：估算偏差会造成误熔断（比不熔断
+        更糟，直接拒绝合法查询）。
+
+        真实防线 = 会话级 ``hive.query.timeout.seconds``（harden 设置，服务端强制
+        终止）+ ``MAX_RESULT_ROWS`` 结果行数硬上限 + 编译层 LIMIT。扫描行预算在
+        Hive 上不可达，须由部署侧资源池/配额承担（见 docs/reviews/
+        2026-10-27-audit-project-issues.md §3.1）。
+        """
         return 0, False
 
     def insert_dataframe(self, conn, table: str, df) -> int:

@@ -30,17 +30,32 @@ class FakeHiveError(Exception):
 
 
 class FakeCursor:
-    """按脚本回放 execute 结果的假游标（记录语句供 LOAD 断言）。"""
+    """按脚本回放 execute 结果的假游标（记录语句供 LOAD 断言）。
+
+    额外模拟 Hive 的 ``SET`` 会话变量语义：``SET k=v`` 写入、``SET k`` 回显
+    （harden 的会话超时加固依赖这一回读校验）。
+    """
 
     def __init__(self, script: dict[str, list[tuple]]):
         self._script = script
         self.executed: list[str] = []
+        self.settings: dict[str, str] = {}
 
     def execute(self, sql: str, *a, **kw) -> None:
         self.executed.append(sql)
+        body = sql[4:].strip() if sql.upper().startswith("SET ") else None
+        if body and "=" in body:
+            key, _, value = body.partition("=")
+            self.settings[key.strip()] = value.strip()
 
     def fetchall(self):
-        return self._script.get(self.executed[-1], [])
+        sql = self.executed[-1]
+        if sql.upper().startswith("SET "):
+            key = sql[4:].strip()
+            if key in self.settings:
+                return [(f"{key}={self.settings[key]}",)]
+            return [(f"{key} is undefined",)]
+        return self._script.get(sql, [])
 
     @property
     def description(self):
@@ -160,6 +175,27 @@ def test_engine_error_pyhive_timeout_text(tmp_path):
     assert isinstance(err, QueryTimeoutError)
 
 
+def test_engine_error_server_side_timedout_state(tmp_path):
+    """HiveServer2 会话超时的真实错误文本：``found TIMEDOUT``（无空格连写）。
+
+    回归背景（2026-10-27 审计 P1）：原识别词只有 "timeout" / "timed out"，
+    而服务端终止查询时返回的是 ``Expected states: [RUNNING, FINISHED], but found
+    TIMEDOUT``，两者都不匹配 → 超时被误归一为 SqlExecutionError，自愈层会把它
+    当普通引擎错误重试（语义错误）。实测文本取自 Hive 4.0.0 +
+    ``SET hive.query.timeout.seconds=2``。
+    """
+    adapter = _adapter(tmp_path)
+    err = adapter.engine_error(
+        FakeHiveError(
+            "TGetResultSetMetadataResp(status=TStatus(statusCode=3, "
+            "errorMessage='Expected states: [RUNNING, FINISHED], but found TIMEDOUT'))"
+        )
+    )
+    from exec.errors import QueryTimeoutError
+
+    assert isinstance(err, QueryTimeoutError)
+
+
 def test_engine_error_generic_to_sql_execution_error(tmp_path):
     adapter = _adapter(tmp_path)
     err = adapter.engine_error(
@@ -179,6 +215,43 @@ def test_engine_error_foreign_exception_passthrough(tmp_path):
 def test_harden_identity_match_passes(tmp_path):
     conn = FakeConn({"SELECT current_user()": [("dataagent_ro",)]})
     _adapter(tmp_path).harden(conn)
+
+
+def test_harden_sets_session_query_timeout(tmp_path):
+    """harden 必须设会话级查询超时（2026-10-27 审计 P1）。
+
+    Hive 的 ``hive.query.timeout.seconds`` 默认 0 即服务端永不终止查询，此前
+    超时防线只有客户端 socket 读超时——服务端对超预算查询一无所知。
+    """
+    from config import settings
+
+    conn = FakeConn({"SELECT current_user()": [("dataagent_ro",)]})
+    _adapter(tmp_path).harden(conn)
+    executed = conn.cursors[0].executed
+    want = f"SET hive.query.timeout.seconds={max(1, -(-settings.QUERY_TIMEOUT_MS // 1000))}"
+    assert want in executed
+    # 设置后必须回读校验（fail-closed 而非「发了就当生效」）
+    assert "SET hive.query.timeout.seconds" in executed
+
+
+def test_harden_rejects_when_session_timeout_not_applied(tmp_path):
+    """设置未生效时拒绝连接：等于服务端不终止超预算查询，不能静默放行。"""
+    from security.errors import SecurityError
+
+    class _IgnoreSetCursor(FakeCursor):
+        def fetchall(self):
+            if self.executed[-1].upper().startswith("SET "):
+                return [("hive.query.timeout.seconds is undefined",)]
+            return super().fetchall()
+
+    class _Conn(FakeConn):
+        def __init__(self, script):
+            super().__init__(script)
+            self.cursor_obj = _IgnoreSetCursor(script)
+
+    conn = _Conn({"SELECT current_user()": [("dataagent_ro",)]})
+    with pytest.raises(SecurityError, match="会话超时设置未生效"):
+        _adapter(tmp_path).harden(conn)
 
 
 def test_harden_identity_mismatch_rejected(tmp_path):
