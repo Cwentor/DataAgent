@@ -12,6 +12,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +161,35 @@ def _json_dump(value: dict[str, Any] | None) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _record_params(record: AuditRecord) -> list[Any]:
+    """AuditRecord → ``_INSERT_SQL`` 的位置参数（顺序必须与列名严格对应）。
+
+    抽成函数是为了让单条写入与批量回灌共用同一份映射——两处各写一遍的话，
+    加字段时必然漏一处（本项目已有"审计写入两个入口"的前车之鉴，见审计报告 §8.3）。
+    """
+    return [
+        record.request_id,
+        record.session_id,
+        record.user,
+        record.principal,
+        record.prompt,
+        _json_dump(record.retrieval_context),
+        _json_dump(record.dsl),
+        record.sql,
+        record.latency_ms,
+        record.row_count,
+        record.scan_rows,
+        record.rewrites,
+        record.error,
+        record.detected_intent,
+        record.routing_latency_ms,
+        record.routing_reason,
+        record.answered_by,
+        record.planner_llm_error,
+        record.created_at,
+    ]
+
+
 class AuditStore:
     """线程安全的审计写入器（JSONL + DuckDB 审计表）。"""
 
@@ -241,60 +271,92 @@ class AuditStore:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = duckdb.connect(str(self.db_path))
             try:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS audit_log (
-                        request_id         VARCHAR,
-                        session_id         VARCHAR,
-                        user_name          VARCHAR,
-                        principal          VARCHAR,
-                        prompt             VARCHAR,
-                        retrieval_context  VARCHAR,
-                        dsl                VARCHAR,
-                        sql                VARCHAR,
-                        latency_ms         DOUBLE,
-                        row_count          BIGINT,
-                        scan_rows          BIGINT,
-                        rewrites           BIGINT,
-                        error              VARCHAR,
-                        detected_intent    VARCHAR,
-                        routing_latency_ms DOUBLE,
-                        routing_reason     VARCHAR,
-                        answered_by        VARCHAR,
-                        planner_llm_error  VARCHAR,
-                        created_at         VARCHAR
-                    )
-                    """,
-                    (),
-                )
-                if not self._schema_ready:
-                    self._conn = conn
-                    self._migrate_schema()
-                    self._conn = None
-                    self._schema_ready = True
-                conn.execute(
-                    _INSERT_SQL,
-                    [
-                        record.request_id,
-                        record.session_id,
-                        record.user,
-                        record.principal,
-                        record.prompt,
-                        _json_dump(record.retrieval_context),
-                        _json_dump(record.dsl),
-                        record.sql,
-                        record.latency_ms,
-                        record.row_count,
-                        record.scan_rows,
-                        record.rewrites,
-                        record.error,
-                        record.detected_intent,
-                        record.routing_latency_ms,
-                        record.routing_reason,
-                        record.answered_by,
-                        record.planner_llm_error,
-                        record.created_at,
-                    ],
-                )
+                self._ensure_schema(conn)
+                conn.execute(_INSERT_SQL, _record_params(record))
             finally:
                 conn.close()
+
+    def write_db_many(self, records: Sequence[AuditRecord]) -> int:
+        """批量**仅**写 DuckDB 通道，返回写入条数（回灌用）。
+
+        与 ``write`` 的区别：不碰 JSONL（回灌时 JSONL 本身就是源，再追加会翻倍），
+        且一次跨进程锁 + 一次连接 + ``executemany``，避免逐条开关连接——3469 条
+        逐条插入要几分钟，批量是秒级。
+
+        去重由调用方负责（见 ``existing_request_ids``）：这里不做 UPSERT，保持
+        「审计只追加不覆盖」的语义。
+        """
+        if not records:
+            return 0
+        with _CrossProcessLock(self.db_path):
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = duckdb.connect(str(self.db_path))
+            try:
+                self._ensure_schema(conn)
+                conn.executemany(_INSERT_SQL, [_record_params(r) for r in records])
+            finally:
+                conn.close()
+        return len(records)
+
+    def existing_request_ids(self, request_ids: Sequence[str]) -> set[str]:
+        """查询给定 request_id 中已存在于审计库的部分（回灌幂等去重用）。
+
+        分块查询：DuckDB 的 IN 列表过大会拖慢解析，按 500 一批。
+        """
+        found: set[str] = set()
+        if not request_ids or self.db_path is None:
+            return found
+        with _CrossProcessLock(self.db_path):
+            conn = duckdb.connect(str(self.db_path), read_only=True)
+            try:
+                has_table = conn.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_name = 'audit_log'"
+                ).fetchone()[0]
+                if not has_table:
+                    return found
+                for start in range(0, len(request_ids), 500):
+                    chunk = list(request_ids[start : start + 500])
+                    placeholders = ", ".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        f"SELECT request_id FROM audit_log WHERE request_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    found.update(str(r[0]) for r in rows if r[0] is not None)
+            finally:
+                conn.close()
+        return found
+
+    def _ensure_schema(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """建表 + 迁移（幂等）：写库前必须先确保列齐全，否则 INSERT 列数不匹配。"""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                request_id         VARCHAR,
+                session_id         VARCHAR,
+                user_name          VARCHAR,
+                principal          VARCHAR,
+                prompt             VARCHAR,
+                retrieval_context  VARCHAR,
+                dsl                VARCHAR,
+                sql                VARCHAR,
+                latency_ms         DOUBLE,
+                row_count          BIGINT,
+                scan_rows          BIGINT,
+                rewrites           BIGINT,
+                error              VARCHAR,
+                detected_intent    VARCHAR,
+                routing_latency_ms DOUBLE,
+                routing_reason     VARCHAR,
+                answered_by        VARCHAR,
+                planner_llm_error  VARCHAR,
+                created_at         VARCHAR
+            )
+            """,
+            (),
+        )
+        if not self._schema_ready:
+            self._conn = conn
+            self._migrate_schema()
+            self._conn = None
+            self._schema_ready = True
