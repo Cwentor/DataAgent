@@ -303,13 +303,18 @@ def test_scan_cache_key_normalizes_whitespace():
 
 def test_execute_sql_reuses_scan_cache(big_conn, monkeypatch):
     """命中缓存后不再重复 EXPLAIN ANALYZE（预检降本），scan_rows 仍正确回填。"""
+    from config import settings
     from exec.engine import watchdog
-    from exec.guards import cache_scan_rows, cached_scan_rows
+    from exec.engine.duckdb_adapter import DuckDbAdapter
+    from exec.guards import _adapter_scope, cache_scan_rows, cached_scan_rows
 
     sql = "SELECT grp, sum(id) AS s FROM big GROUP BY grp"
-    # 预填缓存（等价于首次预检的结果）
-    cache_scan_rows(sql, 200000)
-    assert cached_scan_rows(sql) == 200000
+    # 预填缓存（等价于首次预检的结果）。缓存键含作用域（后端 + 数据源），
+    # 故须用与 execute_sql 相同的 adapter 生成 scope（2026-10-27 审计 §9.1）。
+    adapter = DuckDbAdapter(settings.DB_PATH)
+    scope = _adapter_scope(adapter)
+    cache_scan_rows(sql, 200000, scope=scope)
+    assert cached_scan_rows(sql, scope=scope) == 200000
 
     # 若再次出现 EXPLAIN ANALYZE 预检（缓存未命中）则视为回归缺陷；真实执行不受影响
     # （二十一期：执行路径改经 exec.engine.watchdog.run_with_timeout，桩点随之迁移）
@@ -321,9 +326,62 @@ def test_execute_sql_reuses_scan_cache(big_conn, monkeypatch):
         return real_run(adapter, conn, s, timeout)
 
     monkeypatch.setattr(watchdog, "run_with_timeout", guarded_run)
-    result = execute_sql(big_conn, sql, max_scan_rows=500000)
+    result = execute_sql(big_conn, sql, max_scan_rows=500000, adapter=adapter)
     assert result.scan_rows == 200000  # 缓存值回填
     assert len(result.rows) == 7
+
+
+def test_scan_cache_is_isolated_by_backend_scope():
+    """同一 SQL 在不同后端/数据源上不得复用扫描行数（2026-10-27 审计 §9.1）。
+
+    体检脚本在同一进程串多后端时，若不隔离就会拿 MySQL 的扫描行数去判断 Hive
+    查询——行数量级差几个数量级，熔断形同虚设。
+    """
+    from exec.guards import cache_scan_rows, cached_scan_rows, clear_scan_cache
+
+    clear_scan_cache()
+    sql = "SELECT id FROM t"
+    cache_scan_rows(sql, 100, scope="duckdb|/tmp/a.duckdb")
+    assert cached_scan_rows(sql, scope="duckdb|/tmp/a.duckdb") == 100
+    assert cached_scan_rows(sql, scope="mysql|127.0.0.1:3306/gmall") is None
+    assert cached_scan_rows(sql) is None  # 空作用域亦不复用
+    clear_scan_cache()
+    assert cached_scan_rows(sql, scope="duckdb|/tmp/a.duckdb") is None
+
+
+def test_scan_cache_expires_after_ttl(monkeypatch):
+    """缓存条目按 TTL 过期：数据增长后不得继续用旧行数放行（审计 §9.1）。
+
+    实证背景：1000 行时缓存 scan_rows=1000，灌到 200 万行后同一 SQL 仍不熔断，
+    清缓存后才熔断——TTL 就是让「清缓存」自动发生。
+    """
+    import time
+
+    from config import settings
+    from exec.guards import (
+        _SCAN_CACHE,
+        _scan_cache_key,
+        cache_scan_rows,
+        cached_scan_rows,
+        clear_scan_cache,
+    )
+
+    clear_scan_cache()
+    scope = "duckdb|/tmp/a.duckdb"
+    sql = "SELECT id FROM t"
+    cache_scan_rows(sql, 1000, scope=scope)
+
+    # TTL=0 表示不过期
+    monkeypatch.setattr(settings, "SCAN_CACHE_TTL_SECONDS", 0)
+    assert cached_scan_rows(sql, scope=scope) == 1000
+
+    # 把写入时间往前拨，模拟 TTL 到期
+    key = _scan_cache_key(sql, scope)
+    rows, _ts = _SCAN_CACHE[key]
+    _SCAN_CACHE[key] = (rows, time.time() - 10)
+    monkeypatch.setattr(settings, "SCAN_CACHE_TTL_SECONDS", 5)
+    assert cached_scan_rows(sql, scope=scope) is None
+    clear_scan_cache()
 
 
 def test_scan_cache_capacity_from_settings(monkeypatch):

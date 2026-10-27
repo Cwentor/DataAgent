@@ -608,6 +608,11 @@ def _apply_runtime_env(backend: str) -> None:
             settings.HIVE_STAGING_CLIENT_DIR = str(PROJECT_ROOT / "build" / "hive_staging")
             settings.HIVE_STAGING_SERVER_DIR = "/opt/dataagent_staging"
     reset_default_pool()
+    # 扫描行预检缓存按「后端 + 数据源」隔离，但同一后端重灌数据后旧值仍会过时；
+    # 切后端/重建库是明确的数据变更点，顺手清掉（2026-10-27 审计 §9.1）。
+    from exec.guards import clear_scan_cache
+
+    clear_scan_cache()
 
 
 def _one_chain_round(question: str) -> tuple[bool, float, str | None]:
