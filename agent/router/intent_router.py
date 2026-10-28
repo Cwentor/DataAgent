@@ -41,6 +41,7 @@ from agent.agent import extract_json
 from agent.clarify import detect_clarifications
 from agent.glossary import METRIC_TERMS
 from agent.heuristic import DeterministicNL2DSL, dimension_members
+from agent.lexicon import TIME_SIGNAL_RE
 from agent.llm import LLMError, resolve_default_client
 from audit.logging import get_logger
 from config import settings
@@ -269,11 +270,9 @@ _METRIC_SIGNAL_RE = re.compile(
     r"|".join(re.escape(term) for term in sorted(METRIC_TERMS, key=len, reverse=True))
 )
 
-# 时间表达信号（与 clarify 层同源：绝对 / 相对时间词）
-_TIME_SIGNAL_RE = re.compile(
-    r"\d{4}\s*年|\d{1,2}\s*月|\d{1,2}\s*[日号]|\d{4}-\d{2}(-\d{2})?"
-    r"|上个月|上月|本月|这个月|今年|去年|今天|昨天|昨日|最近|过去|近\s*\d+|本周|上周|历史|累计|全部|所有|至今"
-)
+# 时间表达信号：由 agent.lexicon 提供（2026-10-28 冗余审计 §3.2）。
+# 路由层只关心"有没有时间线索"，故用「窗口 ∪ 全量标记」的并集；澄清层必须区分
+# 两者，用的是 TIME_WINDOW_RE —— 同一件事两种口径，不能共用一条正则。
 
 # 聚合 / 分析动作信号（分布 / 排行 / 趋势 / 对比 / 明细下钻 / 维度基数与枚举探查）
 _ANALYSIS_SIGNAL_RE = re.compile(
@@ -604,9 +603,7 @@ class IntentRouter:
         #    地区 / 品类词不算完整查询信号：仅含地区而缺指标与时间的输入
         #    （如无历史语境下的"那华南呢"）应走澄清反问，绝不盲目生成 SQL。
         looks_data_query = bool(
-            _METRIC_SIGNAL_RE.search(q)
-            or _TIME_SIGNAL_RE.search(q)
-            or _ANALYSIS_SIGNAL_RE.search(q)
+            _METRIC_SIGNAL_RE.search(q) or TIME_SIGNAL_RE.search(q) or _ANALYSIS_SIGNAL_RE.search(q)
         )
 
         if looks_data_query:

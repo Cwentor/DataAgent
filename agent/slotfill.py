@@ -17,8 +17,6 @@ import time
 from dataclasses import dataclass, field
 
 from agent.clarify import (
-    _ALL_TIME_MARKERS,
-    _TIME_RE,
     _contains_defined_metric,
     _has_all_time_marker,
     _has_time_expression,
@@ -182,6 +180,3 @@ __all__ = [
     "default_slot_store",
     "pending_kinds",
 ]
-
-# 保持 _ALL_TIME_MARKERS / _TIME_RE 导入被使用（供外部宽松时间判断复用）
-assert _ALL_TIME_MARKERS and _TIME_RE

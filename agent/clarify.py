@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 
 from agent.glossary import METRIC_TERMS
+from agent.lexicon import ALL_TIME_MARKERS, TIME_WINDOW_RE
 
 
 @dataclass(frozen=True)
@@ -46,14 +47,10 @@ _USER_SEGMENT_RE = re.compile(
     r"(高活跃|高活|低活|中活|沉默|沉睡|流失|复购|付费|忠实|核心|新增|潜在|活跃度)(用户)"
 )
 
-# 明确的时间窗口表达（绝对 / 相对）。
-_TIME_RE = re.compile(
-    r"\d{4}\s*年|\d{1,2}\s*月|\d{1,2}\s*[日号]|\d{4}-\d{2}(-\d{2})?"
-    r"|上个月|上月|本月|这个月|今年|去年|今天|昨天|昨日|最近|过去|近\s*\d+|本周|上周"
-)
-
-# 显式"全量历史"标记：出现即认为用户已明确时间口径，无需再反问。
-_ALL_TIME_MARKERS = ("全部", "所有", "历史", "累计", "至今")
+# 时间窗口表达与"全量历史"标记统一由 agent.lexicon 提供（2026-10-28 冗余审计
+# §3.2：本模块与 intent_router 曾各写一条正则且已漂移——router 版把 5 个全量标记
+# 混进了窗口正则）。两者语义必须分开：本模块用 TIME_WINDOW_RE 判"有没有具体时间
+# 窗口"，用 ALL_TIME_MARKERS 判"用户是否已明确全量口径"，混用会跳过该问的澄清。
 
 # 分组/分布/排行标记：出现则查询是"分布/排行"型，天然覆盖全量历史，不强制时间窗口。
 # 注意：不含"每日/每天/趋势/按月/按天"等时间维度词——时间维度查询反而更需要明确窗口。
@@ -82,11 +79,11 @@ _GROUPING_MARKERS = (
 
 
 def _has_time_expression(query: str) -> bool:
-    return bool(_TIME_RE.search(query))
+    return bool(TIME_WINDOW_RE.search(query))
 
 
 def _has_all_time_marker(query: str) -> bool:
-    return any(m in query for m in _ALL_TIME_MARKERS)
+    return any(m in query for m in ALL_TIME_MARKERS)
 
 
 def _has_grouping_marker(query: str) -> bool:
