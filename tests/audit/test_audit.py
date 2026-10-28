@@ -102,7 +102,6 @@ def test_audit_store_db_multi_writer_threads(tmp_path):
         conn.close()
     assert count == 20
     assert distinct == 20
-    assert conn is not None
 
 
 def test_audit_store_duckdb(tmp_path):
