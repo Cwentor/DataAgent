@@ -1573,8 +1573,9 @@ class ToolAgent:
             error_type=(tool_result.meta or {}).get("error_type"),
             display_type=tool_result.display_type,
         )
-        record.summary = _summarize(tool_result)
-        record.output = _summarize(tool_result)
+        summary = _summarize(tool_result)
+        record.summary = summary
+        record.output = summary
         return record, tool_result
 
     @staticmethod
