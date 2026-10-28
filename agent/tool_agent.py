@@ -29,6 +29,7 @@ import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from agent.agent import extract_json
@@ -143,6 +144,41 @@ def decompose_comparison(query: str) -> list[tuple[str, str]] | None:
             return None
         pairs.append((keep, sub))
     return pairs
+
+
+class _KeywordRoute(StrEnum):
+    """DATA_QUERY 的关键词分派结果（plan 与 run 共用同一判定，禁止各写一份）。"""
+
+    EXPORT = "export"
+    TREND = "trend"
+    DECOMPOSE = "decompose"
+    POINT = "point"
+
+
+def _route_by_keywords(
+    query: str, *, allow_decompose: bool = True
+) -> tuple[_KeywordRoute, list[tuple[str, str]]]:
+    """按关键词判定 DATA_QUERY 的执行形态，返回 (分派类型, 对比分解结果)。
+
+    **导出优先于趋势**：导出是"先 query_metric 再 export_report"的组合调用，
+    先判趋势会让「导出每日GMV趋势」只分析、不落文件。2026-10-28 冗余审计发现
+    ``DeterministicPlanner.plan`` 与 ``ToolAgent.run`` 的 base_dsl 分支各写了一份
+    分派且**顺序相反**——同一句话在"常规轮"与"会话继承轮"会选到不同工具
+    （docs/reviews/2026-10-28-audit-code-redundancy.md §3.2）。
+
+    ``allow_decompose=False`` 用于会话继承轮：那里已有 last_dsl，不需要再做
+    "A 和 B 哪个更 X"的跨步对比分解（保持既有行为，不扩大改动面）。
+    """
+    ql = query.lower()
+    if any(k in ql for k in _EXPORT_KEYWORDS):
+        return _KeywordRoute.EXPORT, []
+    if any(k in ql for k in _TREND_KEYWORDS):
+        return _KeywordRoute.TREND, []
+    if allow_decompose:
+        decomposed = decompose_comparison(query)
+        if decomposed:
+            return _KeywordRoute.DECOMPOSE, decomposed
+    return _KeywordRoute.POINT, []
 
 
 def _comparison_label(data: dict[str, Any]) -> str:
@@ -396,9 +432,9 @@ class DeterministicPlanner(Planner):
                 clarifications=[Clarification(**c) for c in clarifications if isinstance(c, dict)]
             )
 
-        # DATA_QUERY：关键词分派（趋势 / 导出 / 对比分解 / 即时点查）
-        ql = query.lower()
-        if any(k in ql for k in _EXPORT_KEYWORDS):
+        # DATA_QUERY：关键词分派（导出 / 趋势 / 对比分解 / 即时点查）
+        route, decomposed = _route_by_keywords(query)
+        if route is _KeywordRoute.EXPORT:
             # 组合调用：先查询（复用 query_metric），再把结果交给导出工具
             return PlanResult(
                 calls=[
@@ -406,13 +442,12 @@ class DeterministicPlanner(Planner):
                     ToolCall("export_report", {"query": query}, reason="导出为可下载文件"),
                 ]
             )
-        if any(k in ql for k in _TREND_KEYWORDS):
+        if route is _KeywordRoute.TREND:
             return PlanResult(
                 calls=[ToolCall("trend_analysis", {"query": query}, reason="时序/对比分析")]
             )
         # R2 对比分解：『A 和 B 哪个更 X』-> 分别查询每个对比对象，由合成器跨步对比
-        decomposed = decompose_comparison(query)
-        if decomposed:
+        if route is _KeywordRoute.DECOMPOSE:
             return PlanResult(
                 calls=[
                     ToolCall("query_metric", {"query": sub}, reason=f"对比分解：{entity}")
@@ -1241,22 +1276,22 @@ class ToolAgent:
 
         if base_dsl is not None:
             # 会话继承轮（web 层 resolve_context 已确定性判定 inherit/drilldown）：
-            # 复用确定性规划器的关键词分派（趋势 -> trend_analysis，导出 ->
-            # export_report，其余 -> query_metric），跳过 LLM 规划的再判定——
-            # 既省一次 LLM 调用，也消除下钻轮跨会话漂移（审计修复 M1/M2：LLM
-            # 对"那华南呢/按品类展开"偶发误判 clarify，破坏多轮确定性）。
-            # 合并 DSL 经 ToolContext.base_dsl 注入，仍走全部安全守卫与护栏。
-            ql = query.lower()
-            if any(k in ql for k in _TREND_KEYWORDS):
-                plan = PlanResult(
-                    calls=[ToolCall("trend_analysis", {"query": query}, reason="继承轮趋势分析")]
-                )
-            elif any(k in ql for k in _EXPORT_KEYWORDS):
+            # 复用确定性规划器的关键词分派（**同一份判定**，见 _route_by_keywords），
+            # 跳过 LLM 规划的再判定——既省一次 LLM 调用，也消除下钻轮跨会话漂移
+            # （审计修复 M1/M2：LLM 对"那华南呢/按品类展开"偶发误判 clarify，
+            # 破坏多轮确定性）。合并 DSL 经 ToolContext.base_dsl 注入，仍走全部
+            # 安全守卫与护栏。
+            route, _ = _route_by_keywords(query, allow_decompose=False)
+            if route is _KeywordRoute.EXPORT:
                 plan = PlanResult(
                     calls=[
                         ToolCall("query_metric", {"query": query}, reason="导出前先查询数据"),
                         ToolCall("export_report", {"query": query}, reason="导出为可下载文件"),
                     ]
+                )
+            elif route is _KeywordRoute.TREND:
+                plan = PlanResult(
+                    calls=[ToolCall("trend_analysis", {"query": query}, reason="继承轮趋势分析")]
                 )
             else:
                 plan = PlanResult(
