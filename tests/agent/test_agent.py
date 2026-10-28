@@ -29,6 +29,42 @@ def test_heuristic_covers_all_golden_questions():
         assert dsl == expected, "未命中: " + str(item["id"])
 
 
+def test_province_in_list_follows_query_order_not_catalog(monkeypatch):
+    """多省 IN 列表的顺序取**提问中出现的先后**，与词表顺序无关。
+
+    2026-10-28 冗余审计 §3.2.1：维度成员有两条顺序不同的来源——
+    `config/semantic.json` 种子按行政区划排（浙江在广东前），数仓重建走
+    `SELECT DISTINCT … ORDER BY 1` 即 Unicode 码位序（广东 U+5E7F 在浙江 U+6D59 前）。
+    若按词表顺序输出，「广东省或浙江省」会因启动路径不同生成
+    `IN ('浙江','广东')` 或 `IN ('广东','浙江')`：语义等价但结果不确定，
+    golden 断言随之变脆（先跑 ensure_db 再跑 golden 即翻转）。
+
+    本用例把词表顺序钉成与提问**相反**，确保实现取的是提问顺序而非词表顺序。
+    """
+    from semantic import catalog
+
+    monkeypatch.setitem(catalog.DIMENSION_MEMBERS, "province", ("浙江", "广东", "江苏"))
+
+    dsl = DeterministicNL2DSL().run("广东省或浙江省的GMV")
+    prov = [f for f in dsl.filters if f.field == "province"]
+    assert len(prov) == 1
+    assert prov[0].operator.value == "in"
+    assert list(prov[0].value) == ["广东", "浙江"]
+
+
+def test_province_in_list_order_stable_across_catalog_orders(monkeypatch):
+    """同一提问在两种词表顺序下必须生成完全相同的 DSL（确定性回归守卫）。"""
+    from semantic import catalog
+
+    query = "广东省或浙江省的GMV"
+    monkeypatch.setitem(catalog.DIMENSION_MEMBERS, "province", ("浙江", "广东"))
+    seed_order = DeterministicNL2DSL().run(query)
+    monkeypatch.setitem(catalog.DIMENSION_MEMBERS, "province", ("广东", "浙江"))
+    warehouse_order = DeterministicNL2DSL().run(query)
+
+    assert seed_order == warehouse_order
+
+
 @pytest.mark.parametrize(
     "query",
     ["今天天气怎么样？", "今天的天气怎么样", "我想看一下数据"],

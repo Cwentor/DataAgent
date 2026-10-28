@@ -400,8 +400,8 @@
      "field": "province",
      "operator": "in",
      "value": [
-      "浙江",
-      "广东"
+      "广东",
+      "浙江"
      ]
     },
     {
@@ -424,7 +424,7 @@
    "fill_gaps": false,
    "top_n": null
   },
-  "sql": "SELECT f.category1_name AS \"category1_name\", SUM(f.split_total_amount) AS \"gmv\"\nFROM order_detail f\nJOIN base_province pr ON pr.province_id = f.province_id\nWHERE f.order_status = '1002' AND pr.province_name IN ('浙江', '广东') AND f.split_total_amount BETWEEN 100.0 AND 5000.0\nGROUP BY f.category1_name\nORDER BY \"gmv\" DESC\nLIMIT 100"
+  "sql": "SELECT f.category1_name AS \"category1_name\", SUM(f.split_total_amount) AS \"gmv\"\nFROM order_detail f\nJOIN base_province pr ON pr.province_id = f.province_id\nWHERE f.order_status = '1002' AND pr.province_name IN ('广东', '浙江') AND f.split_total_amount BETWEEN 100.0 AND 5000.0\nGROUP BY f.category1_name\nORDER BY \"gmv\" DESC\nLIMIT 100"
  },
  {
   "id": "Q11",
