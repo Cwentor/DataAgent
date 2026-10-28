@@ -291,6 +291,36 @@ def test_get_renderer_supports_postgres():
         settings.SQL_DIALECT = old
 
 
+def test_get_renderer_caches_instance_per_dialect(monkeypatch):
+    """同一方言复用实例，切换方言即时换实现（2026-10-28 冗余审计 §4.1）。
+
+    一次编译要取 renderer 27+ 次，原实现每次都走惰性工厂实例化。渲染器无实例
+    状态（五个实现都没有 __init__ / self.x 赋值），按方言名缓存安全。
+    缓存键是方言名，所以 monkeypatch settings 切换方言仍然即时生效——本用例
+    同时钉住这两点：复用 + 不粘住旧方言。
+    """
+    import config.settings as settings
+    from compiler.dialect.mysql import MySqlRenderer
+    from compiler.dialect.postgres import PostgresRenderer
+
+    old = settings.SQL_DIALECT
+    try:
+        settings.SQL_DIALECT = "mysql"
+        first = get_renderer()
+        assert get_renderer() is first, "同方言应复用同一实例"
+        assert isinstance(first, MySqlRenderer)
+
+        settings.SQL_DIALECT = "postgres"
+        switched = get_renderer()
+        assert isinstance(switched, PostgresRenderer), "切换方言必须即时生效"
+        assert switched is not first
+
+        settings.SQL_DIALECT = "mysql"
+        assert get_renderer() is first, "切回原方言应命中已缓存实例"
+    finally:
+        settings.SQL_DIALECT = old
+
+
 class TestCompilePostgresDialect:
     """端到端：PostgreSQL 方言编译产物结构断言（sqlglot postgres 可解析即语法合法）。"""
 
