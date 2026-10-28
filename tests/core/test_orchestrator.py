@@ -313,23 +313,28 @@ def test_normalize_dsl_draft_repairs_common_llm_typos():
 
 
 def test_normalize_dsl_draft_passes_valid_payload_unchanged():
-    """合法载荷规范化后语义不变（可继续通过网关契约校验）。"""
+    """合法载荷规范化后语义不变（可继续通过网关契约校验）。
+
+    必须显式断言"相等"：只调 ``validate_dsl_payload`` 只能证明结果合法，
+    规范化把字段改坏（例如丢掉 dimensions）本用例仍会绿——2026-10-28 审计
+    发现原用例正是这个形态（docs/reviews/2026-10-28-audit-code-redundancy.md §7.1）。
+    """
     from core.orchestrator.nodes import _normalize_dsl_draft
     from core.retrieval.guardrails import validate_dsl_payload
 
-    d = _normalize_dsl_draft(
-        {
-            "metrics": [
-                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
-            ],
-            "dimensions": [{"field": "province"}],
-            "time_filter": {
-                "range_type": "absolute",
-                "absolute": {"start": "2024-05-01", "end": "2024-05-08"},
-            },
-        }
-    )
+    payload = {
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
+        "dimensions": [{"field": "province"}],
+        "time_filter": {
+            "range_type": "absolute",
+            "absolute": {"start": "2024-05-01", "end": "2024-05-08"},
+        },
+    }
+    d = _normalize_dsl_draft(payload)
     validate_dsl_payload(d, where="test")  # 不抛即通过契约
+    assert d == payload, f"合法载荷被规范化改动：{d}"
 
 
 def test_planner_prompt_contract_examples_align_with_schema():

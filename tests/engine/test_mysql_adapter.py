@@ -245,6 +245,12 @@ def test_physical_columns_uses_percent_placeholder(monkeypatch):
 
     二十一期起该分支用 `?`，只被 fake 连接单测覆盖，从未在真库执行；本用例
     锁定参数风格（Review Focus 4）与"库名取自 dsn"（注入独立库时自洽）。
+
+    根因（原有一条 `test_question_mark_placeholder_breaks_percent_formatting`
+    用 `sql % ("gmall",)` 演示过，2026-10-28 审计按"不测项目代码"删除）：
+    pymysql 的 ``execute`` 内部走 ``query % escaped_args``，SQL 里没有 ``%s``
+    却传了 args 时，Python 的 ``%`` 抛 ``TypeError: not all arguments converted
+    during string formatting``。所以 ``?`` 不是"另一种占位符风格"，而是必失败。
     """
     conn = _Conn([])
     adapter = MySqlAdapter({"database": "gmall_test"})
@@ -288,16 +294,3 @@ def test_physical_columns_keeps_injected_connection_open():
     conn = _Conn([])
     MySqlAdapter().physical_columns(conn)
     assert conn.closed is False
-
-
-def test_question_mark_placeholder_breaks_percent_formatting():
-    """根因锚：pymysql 的 execute 内部走 `query % escaped_args`。
-
-    SQL 里没有 `%s` 却传了 args → Python `%` 抛
-    `TypeError: not all arguments converted during string formatting`。
-    这解释了二十一期 `?` 分支为何在真库上必失败（CI 从未执行该路径）。
-    """
-    # 用变量承载 SQL：避免 ruff 把"故意为之的 % 格式化"判成笔误（F507/UP031）
-    sql = "SELECT 1 FROM information_schema.columns WHERE table_schema = ?"
-    with pytest.raises(TypeError, match="not all arguments converted"):
-        _ = sql % ("gmall",)
