@@ -238,6 +238,26 @@ _DIALECT_EXTRA_KEYWORDS: dict[str, frozenset[str]] = {
         }
     ),
 }
+# 语句级黑名单的预编译形态（按方言缓存）。
+# 2026-10-28 冗余审计 §4.3：原实现对每个关键字现场 `re.search(rf"\b{kw}\b")`，
+# 每次执行 19~42 次编译（实测 179 µs）；合并为单条 alternation 后 15.9 µs（11×）。
+# 语义等价：`\b(?:A|B)\b` 与逐个 `\bA\b` 的命中集合相同，全部关键字均为纯
+# 大写字母标识符（无正则元字符），`re.escape` 只是形式上的防御。
+# 命中顺序由「集合遍历序」变为「文本中首次出现的位置」——原实现遍历 set，
+# 多关键字命中时报告哪个关键字本就不确定，改动不引入新的不确定性。
+_FORBIDDEN_KEYWORD_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _forbidden_keyword_re(dialect: str) -> re.Pattern[str]:
+    """方言 -> 语句级黑名单关键字 alternation 正则（进程内缓存）。"""
+    cached = _FORBIDDEN_KEYWORD_RE_CACHE.get(dialect)
+    if cached is None:
+        keywords = _FORBIDDEN_SQL_KEYWORDS | _DIALECT_EXTRA_KEYWORDS.get(dialect, frozenset())
+        cached = re.compile(r"\b(?:" + "|".join(sorted(keywords)) + r")\b")
+        _FORBIDDEN_KEYWORD_RE_CACHE[dialect] = cached
+    return cached
+
+
 # MySQL 函数族：load_file 读服务器文件 / sleep、benchmark DoS / 锁滥用族
 _DIALECT_EXTRA_FUNC_RE: dict[str, re.Pattern[str]] = {
     "mysql": re.compile(
@@ -352,7 +372,9 @@ def _func_name(node: exp.Func) -> str | None:
     return name.lower() if name else None
 
 
-def _assert_read_only_structure(sql: str, dialect: str = "duckdb") -> None:
+def _assert_read_only_structure(
+    sql: str, dialect: str = "duckdb", *, root: exp.Expression | None = None
+) -> exp.Expression:
     """sqlglot AST 结构化只读校验（P0-1 主防线，取代纯正则黑名单）。
 
     五个条件（全部 fail-closed）：
@@ -363,14 +385,20 @@ def _assert_read_only_structure(sql: str, dialect: str = "duckdb") -> None:
        SELECT INTO 写表语句；
     5. MySQL 方言额外拒绝锁语句节点（FOR UPDATE / LOCK IN SHARE MODE——
        读锁同样占用锁资源且形态非纯只读）。
+
+    ``root``：调用方已解析好的 AST（同一 SQL 在 execute_sql 链路上要被校验两次，
+    实测单次解析 223 µs，重复解析纯属浪费——2026-10-28 冗余审计 §4.1）。
+    传入时跳过解析与「恰好一条语句」检查，**要求调用方已自行校验语句数**；
+    不传则按原语义自行解析校验。
     """
-    try:
-        statements = sqlglot.parse(sql, read=dialect)
-    except sqlglot.errors.ParseError as exc:
-        raise UnsafeSqlError(f"SQL 解析失败，拒绝执行: {exc}") from exc
-    if len(statements) != 1:
-        raise UnsafeSqlError("拒绝执行多语句 SQL")
-    root = statements[0]
+    if root is None:
+        try:
+            statements = sqlglot.parse(sql, read=dialect)
+        except sqlglot.errors.ParseError as exc:
+            raise UnsafeSqlError(f"SQL 解析失败，拒绝执行: {exc}") from exc
+        if len(statements) != 1:
+            raise UnsafeSqlError("拒绝执行多语句 SQL")
+        root = statements[0]
     if not isinstance(root, (exp.Select, exp.Union)):
         raise UnsafeSqlError(f"仅允许执行 SELECT 只读查询（实际为 {type(root).__name__}）")
     for node in root.walk():
@@ -396,9 +424,10 @@ def _assert_read_only_structure(sql: str, dialect: str = "duckdb") -> None:
                 # 产物（内部 CTE 名），catalog 白名单表名无注入面
                 if dialect == "duckdb" or not _SAFE_IDENT_NAME_RE.match(this.name):
                     raise UnsafeSqlError(f"拒绝字符串/引号字面量表引用: {node.sql()}")
+    return root
 
 
-def assert_read_only_sql(sql: str, dialect: str | None = None) -> None:
+def assert_read_only_sql(sql: str, dialect: str | None = None) -> exp.Expression:
     """硬断言 SQL 是单条只读 SELECT/WITH（P0-1 加固；方言感知，spec D11）。
 
     参数 dialect 缺省取当前后端 adapter 的方言（测试可显式指定）。
@@ -414,18 +443,21 @@ def assert_read_only_sql(sql: str, dialect: str | None = None) -> None:
     4. sqlglot AST 结构性校验（按方言解析）：根节点必须为 SELECT，全树拒绝
        被禁函数家族、引号字符串表引用、SELECT INTO 与（MySQL）锁语句
        （取代纯正则黑名单，杜绝引号/别名/嵌套绕过）。
+
+    返回：解析出的根节点 AST。供 ``execute_sql`` 直接传给下游审计门，避免同一
+    SQL 在一条执行链路上被重复解析（2026-10-28 冗余审计 §4.1，实测 3 → 1 次）。
     """
     dialect = _resolve_dialect(dialect)
-    code = _sql_code_without_literals(_strip_sql_comments(sql))
+    stripped = _strip_sql_comments(sql)
+    code = _sql_code_without_literals(stripped)
     tokens = code.strip().split()
     if not tokens or tokens[0].upper() not in {"SELECT", "WITH"}:
         raise UnsafeSqlError("仅允许执行 SELECT/WITH 只读查询")
     if ";" in code:
         raise UnsafeSqlError("拒绝执行多语句 SQL")
-    upper = code.upper()
-    for keyword in _FORBIDDEN_SQL_KEYWORDS | _DIALECT_EXTRA_KEYWORDS.get(dialect, frozenset()):
-        if re.search(rf"\b{keyword}\b", upper):
-            raise UnsafeSqlError(f"检测到被禁止的 SQL 关键字: {keyword}")
+    matched = _forbidden_keyword_re(dialect).search(code.upper())
+    if matched:
+        raise UnsafeSqlError(f"检测到被禁止的 SQL 关键字: {matched.group(0)}")
     extra_func = _DIALECT_EXTRA_FUNC_RE.get(dialect)
     if _FORBIDDEN_FUNCTION_CALL_RE.search(code) or (
         extra_func is not None and extra_func.search(code)
@@ -433,9 +465,9 @@ def assert_read_only_sql(sql: str, dialect: str | None = None) -> None:
         raise UnsafeSqlError(
             "检测到被禁止的表函数调用（read_*/ *_scan/glob/query 可读取外部文件，已拒绝）"
         )
-    if _FROM_STRING_TABLE_RE.search(_strip_sql_comments(sql)):
+    if _FROM_STRING_TABLE_RE.search(stripped):
         raise UnsafeSqlError("拒绝字符串字面量表引用（FROM '<path>' 等价直接读取本地文件）")
-    _assert_read_only_structure(sql, dialect=dialect)
+    return _assert_read_only_structure(sql, dialect=dialect)
 
 
 # --------------------------------------------------------------------------- #
@@ -751,7 +783,7 @@ def execute_sql(
 
         adapter = get_adapter()
     try:
-        assert_read_only_sql(sql, dialect=adapter.dialect)
+        root = assert_read_only_sql(sql, dialect=adapter.dialect)
     except UnsafeSqlError:
         # 高危拦截（P0 防线）：必须留痕供安全审计，不改变异常传播
         logger.exception("只读白名单拦截非只读/高危 SQL")
@@ -761,7 +793,11 @@ def execute_sql(
     from exec.audit import GuardrailRejected, assert_guardrails
 
     try:
-        guard_warnings = [f.to_dict() for f in assert_guardrails(sql, dialect=adapter.dialect)]
+        # 把已解析的 AST 传下去：审计门里的只读结构校验与解析复用同一份，
+        # 同一 SQL 在执行链路上只解析一次（2026-10-28 冗余审计 §4.1）。
+        guard_warnings = [
+            f.to_dict() for f in assert_guardrails(sql, dialect=adapter.dialect, root=root)
+        ]
     except GuardrailRejected as exc:
         logger.error("执行前审计拒绝（笛卡尔积/只读结构违规）", extra={"error": str(exc)[:500]})
         raise

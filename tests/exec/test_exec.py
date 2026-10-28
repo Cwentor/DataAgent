@@ -289,6 +289,43 @@ def test_unsafe_sql_allows_normal_statements(big_conn):
 
 
 # --------------------------------------------------------------------------- #
+# 单次解析（2026-10-28 冗余审计 §4.1）：execute_sql 链路上 SQL 只解析一次
+# --------------------------------------------------------------------------- #
+def test_assert_read_only_sql_returns_parsed_root():
+    """只读断言返回解析出的 AST，供下游审计门复用（省一次 sqlglot.parse）。"""
+    from sqlglot import exp
+
+    root = assert_read_only_sql("SELECT 1 AS a", dialect="duckdb")
+    assert isinstance(root, exp.Select)
+
+
+def test_execute_sql_parses_sql_once(big_conn, monkeypatch):
+    """execute_sql 全链路只解析一次 SQL。
+
+    原实现解析 3 次：只读断言 1 次 + 审计门自身 1 次 + 审计门内的只读结构
+    校验 1 次（实测单次 223 µs，每查询约 0.45 ms 纯浪费）。现在只读断言把
+    AST 传下去，审计门复用——本用例是这条优化的回归锚：若有人把 AST 参数
+    从调用链上摘掉，计数会立刻回到 2~3。
+    """
+    import sqlglot
+
+    from exec.guards import execute_sql as _execute
+
+    original = sqlglot.parse
+    calls: list[int] = []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sqlglot, "parse", counting)
+    # audit.py 以 `import sqlglot` 后 `sqlglot.parse(...)` 调用，模块属性打补丁即生效
+    result = _execute(big_conn, "SELECT grp, sum(id) AS s FROM big GROUP BY grp")
+    assert result.rows
+    assert len(calls) == 1, f"SQL 被解析 {len(calls)} 次，应为 1 次"
+
+
+# --------------------------------------------------------------------------- #
 # EXPLAIN 预检缓存（整改指令3-3）：同一 SQL 自愈重试不重复预检
 # --------------------------------------------------------------------------- #
 def test_scan_cache_key_normalizes_whitespace():
