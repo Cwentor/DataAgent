@@ -44,6 +44,18 @@ def dimension_members(field: str) -> tuple[str, ...]:
     return catalog.DIMENSION_MEMBERS.get(field, ())
 
 
+# 目录派生的问法表缓存（2026-10-28 冗余审计 §4.2）。
+# 两张表都只依赖语义目录（进程内稳定），但一次 run() 里被反复重建：
+# `_dim_keyword_table` 被 `_dimensions` / `_enum_dimension_field` 各调一次（2-3 次），
+# `_having_field_alias_map` 每个 HAVING 捕获词调一次——每次都要遍历整个 COLUMNS /
+# METRICS 并逐别名展开。改用 catalog.EpochCache：目录刷新（apply_builtin /
+# refresh_catalog）后版本号 +1，下次取用自动重建，不需要在这里挂 cache_clear。
+_DIM_KEYWORD_TABLE_CACHE: catalog.EpochCache[tuple[tuple[tuple[str, ...], str, str], ...]] = (
+    catalog.EpochCache()
+)
+_HAVING_ALIAS_MAP_CACHE: catalog.EpochCache[dict[str, str]] = catalog.EpochCache()
+
+
 def region_provinces(region: str) -> list[str]:
     """大区 -> 数仓实际存在的省份列表（行政区划映射 ∩ 成员词汇表）。
 
@@ -249,21 +261,28 @@ class DeterministicNL2DSL:
         每个 metric 形状中首个 aggregate 条目的 alias 即聚合产物别名，其全部
         aliases 均映射到它（如"销售额"->gmv、"订单量"->order_count）；
         键统一小写，匹配时对问句捕获词取小写（"GMV"/"gmv" 等价）。
+
+        结果按目录版本号缓存（见 `_HAVING_ALIAS_MAP_CACHE`）——返回值是共享的
+        dict，调用方只读，不要原地修改。
         """
-        mapping: dict[str, str] = {}
-        for metric in catalog.METRICS:
-            shape = metric.get("shape")
-            entries = shape if isinstance(shape, list) else [shape] if shape else []
-            aggregate_alias: str | None = None
-            for entry in entries:
-                if isinstance(entry, dict) and entry.get("kind") == "aggregate":
-                    aggregate_alias = entry.get("alias")
-                    break
-            if aggregate_alias is None:
-                continue
-            for alias_word in metric.get("aliases", ()):
-                mapping[alias_word.lower()] = aggregate_alias
-        return mapping
+
+        def build() -> dict[str, str]:
+            mapping: dict[str, str] = {}
+            for metric in catalog.METRICS:
+                shape = metric.get("shape")
+                entries = shape if isinstance(shape, list) else [shape] if shape else []
+                aggregate_alias: str | None = None
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("kind") == "aggregate":
+                        aggregate_alias = entry.get("alias")
+                        break
+                if aggregate_alias is None:
+                    continue
+                for alias_word in metric.get("aliases", ()):
+                    mapping[alias_word.lower()] = aggregate_alias
+            return mapping
+
+        return _HAVING_ALIAS_MAP_CACHE.get(build)
 
     def _metrics(self, q: str) -> list[dict[str, Any]]:
         """关键词 -> 指标形态的表驱动解析（数据源 = catalog.METRICS = semantic.json metrics[]）。
@@ -466,18 +485,23 @@ class DeterministicNL2DSL:
         关键词取自语义目录字段别名（单一事实源 = catalog.COLUMNS[field].aliases），
         剔除成员值（广东/苹果等只是取值不是问法词：排除它们避免"广东有多少种品类"
         被误判为省份基数）；另补目录别名未覆盖的问法方言词
-        （见 _DIM_KEYWORD_SUPPLEMENTS）；每次动态读取，目录刷新即时生效。
+        （见 _DIM_KEYWORD_SUPPLEMENTS）；每次动态读取，目录刷新即时生效
+        （按目录版本号缓存，见 `_DIM_KEYWORD_TABLE_CACHE`）。
         """
-        table: list[tuple[tuple[str, ...], str, str]] = []
-        for field, count_alias in cls._DIM_COUNT_ALIASES.items():
-            meta = catalog.COLUMNS.get(field)
-            if meta is None:
-                continue  # 目录未登记的维度不参与探查（fail-closed）
-            members = set(dimension_members(field))
-            keywords = tuple(a for a in meta.aliases if a not in members)
-            keywords += cls._DIM_KEYWORD_SUPPLEMENTS.get(field, ())
-            table.append((keywords, field, count_alias))
-        return tuple(table)
+
+        def build() -> tuple[tuple[tuple[str, ...], str, str], ...]:
+            table: list[tuple[tuple[str, ...], str, str]] = []
+            for field, count_alias in cls._DIM_COUNT_ALIASES.items():
+                meta = catalog.COLUMNS.get(field)
+                if meta is None:
+                    continue  # 目录未登记的维度不参与探查（fail-closed）
+                members = set(dimension_members(field))
+                keywords = tuple(a for a in meta.aliases if a not in members)
+                keywords += cls._DIM_KEYWORD_SUPPLEMENTS.get(field, ())
+                table.append((keywords, field, count_alias))
+            return tuple(table)
+
+        return _DIM_KEYWORD_TABLE_CACHE.get(build)
 
     def _enum_dimension_field(self, q: str) -> str | None:
         """维度枚举探查：识别"有哪些 [维度]""[所有/全部] [维度]"返回维度字段。

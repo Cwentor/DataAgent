@@ -65,6 +65,30 @@ def test_province_in_list_order_stable_across_catalog_orders(monkeypatch):
     assert seed_order == warehouse_order
 
 
+def _keywords_of(table, field):
+    return next(keywords for keywords, f, _ in table if f == field)
+
+
+def test_dim_keyword_table_rebuilds_after_catalog_epoch_bump(monkeypatch):
+    """维度关键词表按目录版本号缓存，目录变更后必须重建（缓存不能 stale）。
+
+    关键词表会剔除"成员值"（广东/苹果等只是取值不是问法词）。把某个别名词
+    伪装成成员值，重建后该词应被剔除——以此证明缓存确实跟着目录走。
+    """
+    from semantic import catalog
+
+    h = DeterministicNL2DSL()
+    # 前置：先取一次把表灌进缓存，此时"省份"是合法问法词
+    assert "省份" in _keywords_of(h._dim_keyword_table(), "province")
+
+    monkeypatch.setitem(catalog.DIMENSION_MEMBERS, "province", ("省份", "广东"))
+    # 只改目录不推进版本号：缓存仍是旧值（这正是"目录必须 bump"的原因）
+    assert "省份" in _keywords_of(h._dim_keyword_table(), "province")
+
+    catalog.bump_cache_epoch()
+    assert "省份" not in _keywords_of(h._dim_keyword_table(), "province")
+
+
 @pytest.mark.parametrize(
     "query",
     ["今天天气怎么样？", "今天的天气怎么样", "我想看一下数据"],

@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from pydantic import ValidationError
 
@@ -282,6 +284,98 @@ def test_tool_end_preview_rows_points_at_inputs_dir(tmp_path, monkeypatch):
         preview = e["payload"]["tool"]["output"].get("preview_rows")
         assert preview, "预览行不应为空（物化文件在 workspace/inputs/ 下）"
         assert all(len(r) >= 1 for r in preview)
+
+
+# --------------------------------------------------------------------------- #
+# Parquet 预览缓存（2026-10-28 冗余审计 §4.1：一轮编排重复读 3-4 次）
+# --------------------------------------------------------------------------- #
+def _write_preview_parquet(path, n=50):
+    import pandas as pd
+
+    pd.DataFrame({"k": [f"a{i}" for i in range(n)], "v": list(range(n))}).to_parquet(path)
+    return path
+
+
+def test_preview_rows_caches_by_path_and_mtime(tmp_path, monkeypatch):
+    """同一份 parquet 只解析一次；文件被重写（mtime 变）后重新读。"""
+    import pandas as pd
+
+    from core.orchestrator import nodes as nodes_mod
+
+    nodes_mod.clear_preview_cache()
+    path = _write_preview_parquet(tmp_path / "ds.parquet")
+
+    real_read = pd.read_parquet
+    reads: list[str] = []
+
+    def counting(*args, **kwargs):
+        reads.append(str(args[0]))
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", counting)
+
+    first = nodes_mod._preview_rows(str(path))
+    second = nodes_mod._preview_rows(str(path))
+    assert first == second
+    assert len(reads) == 1, f"同一文件被解析 {len(reads)} 次，应为 1 次"
+
+    # 重写文件 -> mtime 变 -> 缓存失效
+    _write_preview_parquet(path, n=3)
+    os.utime(path, (0, 0))  # 明确制造不同的 mtime，规避文件系统时间粒度
+    third = nodes_mod._preview_rows(str(path))
+    assert len(third) == 3
+    assert len(reads) == 2
+
+
+def test_preview_rows_cache_serves_larger_limit_when_enough(tmp_path):
+    """已缓存行够用时直接切片，不再重读；不够用时才重读。"""
+    import pandas as pd
+
+    from core.orchestrator import nodes as nodes_mod
+
+    nodes_mod.clear_preview_cache()
+    path = _write_preview_parquet(tmp_path / "ds.parquet", n=50)
+
+    real_read = pd.read_parquet
+    reads: list[int] = []
+
+    def counting(*args, **kwargs):
+        reads.append(1)
+        return real_read(*args, **kwargs)
+
+    pd_read = pd.read_parquet
+    pd.read_parquet = counting
+    try:
+        assert len(nodes_mod._preview_rows(str(path), limit=10)) == 10
+        # 更小的 limit：直接切片
+        assert len(nodes_mod._preview_rows(str(path), limit=5)) == 5
+        assert len(reads) == 1
+        # 更大的 limit：缓存不够，必须重读
+        assert len(nodes_mod._preview_rows(str(path), limit=20)) == 20
+        assert len(reads) == 2
+    finally:
+        pd.read_parquet = pd_read
+
+
+def test_preview_rows_returns_copy_not_shared_cache(tmp_path):
+    """返回副本：调用方改动自己的行不会污染后续调用。"""
+    from core.orchestrator import nodes as nodes_mod
+
+    nodes_mod.clear_preview_cache()
+    path = _write_preview_parquet(tmp_path / "ds.parquet", n=5)
+
+    first = nodes_mod._preview_rows(str(path))
+    first[0][0] = "TAMPERED"
+    second = nodes_mod._preview_rows(str(path))
+    assert second[0][0] == "a0"
+
+
+def test_preview_rows_missing_file_returns_empty():
+    """读不到文件时降级为空列表（不抛异常），且不写缓存。"""
+    from core.orchestrator import nodes as nodes_mod
+
+    nodes_mod.clear_preview_cache()
+    assert nodes_mod._preview_rows("/nonexistent/definitely-missing.parquet") == []
 
 
 # --------------------------------------------------------------------------- #

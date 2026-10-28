@@ -597,3 +597,54 @@ def test_dimension_members_mysql_quoted_identifiers(monkeypatch):
     assert members["province"] == ("广东", "浙江")
     assert "`province_name`" in str(captured["sql"]) and "`base_province`" in str(captured["sql"])
     assert '"' not in str(captured["sql"])
+
+
+# --------------------------------------------------------------------------- #
+# 目录版本号 + 派生结构缓存（2026-10-28 冗余审计 §4.2）
+# --------------------------------------------------------------------------- #
+def test_cache_epoch_bumps_on_apply_builtin():
+    """apply_builtin（import 初始化 / reset_defaults 共用路径）必须推进版本号。"""
+    before = catalog.cache_epoch()
+    catalog.apply_builtin(catalog._BUILTIN)
+    assert catalog.cache_epoch() > before
+
+
+def test_cache_epoch_bumps_on_refresh_catalog(tmp_path):
+    """refresh_catalog 直接改写目录全局，也必须推进版本号（否则派生缓存全 stale）。"""
+    from semantic import catalog_loader
+
+    fake = _FakeAdapter(physical=_adapter_physical_for_overlay())
+    before = catalog.cache_epoch()
+    try:
+        catalog_loader.refresh_catalog(overlay_path=_overlay(tmp_path), adapter=fake)
+        assert catalog.cache_epoch() > before
+    finally:
+        reset_defaults()
+
+
+def test_epoch_cache_rebuilds_only_after_epoch_change():
+    """EpochCache：同版本号复用，版本号变化后重建。"""
+    cache: catalog.EpochCache[list[str]] = catalog.EpochCache()
+    builds: list[int] = []
+
+    def build() -> list[str]:
+        builds.append(1)
+        return ["v1"]
+
+    assert cache.get(build) == ["v1"]
+    assert cache.get(build) == ["v1"]
+    assert len(builds) == 1, "同版本号不应重建"
+
+    catalog.bump_cache_epoch()
+    assert cache.get(build) == ["v1"]
+    assert len(builds) == 2, "版本号变化后必须重建"
+
+
+def test_epoch_cache_clear_forces_rebuild():
+    """clear() 用于测试隔离：强制下次重建。"""
+    cache: catalog.EpochCache[tuple] = catalog.EpochCache()
+    builds: list[int] = []
+    cache.get(lambda: builds.append(1) or (1,))
+    cache.clear()
+    cache.get(lambda: builds.append(1) or (1,))
+    assert len(builds) == 2

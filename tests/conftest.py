@@ -55,6 +55,26 @@ def _default_autonomy_l4(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_catalog_derived_caches():
+    """每个测试结束后推进目录版本号，丢弃派生结构缓存。
+
+    语义目录在进程内稳定，heuristic 的维度关键词表 / memory 的下钻词映射 /
+    intent 的指标与维度词表都按 `catalog.cache_epoch()` 缓存（2026-10-28 冗余
+    审计 §4.2）。但测试常用 `monkeypatch.setitem(catalog.DIMENSION_MEMBERS, …)`
+    之类的写法直接改目录，**不会**触发 apply_builtin / refresh_catalog 的
+    版本号推进——若恰好在缓存为空时改目录，缓存会被灌入"假目录"派生值，并
+    在 monkeypatch 还原后继续被后续用例读到（stale 污染）。
+
+    本 fixture 的 setup 早于 monkeypatch（autouse 优先），故其 teardown 晚于
+    monkeypatch 的还原，此处 bump 一次即可保证下一个用例从真目录重建。
+    """
+    yield
+    from semantic import catalog
+
+    catalog.bump_cache_epoch()
+
+
+@pytest.fixture(autouse=True)
 def _reset_langgraph_singletons():
     """每个测试结束后丢弃 LangGraph 进程级单例（M4 内存护栏）。
 

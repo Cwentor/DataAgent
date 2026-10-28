@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from semantic import catalog
+
 
 class IntentType:
     """意图类型常量（str 平铺，兼容 AgentState 契约序列化）。"""
@@ -34,10 +36,8 @@ class IntentProfile:
 
 def _build_metric_terms() -> tuple[tuple[str, str], ...]:
     """从语义目录 FieldMeta.aliases 构建指标词表（数值字段 = int/float）。"""
-    from semantic.catalog import COLUMNS
-
     terms: list[tuple[str, str]] = []
-    for name, meta in COLUMNS.items():
+    for name, meta in catalog.COLUMNS.items():
         if meta.dtype in ("int", "float"):
             terms.extend((alias, name) for alias in meta.aliases)
     return tuple(terms)
@@ -48,19 +48,52 @@ def _build_dimension_terms() -> dict[str, str]:
 
     同名别名先序保留（setdefault），保证词表确定性。
     """
-    from semantic.catalog import COLUMNS
-
     terms: dict[str, str] = {}
-    for name, meta in COLUMNS.items():
+    for name, meta in catalog.COLUMNS.items():
         if meta.dtype not in ("int", "float"):
             for alias in meta.aliases:
                 terms.setdefault(alias, name)
     return terms
 
 
+# 词表缓存（2026-10-28 冗余审计 §4.2）：两张表都只依赖语义目录（进程内稳定），
+# 但 `classify_intent` 一轮被调 6 次、`dimension_terms()` 在 nodes 里还有 6+ 个
+# 消费点，每次都遍历整个 COLUMNS 并逐别名展开。按目录版本号缓存，
+# apply_builtin / refresh_catalog 后自动重建。
+# 缓存值是**共享**结构：调用方只读，不得原地修改（要改请先 dict(...) 复制）。
+_METRIC_TERMS_CACHE: catalog.EpochCache[tuple[tuple[str, str], ...]] = catalog.EpochCache()
+_DIMENSION_TERMS_CACHE: catalog.EpochCache[dict[str, str]] = catalog.EpochCache()
+# 长词优先排序结果也缓存：_extract_anchors 每次都要 sorted(key=len, reverse=True)，
+# 而排序只取决于词表内容（目录不变即不变）。
+_SORTED_METRIC_CACHE: catalog.EpochCache[tuple[tuple[str, str], ...]] = catalog.EpochCache()
+_SORTED_DIMENSION_CACHE: catalog.EpochCache[tuple[tuple[str, str], ...]] = catalog.EpochCache()
+
+
+def _sort_longest_first(pairs: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+    """长词优先排序（防"退款金额"被"金额"式子串误吞）。"""
+    return tuple(sorted(pairs, key=lambda p: len(p[0]), reverse=True))
+
+
+def metric_terms() -> tuple[tuple[str, str], ...]:
+    """指标词表（数值字段别名，目录版本号缓存）。"""
+    return _METRIC_TERMS_CACHE.get(_build_metric_terms)
+
+
 def dimension_terms() -> dict[str, str]:
     """维度词表（动态构建；nodes 的显式维度识别消费）。"""
-    return _build_dimension_terms()
+    return _DIMENSION_TERMS_CACHE.get(_build_dimension_terms)
+
+
+def sorted_metric_terms() -> tuple[tuple[str, str], ...]:
+    """长词优先的指标词表（`_extract_anchors` 专用，避免每次重排）。"""
+    return _SORTED_METRIC_CACHE.get(lambda: _sort_longest_first(metric_terms()))
+
+
+def sorted_dimension_terms() -> tuple[tuple[str, str], ...]:
+    """长词优先的维度词表（`_extract_anchors` 专用，避免每次重排）。"""
+    return _SORTED_DIMENSION_CACHE.get(
+        lambda: _sort_longest_first(tuple(dimension_terms().items()))
+    )
 
 
 _DIAGNOSTIC_TERMS: tuple[str, ...] = (
@@ -110,15 +143,13 @@ def _is_enumeration_question(query: str) -> bool:
 _FILTER_CLUE_TERMS: tuple[str, ...] = ("退款", "优惠", "折扣", "支付", "成功", "失败")
 
 
-def _extract_anchors(
-    query: str, terms: tuple[tuple[str, str], ...] | dict[str, str]
-) -> tuple[str, ...]:
-    """词表锚点提取：长词优先遍历，命中后消费片段（防子串重复/误吞）。"""
-    pairs = sorted(
-        terms.items() if isinstance(terms, dict) else terms,
-        key=lambda p: len(p[0]),
-        reverse=True,
-    )
+def _extract_anchors(query: str, pairs: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
+    """词表锚点提取：长词优先遍历，命中后消费片段（防子串重复/误吞）。
+
+    ``pairs`` 必须是**已按长词优先排好序**的词表——传
+    ``sorted_metric_terms()`` / ``sorted_dimension_terms()``（都是缓存值）。
+    原实现在这里现排一次序，而排序只取决于词表内容，等于每次调用都白排。
+    """
     lowered = query.lower()
     found: list[str] = []
     remaining = lowered
@@ -145,8 +176,8 @@ def classify_intent(query: str) -> IntentProfile:
     取值），降维成全域聚合会输出错范围数据（终审 Critical #1 回归锚点）
     ——宁可拒答留给 LLM 规划；L3 守卫对 UNKNOWN 不启用，由 LLM 正确处理。
     """
-    metrics = _extract_anchors(query, _build_metric_terms())
-    dims = _extract_anchors(query, _build_dimension_terms())
+    metrics = _extract_anchors(query, sorted_metric_terms())
+    dims = _extract_anchors(query, sorted_dimension_terms())
     is_diagnostic = any(t in query for t in _DIAGNOSTIC_TERMS)
     if is_diagnostic and (metrics or dims):
         return IntentProfile(IntentType.DIAGNOSTIC, metrics + dims, "hard")
@@ -219,7 +250,7 @@ def capability_catalog_lines() -> list[str]:
     from semantic import catalog
     from semantic.catalog import COLUMNS, DRILLDOWN_DIM_FIELDS
 
-    dim_fields = sorted(set(DRILLDOWN_DIM_FIELDS) | set(_build_dimension_terms().values()))
+    dim_fields = sorted(set(DRILLDOWN_DIM_FIELDS) | set(dimension_terms().values()))
     dims = "、".join(f"{f}（{COLUMNS[f].label or f}）" for f in dim_fields if f in COLUMNS)
     metrics = "、".join(
         f"{name}（{meta.label or name}）"
