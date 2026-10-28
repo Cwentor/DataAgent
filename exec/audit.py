@@ -153,41 +153,48 @@ def _scalar_cte_names(root: exp.Expression) -> set[str]:
     return names
 
 
-def audit_compiled_sql(sql: str, dialect: str | None = None) -> list[GuardrailFinding]:
+def audit_compiled_sql(
+    sql: str, dialect: str | None = None, *, root: exp.Expression | None = None
+) -> list[GuardrailFinding]:
     """对编译产物 SQL 做执行前静态审计，返回全部发现（空列表 = APPROVED）。
 
     只读结构校验复用 sqlglot AST 主防线（按 dialect 解析，fail-closed：
     解析失败按 REJECTED 处理）；笛卡尔积与无界输出为增量检查。
+
+    ``root``：调用方已解析好的 AST。``execute_sql`` 已在只读断言阶段解析过一次，
+    传进来即可省掉本次解析（实测单次 223 µs，2026-10-28 冗余审计 §4.1）。
+    传入时跳过解析与「恰好一条语句」检查，**要求调用方已自行校验语句数**。
     """
     from exec.guards import _resolve_dialect
 
     dialect = _resolve_dialect(dialect)
     findings: list[GuardrailFinding] = []
-    try:
-        statements = sqlglot.parse(sql, read=dialect)
-    except sqlglot.errors.ParseError as exc:
-        return [
-            GuardrailFinding(
-                "readonly_structure",
-                "rejected",
-                f"SQL 解析失败，拒绝执行: {exc}",
-                "检查 SQL 语法合法性",
-            )
-        ]
-    if len(statements) != 1:
-        return [
-            GuardrailFinding(
-                "readonly_structure",
-                "rejected",
-                "拒绝执行多语句 SQL",
-                "单次查询只允许一条 SELECT 语句",
-            )
-        ]
-    root = statements[0]
+    if root is None:
+        try:
+            statements = sqlglot.parse(sql, read=dialect)
+        except sqlglot.errors.ParseError as exc:
+            return [
+                GuardrailFinding(
+                    "readonly_structure",
+                    "rejected",
+                    f"SQL 解析失败，拒绝执行: {exc}",
+                    "检查 SQL 语法合法性",
+                )
+            ]
+        if len(statements) != 1:
+            return [
+                GuardrailFinding(
+                    "readonly_structure",
+                    "rejected",
+                    "拒绝执行多语句 SQL",
+                    "单次查询只允许一条 SELECT 语句",
+                )
+            ]
+        root = statements[0]
 
     # 1) 只读结构（与 exec.guards._assert_read_only_structure 同源，冗余防御）
     try:
-        _assert_read_only_structure(sql, dialect=dialect)
+        _assert_read_only_structure(sql, dialect=dialect, root=root)
     except UnsafeSqlError as exc:
         findings.append(
             GuardrailFinding("readonly_structure", "rejected", str(exc), "改写为合法只读 SELECT")
@@ -245,13 +252,16 @@ def audit_compiled_sql(sql: str, dialect: str | None = None) -> list[GuardrailFi
     return findings
 
 
-def assert_guardrails(sql: str, dialect: str | None = None) -> list[GuardrailFinding]:
+def assert_guardrails(
+    sql: str, dialect: str | None = None, *, root: exp.Expression | None = None
+) -> list[GuardrailFinding]:
     """执行前审计门：REJECTED 级发现即抛 GuardrailRejected；返回 WARNING 级发现。
 
     供 ``exec.guards.execute_sql`` 在只读断言后调用——REJECTED 语义与
-    MaxRowsScannedExceeded 一致（执行前熔断、错误可自愈）。
+    MaxRowsScannedExceeded 一致（执行前熔断、错误可自愈）。``root`` 为已解析的
+    AST，透传给 ``audit_compiled_sql`` 以免重复解析。
     """
-    findings = audit_compiled_sql(sql, dialect=dialect)
+    findings = audit_compiled_sql(sql, dialect=dialect, root=root)
     rejected = [f for f in findings if f.severity == "rejected"]
     if rejected:
         detail = "；".join(f"[{f.check}] {f.message}" for f in rejected)
