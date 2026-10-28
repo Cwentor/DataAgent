@@ -50,7 +50,7 @@
 | 2 | `exec/guards.py:754` + `exec/audit.py:167,190` | 同一 SQL 每次查询解析 **3 次** | ✅ 已实测计数 |
 | 3 | `core/skills/` 整个包（约 500 行） | 生产链路零调用，算法另在 `nodes.py` 里抄了一份 | ✅ 已验证 |
 | 4 | `core/orchestrator/langgraph_engine.py:256-265` | `_get_worker_gate` 死代码，注释宣称的「进程级并发闸」从未生效 | ✅ 已验证 |
-| 5 | `agent/tool_agent.py:1249-1270` vs `355-422` | 关键词分派两份且顺序已漂移 → 同一问题走两条路得到不同工具 | 静态确认 |
+| 5 | `agent/tool_agent.py:1249-1270` vs `355-422` | 关键词分派两份且顺序已漂移 → 同一问题走两条路得到不同工具 | ✅ 已修复 |
 | 6 | `exec/engine/type_map.py:113,163` | 正则兜底分支不可达（12 个位宽已全在 `_EXACT`） | ✅ 已验证 |
 
 ---
@@ -128,20 +128,52 @@ ref 回溯）、`::test_referenced_fields_covers_ratio_and_window`（ratio/windo
 
 | 位置 | 重复内容 | 严重度 |
 |---|---|---|
-| `web/service.py:136-174,595-602` | 异常→文案/熔断映射**三份并存**：8 段 isinstance 链 + 15 项 dict + 4 项 dict，且条目数已不一致（15 vs 8 vs 4） | **高** |
-| `web/service.py:264-279` | 见 §2.1 | **高**（已实测） |
-| `agent/heuristic.py:550-563,581-594,882-895` | 同一份 9 词时间序列元组**同文件写 3 遍**，而 `agent/lexicon.py:12 TREND_KEYWORDS` 已是单一事实源（模块 docstring 明确「严禁再复制词表」） | **高** |
+| `web/service.py:136-174,595-602` | 异常→文案/熔断映射**三份并存**：8 段 isinstance 链 + 15 项 dict + 4 项 dict，且条目数已不一致（15 vs 8 vs 4） | **高** ✅ 已修复 |
+| `web/service.py:264-279` | 见 §2.1 | **高**（已实测） ✅ 已修复 |
+| `agent/heuristic.py:550-563,581-594,882-895` | 同一份 9 词时间序列元组**同文件写 3 遍**，而 `agent/lexicon.py:12 TREND_KEYWORDS` 已是单一事实源（模块 docstring 明确「严禁再复制词表」） | **高** ✅ 已修复 |
 | `exec/engine/mysql_adapter.py:32-44` / `postgres_adapter.py:47-59` | 「actual rows 解析」正则**逐字符相同**，函数体相同 | 高 |
 | `tools/builtins/query_metric_tool.py:52-81` / `trend_analysis_tool.py:96-125` | **40 行 data/meta 装配逐字重复**（columns/rows/dsl/sql/scan_rows/rewrites/degraded/explanation/viz/qa_findings/chart_spec） | 高 |
-| `agent/tool_agent.py:1249-1270` vs `355-422` | 关键词分派整段复制，且**顺序已漂移**（planner 先判导出，run 先判趋势） | 高 |
+| `agent/tool_agent.py:1249-1270` vs `355-422` | 关键词分派整段复制，且**顺序已漂移**（planner 先判导出，run 先判趋势） | 高 ✅ 已修复 |
 | `compiler/sql_compiler.py:268-275` vs `939-946` | `FilterOperator → SQL 运算符` 映射表（7 项）写两遍 | 中 |
-| `agent/clarify.py:50-53` vs `agent/router/intent_router.py:273-276` | 时间表达正则两份，**已漂移**（router 版多 `历史\|累计\|全部\|所有\|至今`） | 中 |
+| `agent/clarify.py:50-53` vs `agent/router/intent_router.py:273-276` | 时间表达正则两份，**已漂移**（router 版多 `历史\|累计\|全部\|所有\|至今`） | 中 ✅ 已修复 |
 | `web/runs.py:535-541` vs `intent_router.py:326-334` | 历史摘要转换（`history[-6:]` + role→中文 + join）两份，docstring 自称「口径对齐」却靠人肉同步 | 中 |
 | `core/sandbox/api.py:81` vs `core/retrieval/export.py:92` | 同一数据集名正则两条实现 | 中 |
 | `core/retrieval/parquet_ref.py:26` vs `:45` | `model_config` 在同一类里**声明两次**，后者覆盖前者 | 中（删 1 行） |
 | `agent/tool_agent.py:55` vs `agent/router/legacy.py:16` | 同一句拒答文案定义两次 | 中 |
 | `exec/engine/*_adapter.py` | 四后端 `connect_readonly` 同一段 try/harden/close/raise 样板；MySQL↔PG 的 `harden`/`insert_dataframe`/`physical_columns`/`install_secure_views` 四组几乎逐字相同 | 高（结构性） |
 | `semantic/dsl_schema.py:26` vs `exec/guards.py:144` | 「安全标识符」白名单两份（一份带长度上限、一份不带） | 低 |
+
+#### 3.2.1 验证第 2 批时新发现：维度成员顺序有两条互不一致的来源
+
+**位置**：`agent/heuristic.py:617`（原 `provinces = [p for p in dimension_members("province") if p in q]`）
+
+不在初版报告里——是在跑第 2 批回归时，因用例顺序不同而偶然暴露的。它不是重复代码，
+是**双事实源导致的行为不确定性**，所以单列：
+
+| 来源 | 顺序规则 | 「广东」与「浙江」谁在前 |
+|---|---|---|
+| `config/semantic.json` 的 `dimension_members_seed` | 人工维护的行政区划顺序 | 浙江（第 8 位）在前 |
+| `semantic/catalog_loader.py:137-141` 从数仓重建 | `SELECT DISTINCT … ORDER BY 1`，即 Unicode 码位序 | 广东（U+5E7F）在前 |
+
+`heuristic._filters` 直接按词表顺序输出 `IN` 列表，于是**同一句话在不同启动路径下
+生成不同 SQL**：
+
+```
+种子路径：WHERE … pr.province_name IN ('浙江', '广东')
+重建路径：WHERE … pr.province_name IN ('广东', '浙江')
+```
+
+语义等价，但后果是：结果集字符串不稳定（审计 diff、结果缓存键、golden 断言全部受
+影响）。实测复现方式：先跑 `tests/web/test_web_auth.py`（其 `warehouse` fixture 调
+`ensure_db()` 触发 catalog 从数仓重建），再跑
+`tests/agent/test_agent.py::test_heuristic_covers_all_golden_questions`，Q10 必红；
+而 `tests/agent` 单独跑全绿——全量套件里 `tests/agent` 排在 `tests/web` 之前，所以
+CI 一直没暴露，属于**顺序依赖的潜伏缺陷**。
+
+**已修复**：`IN` 列表顺序改为按**提问中出现的先后**排序（`key=q.index`）。确定性
+来自用户输入本身，与词表来源彻底解耦；顺带把「问句提到两个类目时取词表靠前者」
+改成取「先提到的那个」（原逻辑与措辞无关，同属顺序依赖）。Q10 的 golden 期望与
+SQL 同步更新为 `('广东', '浙江')`。修复后上述顺序依赖组合 25 passed。
 
 ### 3.3 该用 dataclass / NamedTuple 却用并列容器
 
@@ -361,14 +393,17 @@ ref 回溯）、`::test_referenced_fields_covers_ratio_and_window`（ratio/windo
 | 补缺失的相等断言 | `tests/core/test_orchestrator.py:315` | ✅ 已加 `assert d == payload` |
 | 合并重复调用 | `agent/tool_agent.py:1576-1577` | ✅ `_summarize` 只调一次 |
 
-### 第 2 批：正确性风险（1 周内）
+### 第 2 批：正确性风险（1 周内）—— ✅ 已完成 2026-10-28
 
-| 动作 | 位置 |
-|---|---|
-| 统一关键词分派（两份已漂移） | `agent/tool_agent.py:1249-1270` vs `355-422` |
-| 统一异常→文案/熔断映射（三份已不一致） | `web/service.py:136-174,595-602` |
-| 统一时间表达正则（两份已漂移） | `agent/clarify.py:50-53` vs `intent_router.py:273-276` |
-| 统一时间序列词表（同文件 3 遍，违反 lexicon 单一事实源约定） | `agent/heuristic.py:550-563,581-594,882-895` |
+| 动作 | 位置 | 状态 |
+|---|---|---|
+| 统一关键词分派（两份已漂移，顺序相反） | `agent/tool_agent.py:1249-1270` vs `355-422` | ✅ 提取 `_route_by_keywords` + `_KeywordRoute`，统一取「导出优先于趋势」 |
+| 统一异常→文案/熔断映射（三份已不一致） | `web/service.py:136-174,595-602` | ✅ 改单一 `_ERROR_RULES` 三元组，三个消费方全部派生 |
+| 统一时间表达正则（两份已漂移） | `agent/clarify.py:50-53` vs `intent_router.py:273-276` | ✅ 拆成 `TIME_WINDOW_RE`（澄清用）与 `TIME_SIGNAL_RE`（路由用），语义分离 |
+| 统一时间序列词表（同文件 3 遍，违反 lexicon 单一事实源约定） | `agent/heuristic.py:550-563,581-594,882-895` | ✅ 提取 `TIME_SERIES_KEYWORDS`（`TREND_KEYWORDS` 的严格子集） |
+| **额外发现**：维度成员顺序双来源导致 SQL 不确定 | `agent/heuristic.py:617` | ✅ 见 §3.2.1，`IN` 列表改按提问先后排序 |
+
+验证：`black --check` / `ruff check` 全绿，全量 pytest **1421 passed / 28 skipped**。
 
 ### 第 3 批：性能（1 周内，一次改完）
 
@@ -395,7 +430,7 @@ ref 回溯）、`::test_referenced_fields_covers_ratio_and_window`（ratio/windo
 
 ## 9. 附录
 
-### 9.1 本次实测复核的 7 条（可复现）
+### 9.1 本次实测复核的 8 条（可复现）
 
 | # | 结论 | 验证方式 | 结果 |
 |---|---|---|---|
@@ -406,6 +441,7 @@ ref 回溯）、`::test_referenced_fields_covers_ratio_and_window`（ratio/windo
 | 5 | `type_map` 正则兜底不可达 | 枚举 12 个位宽，比对 `_EXACT` 键集与 `_INT_WIDTH_RE` 命中集 | ✅ 差集为空 |
 | 6 | `_run_agent_inner` 是纯转发层 | 读 `agent.py:224-251` 函数体 | ✅ 仅一个 `return _run_agent_langgraph_path(...)` |
 | 7 | `test_audit.py:105` 恒真断言 | 读 98-106 行 | ✅ `conn.close()` 后 `assert conn is not None` |
+| 8 | 维度成员顺序双来源导致 `IN` 列表不确定（§3.2.1） | `pytest tests/web/test_web_auth.py tests/agent/test_agent.py::test_heuristic_covers_all_golden_questions`（web 在前） | ✅ Q10 必红；调换顺序或 `tests/agent` 单独跑全绿 → 确认是顺序依赖的潜伏缺陷 |
 
 ### 9.2 明确排除（避免误伤）
 

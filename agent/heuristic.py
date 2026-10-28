@@ -614,7 +614,14 @@ class DeterministicNL2DSL:
             filters.append({"field": pf["field"], "operator": "ne", "value": pf["value"]})
 
         # 省份（单个或多个 -> in）
-        provinces = [p for p in dimension_members("province") if p in q]
+        # 顺序取**提问中出现的先后**，而非词表顺序。词表有两个来源且顺序不同：
+        # semantic.json 种子按行政区划排（浙江在广东前），数仓重建走
+        # `ORDER BY 1` 即码位序（广东 U+5E7F 在浙江 U+6D59 前）。若按词表顺序
+        # 输出，「广东省或浙江省」会因启动路径不同生成 `IN ('浙江','广东')` 或
+        # `IN ('广东','浙江')` —— 语义等价但结果不确定，golden 断言随之变脆
+        # （2026-10-28 冗余审计 §3.2 验证时实测：先跑 ensure_db 再跑 golden 即翻转）。
+        # 以文本位置为键，确定性来自用户输入本身。
+        provinces = sorted((p for p in dimension_members("province") if p in q), key=q.index)
         if provinces:
             if len(provinces) == 1:
                 filters.append({"field": "province", "operator": "eq", "value": provinces[0]})
@@ -630,8 +637,9 @@ class DeterministicNL2DSL:
                         filters.append({"field": "province", "operator": "in", "value": in_region})
                         break
 
-        # 类目（一级类目成员）
-        cats = [c for c in dimension_members("category1_name") if c in q]
+        # 类目（一级类目成员）：同样取提问中**先出现**的那个，避免依赖词表顺序
+        # （问句同时提到两个类目时，原来取的是词表里靠前的那个，与措辞无关）
+        cats = sorted((c for c in dimension_members("category1_name") if c in q), key=q.index)
         if cats:
             filters.append({"field": "category1_name", "operator": "eq", "value": cats[0]})
 
