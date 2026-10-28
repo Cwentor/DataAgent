@@ -445,22 +445,19 @@ def normalize_filters(filters: list[Filter]) -> list[Filter]:
     return result
 
 
-def _expand_dimension(query: str) -> str | None:
-    """下钻语句中要追加的维度字段（如「按品类展开」-> category）。
+# 下钻维度关键词映射缓存（2026-10-28 冗余审计 §4.2）。
+# 原实现每次 `_expand_dimension` 都遍历整个 COLUMNS 并逐字段取中文标签 + 同义词，
+# 而目录在进程内稳定。按目录版本号缓存：apply_builtin / refresh_catalog 后自动重建。
+_DIM_KEYWORD_MAP_CACHE: catalog.EpochCache[dict[str, str]] = catalog.EpochCache()
 
-    维度候选集从语义目录 + present.labels 的中文标签派生（与 field_label 同源），
-    使"按省份/按品牌/按支付状态/按性别/按类目"等维度均可被识别为下钻目标；
+
+def _build_dim_keyword_map() -> dict[str, str]:
+    """(中文关键词 -> 逻辑字段) 维度映射：labels 中文标签为底 + 常用问法同义词。
+
     候选字段全部受语义目录 COLUMNS 白名单约束，绝不引入未登记字段。
+    **插入顺序即匹配优先级**（调用方取第一个命中的关键词），构建顺序必须稳定。
     """
-    if not any(k in query for k in _ADD_DIM_KEYWORDS):
-        return None
-
-    # (中文关键词 -> 逻辑字段) 维度映射：以 labels 中文标签为底，补充常用问法同义词
-    try:
-        from present.labels import field_label
-        from semantic import catalog
-    except ImportError:  # pragma: no cover - 依赖缺失时无法构建映射
-        return None
+    from present.labels import field_label
 
     dim_keywords: dict[str, str] = {}
     for col in catalog.COLUMNS:
@@ -475,6 +472,23 @@ def _expand_dimension(query: str) -> str | None:
         # 为中文标签补充"按X展开"最常用问法同义词（单一事实源 = aliases）
         for alias_word in _dimension_synonyms(col):
             dim_keywords[alias_word] = col
+    return dim_keywords
+
+
+def _expand_dimension(query: str) -> str | None:
+    """下钻语句中要追加的维度字段（如「按品类展开」-> category）。
+
+    维度候选集从语义目录 + present.labels 的中文标签派生（与 field_label 同源），
+    使"按省份/按品牌/按支付状态/按性别/按类目"等维度均可被识别为下钻目标；
+    候选字段全部受语义目录 COLUMNS 白名单约束，绝不引入未登记字段。
+    """
+    if not any(k in query for k in _ADD_DIM_KEYWORDS):
+        return None
+
+    try:
+        dim_keywords = _DIM_KEYWORD_MAP_CACHE.get(_build_dim_keyword_map)
+    except ImportError:  # pragma: no cover - 依赖缺失时无法构建映射
+        return None
 
     for keyword, target_field in dim_keywords.items():
         if keyword in query:

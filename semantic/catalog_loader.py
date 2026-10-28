@@ -535,6 +535,8 @@ def refresh_catalog(
     catalog.METRIC_ALIASES.update(cat.metric_aliases)
     catalog.DIMENSION_MEMBERS_SEED.clear()
     catalog.DIMENSION_MEMBERS_SEED.update(cat.dimension_members_seed)
+    # 目录已整体重建：让按版本号失效的派生结构缓存（catalog.EpochCache）下次重建
+    catalog.bump_cache_epoch()
     return cat
 
 

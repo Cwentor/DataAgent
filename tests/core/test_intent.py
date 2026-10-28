@@ -161,3 +161,49 @@ def test_enumeration_multi_dim_opens_in_m2():
     assert dsl["metrics"] == []
     assert [d["field"] for d in dsl["dimensions"]] == list(profile.anchor_fields)
     assert dsl["order_by"][0]["field"] == profile.anchor_fields[0]
+
+
+# --------------------------------------------------------------------------- #
+# 词表缓存（2026-10-28 冗余审计 §4.2）：按目录版本号失效，不得 stale
+# --------------------------------------------------------------------------- #
+def test_dimension_terms_rebuilds_after_catalog_epoch_bump(monkeypatch):
+    """目录变更 + 版本号推进后，维度词表必须重建（缓存不能 stale）。"""
+    from dataclasses import replace
+
+    from core.orchestrator import intent
+    from semantic import catalog
+
+    # 前置：先取一次灌缓存，"省份"是 province 的合法问法词
+    assert intent.dimension_terms().get("省份") == "province"
+
+    monkeypatch.setitem(
+        catalog.COLUMNS,
+        "province",
+        replace(catalog.COLUMNS["province"], aliases=("全新问法词",)),
+    )
+    catalog.bump_cache_epoch()
+
+    rebuilt = intent.dimension_terms()
+    assert rebuilt.get("全新问法词") == "province"
+    assert "省份" not in rebuilt
+
+
+def test_sorted_terms_follow_catalog_epoch(monkeypatch):
+    """长词优先词表同样按版本号失效，且仍按长度降序。"""
+    from dataclasses import replace
+
+    from core.orchestrator import intent
+    from semantic import catalog
+
+    intent.sorted_dimension_terms()  # 灌缓存
+
+    monkeypatch.setitem(
+        catalog.COLUMNS,
+        "province",
+        replace(catalog.COLUMNS["province"], aliases=("短", "很长的问法词")),
+    )
+    catalog.bump_cache_epoch()
+
+    pairs = intent.sorted_dimension_terms()
+    terms = [t for t, f in pairs if f == "province"]
+    assert terms == ["很长的问法词", "短"], "长词必须排在前面"

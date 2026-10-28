@@ -23,6 +23,7 @@ compiler / guard / agent 一律通过 `catalog.XXX` 动态读取本模块当前�
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -123,6 +124,65 @@ PAID_FILTER: dict = {}
 DEFAULT_WINDOW: dict = {}
 OUT_OF_SCOPE_CONCEPTS: list[str] = []
 UNDEFINED_METRICS: list[dict] = []
+
+
+# --------------------------------------------------------------------------- #
+# 目录版本号 + 派生结构缓存（2026-10-28 冗余审计 §4.2）
+#
+# 目录（COLUMNS / METRICS / DIMENSION_MEMBERS …）在进程内是稳定的：只有
+# apply_builtin（import 初始化 / reset_defaults）与 catalog_loader.refresh_catalog
+# 会改它。但多处消费方每次都从目录重建派生结构——heuristic 的维度关键词表、
+# memory 的 dim_keywords、intent 的指标/维度词表都要遍历整个 COLUMNS 并逐别名
+# 展开，一次请求内被调 2~6 次。
+#
+# 这里给目录一个单调递增的版本号，派生结构按版本号缓存：目录一变，下次取用即
+# 重建。不用「每个消费方各自挂 cache_clear 回调」——那要求每个刷新点都记得通知
+# 每个缓存，漏一个就是 stale 缺陷（M-P0 活缺陷 #3 的老路）。
+# --------------------------------------------------------------------------- #
+_CACHE_EPOCH: int = 0
+
+
+def cache_epoch() -> int:
+    """目录版本号：每次目录内容变更 +1，供派生结构缓存做失效判据。"""
+    return _CACHE_EPOCH
+
+
+def bump_cache_epoch() -> None:
+    """标记目录已变更（apply_builtin / refresh_catalog 结束时调用）。"""
+    global _CACHE_EPOCH
+    _CACHE_EPOCH += 1
+
+
+class EpochCache[T]:
+    """按目录版本号失效的派生结构缓存。
+
+    用法：模块级建一个实例，取用时传 builder——
+
+        _DIM_TABLE: catalog.EpochCache[tuple] = catalog.EpochCache()
+        table = _DIM_TABLE.get(_build_dim_table)
+
+    目录未变时直接返回上次结果；目录变更后下一次调用自动重建。
+    缓存值是**共享**的：builder 应返回不可变结构（tuple / frozenset）或调用方
+    不得原地修改的 dict。
+    """
+
+    __slots__ = ("_epoch", "_value")
+
+    def __init__(self) -> None:
+        self._epoch: int = -1
+        self._value: T | None = None
+
+    def get(self, build: Callable[[], T]) -> T:
+        epoch = cache_epoch()
+        if self._epoch != epoch:
+            self._value = build()
+            self._epoch = epoch
+        return self._value  # type: ignore[return-value]
+
+    def clear(self) -> None:
+        """强制失效（测试隔离用；正常失效走版本号）。"""
+        self._epoch = -1
+        self._value = None
 
 
 def apply_builtin(data: dict) -> None:
@@ -230,6 +290,9 @@ def apply_builtin(data: dict) -> None:
     # 聚合产物别名 -> 中文（gmv/orders/buyers 等产物列的人读化）
     METRIC_ALIASES.clear()
     METRIC_ALIASES.update(data.get("metric_aliases", {}))
+
+    # 目录内容已整体换过一轮：让所有 EpochCache 派生结构在下次取用时重建
+    bump_cache_epoch()
 
 
 apply_builtin(_BUILTIN)

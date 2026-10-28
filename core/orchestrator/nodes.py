@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import decimal
 import json
+import os
 import re
 import time
 from contextvars import ContextVar
@@ -387,10 +388,14 @@ def _degraded_parse(
     # 来源正是此类问句——按同一词表对 query 确定性重提取锚点（与 L1 硬
     # 匹配同源，非猜测）；profile 已携带锚点（METRIC_SCALAR 等）时直通。
     if not profile.anchor_fields:
-        from core.orchestrator.intent import _build_metric_terms, _extract_anchors
+        from core.orchestrator.intent import (
+            _extract_anchors,
+            sorted_dimension_terms,
+            sorted_metric_terms,
+        )
 
-        metrics = _extract_anchors(query, _build_metric_terms())
-        dims = _extract_anchors(query, dimension_terms())
+        metrics = _extract_anchors(query, sorted_metric_terms())
+        dims = _extract_anchors(query, sorted_dimension_terms())
         profile = IntentProfile(profile.intent, metrics + dims, profile.confidence)
     metrics_anchors = tuple(a for a in profile.anchor_fields if a in _SCALAR_FIELD_AGG)
     if not metrics_anchors:
@@ -1148,11 +1153,43 @@ def _inherit_overview_scope(
     return aligned, notes
 
 
+# 预览缓存：(path, mtime_ns) -> (已转换的行, 是否已读到文件末尾)。
+#
+# 为什么需要：同一轮编排里 `_preview_rows` 会被调 6 次（本模块 5 处 +
+# grounding.py 1 处），每次 `pd.read_parquet` 都把**整个** parquet 读进来再
+# `head(limit)`——实测一轮重复读 3-4 次，直接放大磁盘 IO 与报告时延
+# （2026-10-28 冗余审计 §4.1）。
+#
+# 键含 mtime_ns：数据集被重写后旧条目自然失效，不会读到过期行。条目里同时记
+# 「是否已读到末尾」——这样先来一个 limit=30 的调用、再来一个更大 limit 的
+# 调用时，前者缓存的行不够用时才重读，够用就直接切片。
+_PREVIEW_CACHE: dict[tuple[str, int], tuple[list[list[Any]], bool]] = {}
+_PREVIEW_CACHE_MAX = 16
+
+
+def clear_preview_cache() -> None:
+    """清空 Parquet 预览缓存（长驻进程换工作区 / 测试隔离用）。"""
+    _PREVIEW_CACHE.clear()
+
+
 def _preview_rows(path: str, limit: int = 30) -> list[list[Any]]:
     """读取 Parquet 数据集前 N 行生成审计预览（转 JSON 原生类型）。
 
     预览失败不阻断取数（返回空列表），审计能力可降级。
+    结果按 (path, mtime_ns) 缓存，避免一轮编排内反复解析同一份 parquet。
+    返回的是**副本**：调用方可以随意改自己的行，不会污染缓存。
     """
+    cache_key: tuple[str, int] | None
+    try:
+        cache_key = (path, os.stat(path).st_mtime_ns)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        hit = _PREVIEW_CACHE.get(cache_key)
+        if hit is not None:
+            rows_cached, exhausted = hit
+            if exhausted or len(rows_cached) >= limit:
+                return [list(r) for r in rows_cached[:limit]]
     try:
         import pandas as pd
 
@@ -1172,9 +1209,14 @@ def _preview_rows(path: str, limit: int = 30) -> list[list[Any]]:
                 else:
                     cells.append(v)
             out.append(cells)
-        return out
     except Exception:
         return []
+    if cache_key is not None:
+        if len(_PREVIEW_CACHE) >= _PREVIEW_CACHE_MAX:
+            # 容量控制：预览不是热路径，超限整体清空即可（不做 LRU 记账）
+            _PREVIEW_CACHE.clear()
+        _PREVIEW_CACHE[cache_key] = (out, len(df) <= limit)
+    return [list(r) for r in out]
 
 
 def _normalize_dsl_draft(dsl: dict[str, Any]) -> dict[str, Any]:
