@@ -24,6 +24,7 @@ from typing import Any, ClassVar
 
 from agent.clarify import undefined_metric_terms
 from agent.errors import PipelineError
+from agent.lexicon import TIME_SERIES_KEYWORDS
 from agent.time_utils import parse_explicit_time_window
 from config import settings
 from security.errors import SecurityError
@@ -547,20 +548,7 @@ class DeterministicNL2DSL:
         - 其余默认 order_time。
         """
         is_refund_amount = any(k in q for k in ("退款金额", "退款总额"))
-        is_time_series = any(
-            k in q
-            for k in (
-                "每日",
-                "按天",
-                "每天",
-                "趋势",
-                "累计",
-                "移动平均",
-                "滑动平均",
-                "补零",
-                "补齐",
-            )
-        )
+        is_time_series = any(k in q for k in TIME_SERIES_KEYWORDS)
         if is_refund_amount and is_time_series:
             return "refund_time"
         if any(k in q for k in DeterministicNL2DSL._TRAFFIC_ACTION_KEYWORDS):
@@ -578,20 +566,7 @@ class DeterministicNL2DSL:
                 dims.append({"field": field})
                 seen.add(field)
 
-        if any(
-            k in q
-            for k in (
-                "每日",
-                "按天",
-                "每天",
-                "趋势",
-                "累计",
-                "移动平均",
-                "滑动平均",
-                "补零",
-                "补齐",
-            )
-        ):
+        if any(k in q for k in TIME_SERIES_KEYWORDS):
             add(self._time_dim_field(q))  # 时间主轴：退款场景用 refund_time
         if any(k in q for k in ("各品类", "按品类", "分品类", "品类分布", "每品类", "品类")):
             add("category1_name")
@@ -879,20 +854,7 @@ class DeterministicNL2DSL:
 
     def _order_by(self, q: str) -> list[dict[str, Any]]:
         # 趋势/窗口/补零 -> 按时间主轴升序（退款时序用 refund_time）
-        if any(
-            k in q
-            for k in (
-                "每日",
-                "按天",
-                "每天",
-                "趋势",
-                "累计",
-                "移动平均",
-                "滑动平均",
-                "补零",
-                "补齐",
-            )
-        ):
+        if any(k in q for k in TIME_SERIES_KEYWORDS):
             return [{"field": self._time_dim_field(q), "direction": "asc"}]
         # 极值修饰词优先："GMV最高的产品" -> 按主指标降序；"退款率最低的3个店铺" -> 升序
         ek = self._extreme_kind(q)
