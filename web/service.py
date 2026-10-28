@@ -134,52 +134,57 @@ def _handle_system_action(
     return "该系统操作不被支持或已被安全策略拦截。"
 
 
+# 异常 -> (用户文案, 熔断分类) 的**单一事实源**。
+# 三个消费方：_friendly_error（按 isinstance 判类型）、_circuit_breaker_for（同上取
+# 熔断分类）、_FRIENDLY_BY_ERROR_CLASS / _CIRCUIT_BY_ERROR_CLASS（按类名查，供工具层
+# 只有类名字符串的场景）。2026-10-28 冗余审计 §3.2：此前文案映射写了三份
+# （8 条 isinstance 链 + 14 项 dict + 4 项 dict），条目数已不一致，新增异常类型必漏。
+# **顺序敏感**：isinstance 按表顺序短路，必须保持「子类在前、父类在后」。
+_ERROR_RULES: tuple[tuple[type[Exception], str, str | None], ...] = (
+    (QueryTimeoutError, "查询超时，请缩小时间范围后重试", "query_timeout"),
+    (MaxRowsScannedExceeded, "查询范围过大，已自动中止，请缩小时间范围后重试", "scan_rows"),
+    (ResultLimitExceeded, "查询结果过多，请缩小查询范围后重试", "result_limit"),
+    (SecurityError, "您无权查看该数据，请联系管理员确认权限", None),
+    (PipelineError, "暂时无法理解该问题，请补充时间范围或使用已定义的指标", None),
+    (UnsafeSqlError, "查询未通过安全校验，请调整问题后重试", "unsafe_sql"),
+    (CompileError, "查询条件无法编译，请调整指标或过滤条件后重试", None),
+    (SqlExecutionError, "查询执行出错，请调整条件后重试", None),
+)
+
+# 工具失败按异常类型名映射为友好提示（由 _ERROR_RULES 派生，供工具层错误使用）
+_FRIENDLY_BY_ERROR_CLASS: dict[str, str] = {cls.__name__: msg for cls, msg, _ in _ERROR_RULES}
+# Model Provider 网关（多供应商协议层）标准错误（DoD 4：401/429 可理解呈现）
+_FRIENDLY_BY_ERROR_CLASS.update(
+    {
+        "AuthenticationError": "模型服务鉴权失败，请检查 API Key 是否正确",
+        "RateLimitError": "模型服务请求过于频繁或配额超限（429），请稍后重试",
+        "ProviderTimeoutError": "模型服务请求超时，请重试或检查网络",
+        "ProtocolError": "模型服务返回异常，无法解析响应",
+        "ProviderNotConfiguredError": "未找到可用的模型供应商，请在设置中配置",
+        "ProviderError": "模型服务调用失败，请稍后重试",
+    }
+)
+
+# 熔断分类（由 _ERROR_RULES 派生，只有需要计入熔断计数的异常才有值）
+_CIRCUIT_BY_ERROR_CLASS: dict[str, str] = {
+    cls.__name__: circuit for cls, _, circuit in _ERROR_RULES if circuit
+}
+
+
 def _friendly_error(exc: Exception) -> str:
     """将内部异常映射为面向业务用户的安全提示。"""
-    if isinstance(exc, QueryTimeoutError):
-        return "查询超时，请缩小时间范围后重试"
-    if isinstance(exc, MaxRowsScannedExceeded):
-        return "查询范围过大，已自动中止，请缩小时间范围后重试"
-    if isinstance(exc, ResultLimitExceeded):
-        return "查询结果过多，请缩小查询范围后重试"
-    if isinstance(exc, SecurityError):
-        return "您无权查看该数据，请联系管理员确认权限"
-    if isinstance(exc, PipelineError):
-        return "暂时无法理解该问题，请补充时间范围或使用已定义的指标"
-    if isinstance(exc, UnsafeSqlError):
-        return "查询未通过安全校验，请调整问题后重试"
-    if isinstance(exc, CompileError):
-        return "查询条件无法编译，请调整指标或过滤条件后重试"
-    if isinstance(exc, SqlExecutionError):
-        return "查询执行出错，请调整条件后重试"
+    for cls, message, _ in _ERROR_RULES:
+        if isinstance(exc, cls):
+            return message
     return "系统繁忙，请稍后重试"
 
 
-# 工具失败按异常类型名映射为友好提示（与 _friendly_error 同源，供工具层错误使用）
-_FRIENDLY_BY_ERROR_CLASS = {
-    "QueryTimeoutError": "查询超时，请缩小时间范围后重试",
-    "MaxRowsScannedExceeded": "查询范围过大，已自动中止，请缩小时间范围后重试",
-    "ResultLimitExceeded": "查询结果过多，请缩小查询范围后重试",
-    "SecurityError": "您无权查看该数据，请联系管理员确认权限",
-    "PipelineError": "暂时无法理解该问题，请补充时间范围或使用已定义的指标",
-    "UnsafeSqlError": "查询未通过安全校验，请调整问题后重试",
-    "CompileError": "查询条件无法编译，请调整指标或过滤条件后重试",
-    "SqlExecutionError": "查询执行出错，请调整条件后重试",
-    # Model Provider 网关（多供应商协议层）标准错误（DoD 4：401/429 可理解呈现）
-    "AuthenticationError": "模型服务鉴权失败，请检查 API Key 是否正确",
-    "RateLimitError": "模型服务请求过于频繁或配额超限（429），请稍后重试",
-    "ProviderTimeoutError": "模型服务请求超时，请重试或检查网络",
-    "ProtocolError": "模型服务返回异常，无法解析响应",
-    "ProviderNotConfiguredError": "未找到可用的模型供应商，请在设置中配置",
-    "ProviderError": "模型服务调用失败，请稍后重试",
-}
-
-_CIRCUIT_BY_ERROR_CLASS = {
-    "QueryTimeoutError": "query_timeout",
-    "MaxRowsScannedExceeded": "scan_rows",
-    "ResultLimitExceeded": "result_limit",
-    "UnsafeSqlError": "unsafe_sql",
-}
+def _circuit_breaker_for(exc: Exception) -> str | None:
+    """异常 -> 熔断分类（无需计熔断的异常返回 None）。"""
+    for cls, _, circuit in _ERROR_RULES:
+        if circuit and isinstance(exc, cls):
+            return circuit
+    return None
 
 
 def _friendly_by_class(error_type: str | None) -> str | None:
@@ -581,14 +586,7 @@ def run_query(
         error = _friendly_provider_error(exc) or _friendly_error(exc)
         result["error"] = error
         result["error_detail"] = f"{type(exc).__name__}: {exc}"
-        if isinstance(exc, QueryTimeoutError):
-            circuit_breaker = "query_timeout"
-        elif isinstance(exc, MaxRowsScannedExceeded):
-            circuit_breaker = "scan_rows"
-        elif isinstance(exc, ResultLimitExceeded):
-            circuit_breaker = "result_limit"
-        elif isinstance(exc, UnsafeSqlError):
-            circuit_breaker = "unsafe_sql"
+        circuit_breaker = _circuit_breaker_for(exc)
 
     latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
     if ctx_override is not None:
