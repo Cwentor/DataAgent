@@ -218,5 +218,28 @@ Windows 句柄回收不激进，故本机不复现。**本地全绿不代表 CI 
 
 **教训**：`pool.discard()` 的"关闭 + 立刻补建"在 worker 未真正退出时是不安全组合。
 凡是 `cancel` 退化为空操作的引擎（MySQL / CH / Hive），理论上都有同一个窗口，只是
-各驱动关闭忙连接的行为不同、尚未被抓出。后续若要统一加固，方向是"延迟关闭"
-（reaper 线程宽限期后关）而不是继续依赖各驱动的巧合。
+各驱动关闭忙连接的行为不同、尚未被抓出。
+
+### 遗留风险已于 2026-10-28 补齐（引擎无关的池层加固）
+
+不在各 adapter 补 cancel 通道（Hive 同步模型根本做不到，MySQL/CH 需独立连接注入
+复杂度，审计已否决），改为在 `exec/pool.py` 加两条与引擎无关的约束：
+
+1. **先建新、后关旧**：`discard` 原先先 `close()` 再 `connect_readonly()`，正好把旧
+   fd 号让给新连接。现在建新在前——旧 fd 仍被占用，OS 必然分配不同号码，PG 那个失败
+   模式从根上消失。
+2. **宽限期延迟关闭**：关闭交给 `_DeferredCloser`（单 daemon 线程 + 到期堆）推迟
+   `DB_POOL_DISCARD_GRACE_MS`（默认 5000ms，覆盖看门狗 `join(2.0)` 并留余量）。待关
+   连接上限 `_MAX_DEFERRED = 64`，超限立刻关最早的；池 `close()` 会 `drain()` 排空，
+   进程退出不泄漏。置 `0` 退回立刻关闭（配置级回退开关）。
+
+新增 5 条用例（`tests/exec/test_pool.py`），4 条变异全部被捕获：
+
+| 变异 | 打挂的用例 |
+|---|---|
+| M1 改回「先关旧再建新」 | `test_discard_connects_new_before_closing_old` |
+| M2 去掉延迟关闭 | `test_discard_defers_close_within_grace` |
+| M3 `close()` 不排空队列 | `test_pool_close_drains_deferred_connections` |
+| M4 延迟队列不设上限 | `test_deferred_queue_is_bounded` |
+
+全量 **1419 passed / 28 skipped**（1414 + 5）。

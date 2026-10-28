@@ -7,7 +7,7 @@
 | 路径与锚点 | `DB_PATH`、`WORKSPACE_ROOT`、`AS_OF_DATE`、`DATA_DOMAIN_END`、`APPLOG_DIR` | 数仓路径（默认 `analytics_sandbox.duckdb`）、沙箱工作区根目录（默认 `logs/workspaces`）、评测与时间锚点（`AS_OF_DATE=2025-12-31`，`DATA_DOMAIN_END` 为时间域守卫上界）、埋点日志目录（Gmall 埋点 JSON 日志落盘路径，运行时自动创建） |
 | LLM | `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`、`LLM_TEMPERATURE`、`LLM_TIMEOUT`、`LLM_MAX_RETRIES`、`PROVIDER_HANDSHAKE_TIMEOUT`、`PROVIDER_HANDSHAKE_RETRY_MAX`、`PROVIDER_STREAM_MAX_SECONDS` | OpenAI 兼容模型接入；握手期独立预算与安全重试（首字节到达前专用超时与重试上限）、流式调用整体最大时长 |
 | 执行层 | `QUERY_TIMEOUT_MS`、`MAX_SCAN_ROWS`、`MAX_RESULT_ROWS`、`SQL_SELF_HEAL_MAX_RETRIES`（默认 3） | 超时、扫描熔断、结果上限与自愈 |
-| 资源与缓存 | `DB_POOL_SIZE`、`MAX_CONCURRENT_QUERIES`、`QUERY_CACHE_ENABLED`（默认关）、`QUERY_CACHE_TTL_SECONDS`、`QUERY_CACHE_MAX_ENTRIES`、`MAX_SCAN_CACHE_SIZE`、`SCAN_CACHE_TTL_SECONDS`、`SCAN_PRECHECK_TWO_STAGE`（默认开）、`SCAN_PRECHECK_SAFETY_FACTOR`（默认 32）、`SCAN_PRECHECK_AUDIT_RATE`（默认 0.01）、`SANDBOX_BACKEND`（默认 subprocess） | 连接池容量、全局并发闸、按主体隔离的查询结果缓存与扫描预检缓存（容量/TTL）、扫描行预检两段式开关与安全系数/复核采样比例；沙箱执行后端（`auto` = Docker 优先探测并缓存，`docker` = 显式要求容器强隔离，不可用如实降级并留日志） |
+| 资源与缓存 | `DB_POOL_SIZE`、`DB_POOL_DISCARD_GRACE_MS`（默认 5000）、`MAX_CONCURRENT_QUERIES`、`QUERY_CACHE_ENABLED`（默认关）、`QUERY_CACHE_TTL_SECONDS`、`QUERY_CACHE_MAX_ENTRIES`、`MAX_SCAN_CACHE_SIZE`、`SCAN_CACHE_TTL_SECONDS`、`SCAN_PRECHECK_TWO_STAGE`（默认开）、`SCAN_PRECHECK_SAFETY_FACTOR`（默认 32）、`SCAN_PRECHECK_AUDIT_RATE`（默认 0.01）、`SANDBOX_BACKEND`（默认 subprocess） | 连接池容量与废弃连接延迟关闭宽限期、全局并发闸、按主体隔离的查询结果缓存与扫描预检缓存（容量/TTL）、扫描行预检两段式开关与安全系数/复核采样比例；沙箱执行后端（`auto` = Docker 优先探测并缓存，`docker` = 显式要求容器强隔离，不可用如实降级并留日志） |
 | 澄清 | `CLARIFY_SLOT_TTL` | 多轮澄清槽位上下文 TTL（秒） |
 | 会话记忆 | `SESSION_MEMORY_TTL`、`SESSION_MEMORY_MAX_SESSIONS`、`SESSION_MEMORY_HISTORY_TURNS` | 多轮会话记忆的过期、容量与携带轮数 |
 | 编排与 Agent | `MAX_AGENT_STEPS`、`AGENT_REFLECTION_ENABLED`、`AGENT_DEFAULT_AUTONOMY`（默认 L2）、`ORCHESTRATOR_RECURSION_LIMIT`、`ORCHESTRATOR_CHECKPOINT_DB`、`SUBAGENT_MAX_PARALLEL`、`SUBAGENT_REDISPATCH_MAX`、`SYNTHESIZER_TIMEOUT` | 单轮工具链路步数与反思层开关；编排链路自主性分级默认档（L1 每步计划确认 / L2 计划确认 / L3 计划确认 + 沙箱代码执行高危确认 / L4 全自动通知）、迭代上限、checkpointer SQLite 落盘路径（空则内存）、Subagent 并发与重派上限、综合报告合成超时（秒） |
@@ -28,6 +28,28 @@
 - 生产环境必须替换 `AUTH_JWT_SECRET`。
 - `AUTH_STRICT=1` 或绑定非 localhost 地址时，启动会拒绝弱默认密钥与关闭鉴权。
 - `AUTH_ENABLED=0` 也不会信任客户端传入的 principal，服务端仍使用 `AUTH_DEFAULT_*`。
+
+## 连接池废弃与延迟关闭（`DB_POOL_DISCARD_GRACE_MS`）
+
+超时/中断后的连接**不复用**，由 `pool.discard` 回收容量名额并补建一条新连接。这里
+有两个顺序陷阱，都已在 `exec/pool.py` 里固定：
+
+- **先建新、后关旧**：若先 `close()` 旧连接，操作系统会立刻把该 fd 号分配给新连接，
+  而超时后仍阻塞在旧连接上的 worker 线程会抢读新连接的启动报文，把这条健康连接读坏。
+  2026-10-27 Linux CI 的 `postgres-parity` 正是这么红的（`lost synchronization with
+  server`，新连接建不起来、`pool.size` 掉到 0）。建新时旧 fd 仍被占用，OS 必然分配
+  不同号码，竞争从根上消失。
+- **关闭再推迟一个宽限期**：外部后端的 `adapter.cancel` 多为空操作，worker 退出时机
+  不可控（靠服务端超时兜底，秒级到分钟级不等），晚一点关能进一步压小 fd 被复用的窗口。
+
+`DB_POOL_DISCARD_GRACE_MS` 默认 `5000`（毫秒），覆盖看门狗 `join(2.0)` 窗口并留余量；
+置 `0` 退回"立刻关闭"。待关连接有上限（`_MAX_DEFERRED = 64`），宽限期内高频废弃时
+超限的最早连接会被立刻关掉，fd 占用不会无界堆积；池 `close()` 会排空队列，进程退出
+不泄漏。
+
+> 这条加固是**引擎无关**的：PG 已补 `psycopg.Connection.cancel()` 真取消，但
+> MySQL / ClickHouse / Hive 的 `cancel` 仍是空操作，同一窗口都存在。故修复放在池层
+> 而不是各 adapter——否则每加一个后端就要重赌一次驱动的关闭行为。
 
 ## 扫描行预检两段式（`SCAN_PRECHECK_*`）
 

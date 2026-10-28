@@ -23,11 +23,12 @@ def run_with_timeout(adapter, conn, sql: str, timeout_ms: int | None):
 
     返回 (columns, rows)。
 
-    超时后连接**不再可复用**：外部后端的 ``adapter.cancel`` 是空操作（取消能力由
-    服务端超时或客户端 socket 超时承载），``join(2.0)`` 返回时 worker 可能仍阻塞在
-    同一条连接上。故超时分支统一经 ``connstate.mark_unusable`` 打标，由
-    ``pool.release`` 自动转废弃——调用方无需感知，见 connstate 模块注释与审计
-    报告 §二。
+    超时后连接**不再可复用**：外部后端的 ``adapter.cancel`` 多为空操作（MySQL /
+    ClickHouse / Hive 靠服务端超时或客户端 socket 超时承载，PG 已补真取消），
+    ``join(2.0)`` 返回时 worker 仍可能阻塞在同一条连接上。故超时分支统一经
+    ``connstate.mark_unusable`` 打标，由 ``pool.release`` 自动转废弃——调用方无需
+    感知。废弃侧再用「先建新后关旧 + 宽限期延迟关闭」兜底残留 worker，见
+    ``exec.pool._DeferredCloser``。
     """
     if timeout_ms is None:
         return adapter.run_query(conn, sql)
