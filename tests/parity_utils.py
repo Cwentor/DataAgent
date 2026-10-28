@@ -103,6 +103,11 @@ def abs_window_dsl(granularity: str, start: str, end: str, fill_gaps: bool = Fal
 # 的 fd → 仍阻塞的 worker 抢读新连接的启动报文（``lost synchronization with server``）
 # → 新连接建不起来、``pool.size`` 掉到 0。修复见 ``postgres_adapter.cancel``。
 # 该竞争在 Windows 上不复现（句柄回收不激进），**本地全绿不代表 CI 绿**。
+#
+# 2026-10-28 补齐：PG 之外的引擎（MySQL / ClickHouse / Hive）``cancel`` 仍是空操作，
+# 同一窗口都在。故 ``pool.discard`` 改成「先建新后关旧 + 宽限期延迟关闭」——引擎无关
+# 的兜底，见 ``exec/pool.py::_DeferredCloser``。本用例仍守「超时连接必须废弃」这条
+# 契约，与修复手段无关。
 # --------------------------------------------------------------------------- #
 
 # 各后端「确定性慢查询」候选（3 秒量级）。列表语义：前一条被后端拒绝时换下一条。

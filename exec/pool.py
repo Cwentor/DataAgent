@@ -12,12 +12,20 @@ EXPLAIN ANALYZE，单机实例可被打满。exec/guards.py 有"护栏"但缺"�
 
 二十一期：连接创建下沉 EngineAdapter（duckdb 文件只读 / mysql 只读会话
 加固），池框架（排队/复用/关闭）引擎无关。
+
+二十七年（2026-10-28，延迟关闭）：``discard`` 的「关闭脏连接」不再立刻执行，
+改为「先建新、后关旧 + 宽限期延迟关闭」。原因见 ``_DeferredCloser`` 与
+``discard`` 的注释——外部后端 ``cancel`` 为空操作时 worker 可能仍阻塞在旧连接上，
+立刻关闭会让操作系统马上复用该 fd 号，把紧接着新建的健康连接读坏（Linux CI 上
+``postgres-parity`` 的真实失败）。
 """
 
 from __future__ import annotations
 
+import heapq
 import queue
 import threading
+import time
 from typing import Any
 
 from audit.logging import get_logger
@@ -26,6 +34,120 @@ from exec.engine import connstate
 from exec.engine.base import EngineAdapter
 
 logger = get_logger("exec.pool")
+
+# 延迟关闭队列上限：宽限期内若 ``discard`` 高频发生（连续超时），待关连接会堆积。
+# 超过上限立刻关闭最早的，把 fd 占用压在有界范围内——延迟关闭是「避免 fd 立刻被
+# 复用」的加固手段，不是无限期保留连接的缓存。
+_MAX_DEFERRED = 64
+
+
+def _close_quietly(conn: Any) -> None:
+    """关闭连接并吞掉异常（关闭失败不影响容量回收与补位）。"""
+    try:
+        conn.close()
+    except Exception:  # 关闭失败不影响容量回收与补位
+        logger.warning("废弃连接关闭失败（忽略，容量照常回收）", exc_info=True)
+
+
+class _DeferredCloser:
+    """延迟关闭器：把脏连接的 ``close()`` 推迟一个宽限期再执行。
+
+    为什么需要（2026-10-27 Linux CI ``postgres-parity`` 抓出的 fd 复用竞争）：
+
+    外部后端的 ``adapter.cancel`` 是空操作（MySQL/CH/Hive 至今仍是），看门狗
+    ``join(2.0)`` 返回时 worker 可能仍阻塞在旧连接的网络读上。此时立刻 ``close()``
+    会马上释放该 fd 号，而 ``discard`` 紧接着新建的连接极可能拿到**同一个** fd 号
+    ——仍阻塞的 worker 会抢读新连接的启动报文，把这条新建的健康连接读坏
+    （PG 上表现为 ``lost synchronization with server``，新连接建不起来、
+    容量名额退不回、池逐步缩容到 0）。
+
+    ``discard`` 已用「先建新、后关旧」消除顺序竞争（建新时旧 fd 仍被占用，
+    OS 必然分配不同号码）；本类再推迟关闭，让 worker 在 fd 真正释放前有时间退出，
+    把残余窗口压到接近零。
+
+    实现：单 daemon 线程 + 到期堆，线程数不随连接数增长。宽限期见
+    ``settings.DB_POOL_DISCARD_GRACE_MS``，置 0 退化为「立刻关闭」（回退开关）。
+    """
+
+    def __init__(self) -> None:
+        """初始化空队列；后台线程惰性启动（首次提交时才创建）。"""
+        self._heap: list[tuple[float, int, Any]] = []
+        self._seq = 0
+        self._cond = threading.Condition()
+        self._thread: threading.Thread | None = None
+        self._stopped = False
+
+    def submit(self, conn: Any, grace_ms: int) -> None:
+        """提交一条待关闭连接；``grace_ms <= 0`` 时立刻关闭。"""
+        if grace_ms <= 0:
+            _close_quietly(conn)
+            return
+        deadline = time.monotonic() + grace_ms / 1000.0
+        overflow: list[Any] = []
+        with self._cond:
+            if self._stopped:
+                pass  # 已停止：不排队，落到锁外直接关（避免泄漏）
+            else:
+                self._seq += 1
+                heapq.heappush(self._heap, (deadline, self._seq, conn))
+                # 队列超限：立刻关闭最早到期的，保证 fd 占用有界
+                while len(self._heap) > _MAX_DEFERRED:
+                    overflow.append(heapq.heappop(self._heap)[2])
+                self._start_locked()
+                self._cond.notify()
+                conn = None
+        if conn is not None:
+            _close_quietly(conn)
+        for stale in overflow:
+            _close_quietly(stale)
+
+    def _start_locked(self) -> None:
+        """启动后台线程（调用方须持锁）；线程已存活时为空操作。"""
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(
+                target=self._run, name="pool-deferred-close", daemon=True
+            )
+            self._thread.start()
+
+    def _run(self) -> None:
+        """后台线程：等到最早一条到期就关闭它，直到收到停止信号。"""
+        while True:
+            pending: list[Any] = []
+            stopping = False
+            conn = None
+            with self._cond:
+                while True:
+                    if self._stopped:
+                        pending = [c for _, _, c in self._heap]
+                        self._heap.clear()
+                        stopping = True
+                        break
+                    if not self._heap:
+                        self._cond.wait()
+                        continue
+                    deadline, _, candidate = self._heap[0]
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        self._cond.wait(remaining)
+                        continue
+                    heapq.heappop(self._heap)
+                    conn = candidate
+                    break
+            if stopping:
+                for leftover in pending:
+                    _close_quietly(leftover)
+                return
+            _close_quietly(conn)
+
+    def drain(self) -> None:
+        """停止后台线程并立刻关闭全部待关连接（池关闭时调用，幂等）。"""
+        with self._cond:
+            self._stopped = True
+            pending = [c for _, _, c in self._heap]
+            self._heap.clear()
+            self._cond.notify_all()
+        for conn in pending:
+            _close_quietly(conn)
 
 
 class ReadOnlyConnectionPool:
@@ -41,6 +163,7 @@ class ReadOnlyConnectionPool:
         self._created = 0
         self._lock = threading.Lock()
         self._closed = False
+        self._closer = _DeferredCloser()
 
     def acquire(self) -> Any:
         """取一个连接；池满且达容量上限时阻塞排队，直到有连接归还。"""
@@ -75,7 +198,7 @@ class ReadOnlyConnectionPool:
         self._queue.put(conn)
 
     def discard(self, conn: Any) -> None:
-        """废弃连接：关闭并回收容量名额，必要时补建一条唤醒排队者。
+        """废弃连接：回收容量名额、补建新连接，随后**延迟**关闭脏连接。
 
         超时/中断后的连接上可能仍有活跃查询（外部后端 ``cancel`` 为空操作），
         归还复用会与残留查询争用同一连接，故直接关闭而非入队。
@@ -83,38 +206,53 @@ class ReadOnlyConnectionPool:
         容量名额必须回收，否则池会永久少一条可用连接、逐步缩容到 0。回收后若
         仍有阻塞在 ``acquire`` 的等待者，需要主动补建一条放回队列——否则它们
         等的是「有人归还」，而这条连接已经不会再归还了，会永久阻塞。
+
+        **顺序是关键：必须先建新、后关旧。** 反过来（先关旧再建新）会让操作系统
+        立刻把刚释放的 fd 号分配给新连接，而超时后仍阻塞在旧连接上的 worker 会
+        抢读新连接的启动报文——2026-10-27 Linux CI 的 ``postgres-parity`` 正是这么
+        红的（``lost synchronization with server``，新连接建不起来、名额退不回）。
+        建新时旧 fd 仍被占用，OS 必然分配不同号码，竞争从根上消失。
+
+        关闭本身再交给 ``_DeferredCloser`` 推迟一个宽限期：worker 退出时机不可控
+        （服务端超时秒级到分钟级不等），晚一点关能进一步压小残余窗口。
         """
         connstate.clear(conn)
-        try:
-            conn.close()
-        except Exception:  # 关闭失败不影响容量回收与补位
-            logger.warning("废弃连接关闭失败（忽略，容量照常回收）", exc_info=True)
 
         with self._lock:
             if self._created > 0:
                 self._created -= 1
-            if self._closed or self._created >= self._max:
-                return
-            # 预留名额后再建连（避免并发 acquire 同时越过容量上限）
-            self._created += 1
+            need_refill = not self._closed and self._created < self._max
+            if need_refill:
+                # 预留名额后再建连（避免并发 acquire 同时越过容量上限）
+                self._created += 1
 
-        try:
-            fresh = self._adapter.connect_readonly()
-        except Exception:
-            with self._lock:
-                self._created -= 1
-            logger.warning("废弃后补建连接失败，容量名额已退回（等待者继续排队）", exc_info=True)
-            return
-        self._queue.put(fresh)
+        fresh = None
+        if need_refill:
+            try:
+                fresh = self._adapter.connect_readonly()
+            except Exception:
+                with self._lock:
+                    self._created -= 1
+                logger.warning(
+                    "废弃后补建连接失败，容量名额已退回（等待者继续排队）", exc_info=True
+                )
+
+        # 关旧必须在建新之后（见 docstring）；宽限期由配置控制，0 = 立刻关
+        self._closer.submit(conn, settings.DB_POOL_DISCARD_GRACE_MS)
+
+        if fresh is not None:
+            self._queue.put(fresh)
 
     def close(self) -> None:
-        """关闭池与全部连接（幂等）。"""
+        """关闭池与全部连接（幂等）；同时排空延迟关闭队列。"""
         self._closed = True
         while True:
             try:
                 self._queue.get_nowait().close()
             except queue.Empty:
                 break
+        # 待关连接也必须立刻关掉，否则宽限期内进程退出会泄漏 fd
+        self._closer.drain()
 
     @property
     def size(self) -> int:

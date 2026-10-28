@@ -156,6 +156,10 @@ SESSION_MEMORY_HISTORY_TURNS: int = int(os.getenv("SESSION_MEMORY_HISTORY_TURNS"
 # 执行层并发闸（P0-6）：只读连接池容量 + 全局并发信号量（"排队 + 熔断"双保险）
 DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "4"))
 MAX_CONCURRENT_QUERIES: int = int(os.getenv("MAX_CONCURRENT_QUERIES", "4"))
+# 废弃连接的延迟关闭宽限期（毫秒）：超时后的连接可能仍有 worker 阻塞其上，立刻
+# close 会让 OS 马上复用该 fd 号，把紧随其后新建的健康连接读坏（Linux 实测）。
+# 0 = 立刻关闭（回退到改造前行为）。默认 5s 覆盖看门狗 join(2.0) 窗口并留余量。
+DB_POOL_DISCARD_GRACE_MS: int = int(os.getenv("DB_POOL_DISCARD_GRACE_MS", "5000"))
 
 # 查询结果缓存（生产化）：同 (principal, SQL, 执行参数) 短期内重复查询免重复执行。
 # 默认关闭；开启前确认数据时效可容忍 TTL 窗口（只读系统无写失效问题）。

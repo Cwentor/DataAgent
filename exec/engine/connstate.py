@@ -1,10 +1,11 @@
 """连接可用性标记：超时/中断后的连接状态未知，须废弃而非复用。
 
 背景（2026-10-27 审计 P0，见 docs/reviews/2026-10-27-audit-project-issues.md §二）：
-四个外部后端（mysql / postgres / clickhouse / hive）的 ``adapter.cancel`` 均为
-空操作——取消能力由服务端超时或客户端 socket 超时承载。``watchdog.run_with_timeout``
-在 ``join(2.0)`` 之后无论 worker 是否退出都抛 ``QueryTimeoutError``，此时 worker
-可能仍阻塞在同一条连接的网络读上。
+四个外部后端（mysql / postgres / clickhouse / hive）的 ``adapter.cancel`` 当时均为
+空操作——取消能力由服务端超时或客户端 socket 超时承载。PG 已于 2026-10-27 补上
+``psycopg.Connection.cancel()``（真发 CancelRequest），MySQL / ClickHouse / Hive
+至今仍是空操作。``watchdog.run_with_timeout`` 在 ``join(2.0)`` 之后无论 worker 是否
+退出都抛 ``QueryTimeoutError``，此时 worker 可能仍阻塞在同一条连接的网络读上。
 
 若调用方照常把连接归还到池，下一个请求就会拿到一条「仍有活跃查询」的连接：
 
@@ -14,6 +15,10 @@
 
 Hive 上是**确定性触发**：其 socket 超时被设为 ``QUERY_TIMEOUT_MS + 5s`` 且服务端
 无强制超时，看门狗必然先到点，留下约 3 秒的污染窗口。
+
+本模块只负责「标记」，兜底在池层：``exec.pool.ReadOnlyConnectionPool.discard`` 用
+「先建新后关旧 + 宽限期延迟关闭」保证残留 worker 不会污染新建连接（见该模块
+``_DeferredCloser`` 与 ``DB_POOL_DISCARD_GRACE_MS``）。
 
 本模块只提供「标记 / 查询 / 清除」三个原子操作，不导入任何其他模块——watchdog 与
 pool 都需要它，放在 engine 下可避免 ``pool -> engine -> watchdog`` 的循环导入。
