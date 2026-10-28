@@ -6,7 +6,7 @@ import pytest
 
 from agent.pipeline import run_pipeline
 from compiler.sql_compiler import compile_sql
-from security.guard import SecurityError, apply_policy
+from security.guard import SecurityError, apply_policy, referenced_fields
 from semantic.dsl_schema import QueryDSL
 
 
@@ -235,3 +235,88 @@ def test_expression_metric_guard_allows_authorized_fields():
         ),
         "analyst",
     )
+
+
+# --------------------------------------------------------------------------- #
+# referenced_fields：权限回溯口径的唯一实现（2026-10-28 审计补测）
+#
+# 背景：web/service.py 曾复制了一份本函数，漏掉 expression 分支——对
+# ExpressionMetric 直接取 .field 抛 AttributeError，「客单价」这类表达式指标
+# 查询直接失败（docs/reviews/2026-10-28-audit-code-redundancy.md §2.1）。
+# 该函数此前零测试覆盖，双实现漂移才得以潜伏。本组用例锁死三种指标形态的口径。
+# --------------------------------------------------------------------------- #
+
+
+def test_referenced_fields_traces_expression_refs():
+    """表达式指标必须经 ref 回溯到被引用的聚合指标，且自身不取 .field。
+
+    ExpressionMetric 没有 field 属性，任何"else 分支取 m.field"的写法都会崩。
+    """
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {
+                    "kind": "aggregate",
+                    "field": "split_total_amount",
+                    "agg": "sum",
+                    "alias": "gmv",
+                },
+                {
+                    "kind": "aggregate",
+                    "field": "order_id",
+                    "agg": "count_distinct",
+                    "alias": "order_cnt",
+                },
+                {
+                    "kind": "expression",
+                    "alias": "aov",
+                    "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "order_cnt"}]},
+                },
+            ]
+        }
+    )
+    assert referenced_fields(dsl) == {"split_total_amount", "order_id"}
+
+
+def test_referenced_fields_covers_ratio_and_window():
+    """ratio 取分子分母、window 取 base，三种形态一个都不能漏。"""
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {
+                    "kind": "ratio",
+                    "alias": "arpu",
+                    "numerator": {
+                        "kind": "aggregate",
+                        "field": "split_total_amount",
+                        "agg": "sum",
+                        "alias": "n",
+                    },
+                    "denominator": {
+                        "kind": "aggregate",
+                        "field": "user_id",
+                        "agg": "count_distinct",
+                        "alias": "d",
+                    },
+                },
+                {
+                    "kind": "window",
+                    "alias": "cum_gmv",
+                    "func": "cumsum",
+                    "base": {
+                        "kind": "aggregate",
+                        "field": "final_total_amount",
+                        "agg": "sum",
+                        "alias": "b",
+                    },
+                },
+            ],
+            "dimensions": [{"field": "category1_name"}],
+        }
+    )
+    assert referenced_fields(dsl) == {
+        "split_total_amount",
+        "user_id",
+        "final_total_amount",
+        "category1_name",
+    }

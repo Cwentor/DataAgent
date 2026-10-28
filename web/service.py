@@ -51,8 +51,9 @@ from exec.pool import default_pool
 from providers.context import pop_request_model, set_request_model
 from providers.errors import ERROR_MESSAGES, ProviderError
 from security.errors import SecurityError
+from security.guard import referenced_fields
 from semantic import catalog
-from semantic.dsl_schema import QueryDSL, RatioMetric, WindowMetric
+from semantic.dsl_schema import QueryDSL
 
 logger = get_logger("web.service")
 
@@ -261,27 +262,15 @@ def _default_audit_store() -> AuditStore | None:
     return _default_store
 
 
-def _referenced_fields(dsl: QueryDSL) -> set[str]:
-    """收集 DSL 引用的全部逻辑字段（指标 + 维度 + 过滤）。"""
-    fields: set[str] = set()
-    for m in dsl.metrics:
-        if isinstance(m, RatioMetric):
-            fields.add(m.numerator.field)
-            fields.add(m.denominator.field)
-        elif isinstance(m, WindowMetric):
-            fields.add(m.base.field)
-        else:
-            fields.add(m.field)
-    for d in dsl.dimensions:
-        fields.add(d.field)
-    for f in dsl.filters:
-        fields.add(f.field)
-    return fields
-
-
 def _retrieval_context(dsl: QueryDSL) -> dict[str, Any]:
-    """从 DSL 派生"检索上下文"：本次查询命中的语义目录字段与物理表。"""
-    fields = _referenced_fields(dsl)
+    """从 DSL 派生"检索上下文"：本次查询命中的语义目录字段与物理表。
+
+    字段收集**必须**走 ``security.guard.referenced_fields``——它是权限回溯口径的
+    唯一实现（表达式指标经 ref 回溯到被引用的聚合指标）。此处曾有一份复制品，
+    漏了 expression 分支，导致「客单价」这类表达式指标查询抛 ``AttributeError``
+    （2026-10-28 审计，见 docs/reviews/2026-10-28-audit-code-redundancy.md §2.1）。
+    """
+    fields = referenced_fields(dsl)
     tables = sorted({catalog.COLUMNS[f].table for f in fields if f in catalog.COLUMNS})
     return {"fields": sorted(fields), "tables": tables}
 

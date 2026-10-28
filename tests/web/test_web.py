@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from semantic.dsl_schema import QueryDSL
 from web.service import run_query
 
 
@@ -218,3 +219,41 @@ def test_query_response_carries_session_id(conn):
         "上个月华东地区的GMV是多少？", conn=conn, session_id="http-sess-1", user="alice"
     )
     assert result["session_id"] == "http-sess-1"
+
+
+def test_retrieval_context_supports_expression_metric():
+    """检索上下文必须能吃下表达式指标（客单价类查询）。
+
+    回归背景（2026-10-28 审计）：本模块曾自带一份 `_referenced_fields` 复制品，
+    漏了 expression 分支，对 ExpressionMetric 直接取 `.field` 抛 AttributeError。
+    调用点 `_retrieval_context` 位于 run_query 的 try 块之外，异常不会被转成友好
+    文案——「2025年客单价是多少」这类普通问题会直接失败。
+    """
+    from web.service import _retrieval_context
+
+    dsl = QueryDSL.model_validate(
+        {
+            "metrics": [
+                {
+                    "kind": "aggregate",
+                    "field": "split_total_amount",
+                    "agg": "sum",
+                    "alias": "gmv",
+                },
+                {
+                    "kind": "aggregate",
+                    "field": "order_id",
+                    "agg": "count_distinct",
+                    "alias": "order_cnt",
+                },
+                {
+                    "kind": "expression",
+                    "alias": "aov",
+                    "expr": {"op": "div", "args": [{"ref": "gmv"}, {"ref": "order_cnt"}]},
+                },
+            ]
+        }
+    )
+    ctx = _retrieval_context(dsl)
+    assert ctx["fields"] == ["order_id", "split_total_amount"]
+    assert "order_detail" in ctx["tables"]
