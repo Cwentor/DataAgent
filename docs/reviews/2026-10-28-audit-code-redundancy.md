@@ -198,11 +198,11 @@ SQL 同步更新为 `('广东', '浙江')`。修复后上述顺序依赖组合 2
 
 | 位置 | 重复次数 | 实测/估算代价 | 严重度 |
 |---|---|---|---|
-| `exec/guards.py:754` → `368`；`exec/audit.py:167`、`190` | **同一 SQL 解析 3 次** | ✅ 实测计数 3；单次 223 µs → 每查询约 0.45 ms 纯浪费 | **高** |
-| `agent/heuristic.py:92,106,133,134` | `_metrics(q)` 单次 `run()` 内算 **3 次**、`_dimensions(q)` 2 次、`_dim_keyword_table()` 2-3 次（每次遍历全目录 + `field_label`） | 每请求都走的确定性路径 | **高** |
-| `agent/semantic_check.py:81,115` | 同一 query 在**同一轮 LLM 重试循环内**被启发式全量解析 2 次，每轮重试都重算 | 与上一条叠加 | 高 |
-| `core/orchestrator/nodes.py:1390,2309,2802,2854,2884` + `grounding.py:118` | 同一份 parquet 一轮被 `pd.read_parquet` 读 **3-4 次** | 直接放大磁盘 IO 与报告时延 | 高 |
-| `compiler/sql_compiler.py:70` + 16 处 `get_renderer()` | 单次编译 **27+ 次**重新实例化 renderer（2.55 µs/次） | 约 70 µs/次编译，且多在循环内 | 中 |
+| `exec/guards.py:754` → `368`；`exec/audit.py:167`、`190` | **同一 SQL 解析 3 次** | ✅ 实测计数 3；单次 223 µs → 每查询约 0.45 ms 纯浪费 | **高** ✅ 已修复 |
+| `agent/heuristic.py:92,106,133,134` | `_metrics(q)` 单次 `run()` 内算 **3 次**、`_dimensions(q)` 2 次、`_dim_keyword_table()` 2-3 次（每次遍历全目录 + `field_label`） | 每请求都走的确定性路径 | **高** ✅ 表已缓存（`_metrics`/`_dimensions` 仍各 2 次，见 §4.2 注） |
+| `agent/semantic_check.py:81,115` | 同一 query 在**同一轮 LLM 重试循环内**被启发式全量解析 2 次，每轮重试都重算 | 与上一条叠加 | 高（未改，见 §8 遗留） |
+| `core/orchestrator/nodes.py:1390,2309,2802,2854,2884` + `grounding.py:118` | 同一份 parquet 一轮被 `pd.read_parquet` 读 **3-4 次** | 直接放大磁盘 IO 与报告时延 | 高 ✅ 已修复 |
+| `compiler/sql_compiler.py:70` + 16 处 `get_renderer()` | 单次编译 **27+ 次**重新实例化 renderer（2.55 µs/次） | 约 70 µs/次编译，且多在循环内 | 中 ✅ 已修复（实测收益小于预估，见 §4.2 注） |
 | `compiler/sql_compiler.py:576-607,450/481,675-683/708-714,764/796` | comparison/top_n/fill_gaps 三条路径对同一数据重复算：`_collect_tables` 4 遍、`_filter_sql`/`_from_clause`/`_metric_expr` 各 2 遍 | 编译期纯浪费，且是「两个 CTE 产物不一致」类 bug 的温床 | 中 |
 | `exec/guards.py:419,436` | 同一 SQL 被 `_strip_sql_comments` 完整扫描两遍（第二遍只为一个正则） | 中 | 中 |
 | `agent/tool_agent.py:1576-1577` | 同一函数同一入参**连调两次**只为写两个字段 | 高（1 行修） | 高 |
@@ -214,18 +214,64 @@ SQL 同步更新为 `('广东', '浙江')`。修复后上述顺序依赖组合 2
 
 | 位置 | 问题 | 严重度 |
 |---|---|---|
-| `core/orchestrator/intent.py:35-63,117-121` | 指标/维度词表每次调用重建（遍历全 `COLUMNS` + 逐 alias 展开 + `sorted(key=len)`），而 `classify_intent` 一轮被调 6 次 | 高 |
-| `agent/memory.py:448-482` | `dim_keywords` 每次遍历全 `COLUMNS` + `field_label()`，目录不变时结果恒定 | 中 |
+| `core/orchestrator/intent.py:35-63,117-121` | 指标/维度词表每次调用重建（遍历全 `COLUMNS` + 逐 alias 展开 + `sorted(key=len)`），而 `classify_intent` 一轮被调 6 次 | 高 ✅ 已修复 |
+| `agent/memory.py:448-482` | `dim_keywords` 每次遍历全 `COLUMNS` + `field_label()`，目录不变时结果恒定 | 中 ✅ 已修复 |
 | `core/retrieval/sql_lift.py:462-468` | `expected_joins` 每次 `lift_sql` 从 `JOIN_RULES` 重建 | 中 |
 | `core/retrieval/sql_lift.py:98,104-109` | 未限定列每次全表线性扫 `_COLUMN_INDEX`；表名反查每次线性扫 `ALIASES` | 中 |
 | `agent/tool_agent.py:468,517,1137` | `registry.tool_definitions()` + `json.dumps` 在 3 处各算一次，工具集进程内不变 | 中 |
-| `agent/heuristic.py:244-265` | `_having_field_alias_map()` 每次遍历 `catalog.METRICS` 重建 | 低 |
+| `agent/heuristic.py:244-265` | `_having_field_alias_map()` 每次遍历 `catalog.METRICS` 重建 | 低 ✅ 已修复 |
+
+#### 4.2.1 缓存失效机制：目录版本号（而不是各挂 `cache_clear`）
+
+派生结构一旦缓存，**失效**就是唯一的新风险点。项目里已有过一次 stale 事故
+（M-P0 活缺陷 #3：`refresh_catalog` 后消费方仍读旧目录），因此不用「每个消费方
+各自挂 `cache_clear` 回调」——那要求每个刷新点都记得通知每个缓存，漏一个就复现
+老事故。
+
+改为在 `semantic/catalog.py` 里放一个单调递增的目录版本号：
+
+```python
+_CACHE_EPOCH = 0
+def cache_epoch() -> int: ...
+def bump_cache_epoch() -> None: ...
+
+class EpochCache[T]:          # 按版本号失效的派生结构缓存
+    def get(self, build): ...
+```
+
+- `apply_builtin()`（import 初始化 / `reset_defaults` 共用路径）末尾 bump；
+- `catalog_loader.refresh_catalog()`（直接改写目录全局）末尾 bump；
+- 消费方建一个模块级实例，取用时传 builder，目录一变下次取用即重建。
+
+**测试侧配套**：`tests/conftest.py` 新增 autouse fixture，每个用例结束后 bump 一次。
+原因是测试常用 `monkeypatch.setitem(catalog.DIMENSION_MEMBERS, …)` 直接改目录，
+不走任何 bump 路径；若恰好在缓存为空时改目录，缓存会被灌入"假目录"派生值，并在
+monkeypatch 还原后继续被后续用例读到。autouse fixture 的 setup 早于 monkeypatch，
+teardown 晚于其还原，因此这一 bump 恰好落在正确时点（已用临时用例反证：关掉
+autouse 时下一个用例立刻读到毒值）。
+
+#### 4.2.2 实测收益（与本报告初版的估算有出入，如实记录）
+
+| 项 | 改前 | 改后 | 说明 |
+|---|---|---|---|
+| 维度关键词表 `_dim_keyword_table` | 9.81 µs | 0.27 µs | 36×，一次 `run()` 调 2-3 次 |
+| HAVING 别名表 `_having_field_alias_map` | 5.21 µs | 0.22 µs | 24× |
+| 指标词表 / 维度词表重建 | 13.57 / 9.52 µs | 0.23 / 0.17 µs | `classify_intent` 每次各算一遍 |
+| 长词优先排序 | 17.04 µs | 0.23 µs | 排序只取决于词表内容 |
+| `classify_intent` 整体 | 42.72 µs | 6.36 µs | 6.7×；一轮 6 次 → 254 µs 降到 38 µs |
+| `get_renderer()` | 1.30 µs | 1.08 µs | **初版估的 2.55 µs 是含首次 import 的冷值**；稳态只有 1.2× |
+
+⚠️ 最后一行是本报告初版的估算偏差：`get_renderer` 稳态成本远低于预估，因为
+`importlib.import_module` 命中 `sys.modules`、渲染器类没有 `__init__`。
+实例缓存仍然值得留（省 27×0.2 µs，且让"渲染器无状态"这条前提有代码背书），
+但它**不是**本批的主要收益来源；主要收益在目录派生词表与 parquet 重复读。
+
 
 ### 4.3 循环内现场编译正则 / 函数内重复 import
 
 | 位置 | 问题 | 严重度 |
 |---|---|---|
-| `exec/guards.py:426-428` | 黑名单循环内 `re.search(rf"\b{kw}\b", ...)` **每个关键字现场编译一次**：19~42 次编译/执行 | **高**（实测 179 µs → 预编译 15.9 µs，11×） |
+| `exec/guards.py:426-428` | 黑名单循环内 `re.search(rf"\b{kw}\b", ...)` **每个关键字现场编译一次**：19~42 次编译/执行 | **高** ✅ 已修复（实测 52.06 µs → 4.18 µs，12.4×） |
 | `tools/builtins/_query_core.py:242-251` | `_json_safe` 对**每个单元格**调用，函数体内每次执行 3 个 `import` | 中 |
 | `core/orchestrator/nodes.py:509,1863` + 8 处 `from config import settings` | 函数内重复导入模块级已导入的模块 | 低 |
 | `core/retrieval/pii.py:62` | 每列名跑一次 `re.sub`，pattern 为字面量未预编译 | 低 |
@@ -405,15 +451,25 @@ SQL 同步更新为 `('广东', '浙江')`。修复后上述顺序依赖组合 2
 
 验证：`black --check` / `ruff check` 全绿，全量 pytest **1421 passed / 28 skipped**。
 
-### 第 3 批：性能（1 周内，一次改完）
+### 第 3 批：性能（1 周内，一次改完）—— ✅ 已完成 2026-10-28
 
-| 动作 | 预期收益 |
-|---|---|
-| SQL 只解析一次（把 AST 传下去） | 每查询省 ~0.45 ms |
-| 黑名单关键字预编译成单条 alternation | 每次执行省 ~0.16–0.36 ms（11×） |
-| `_metrics`/`_dimensions`/词表/`dim_keywords` 加 `lru_cache` + 目录刷新时 `cache_clear()` | 确定性路径每请求省 2-3 次全目录遍历 |
-| parquet 预览按 `(path, mtime)` 缓存 | 省 2-3 次磁盘读 |
-| `get_renderer()` 提到编译函数开头 | 单次编译省 ~70 µs |
+| 动作 | 预期收益 | 状态 |
+|---|---|---|
+| SQL 只解析一次（把 AST 传下去） | 每查询省 ~0.45 ms | ✅ `assert_read_only_sql` 返回 AST，`assert_guardrails` 透传；实测解析 3 → 1 |
+| 黑名单关键字预编译成单条 alternation | 每次执行省 ~0.16–0.36 ms（11×） | ✅ 实测 52.06 µs → 4.18 µs（12.4×），30 条 SQL × 5 方言差分零差异 |
+| 词表/`dim_keywords` 加缓存 + 目录刷新时失效 | 每请求省 2-3 次全目录遍历 | ✅ 用 `catalog.EpochCache`（版本号）而非 `lru_cache`+回调，见 §4.2.1；`classify_intent` 42.7 → 6.4 µs |
+| parquet 预览按 `(path, mtime)` 缓存 | 省 2-3 次磁盘读 | ✅ 键含 `mtime_ns`，并记「是否读到末尾」以支持更大 limit；返回副本防污染 |
+| `get_renderer()` 提到编译函数开头 | 单次编译省 ~70 µs | ✅ 改为按方言名缓存实例（比提到函数开头更彻底）；**实测收益仅 1.2×**，见 §4.2.2 |
+
+**遗留（本批未做，收益小、风险不对称）**：
+
+- `agent/heuristic.py` 的 `_metrics(q)` / `_dimensions(q)` 在单次 `run()` 内仍各算
+  2 次。二者依赖查询文本，缓存要按 `(query, epoch)` 二维键或做实例级 1 条 memo；
+  实测单次 `run()` 72 µs，这两处合计不到 5 µs，收益不抵引入 query 维度缓存的状态
+  复杂度。
+- `agent/semantic_check.py` 在同轮 LLM 重试循环内重复全量解析启发式。这属于「重试
+  循环该不该复用上一轮结果」的设计问题（复用会让重试看到旧结论），不适合当性能项
+  顺手改，留待单独评估。
 
 ### 第 4 批：结构收敛（2 周，需评审）
 
