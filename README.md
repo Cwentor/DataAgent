@@ -40,61 +40,22 @@ flowchart TB
 
 GitHub 的 README 不执行脚本，交互画布部署在 GitHub Pages（`architecture-ui` 由 CI 自动构建部署）。支持分层显隐、节点上下游高亮与纵横布局切换。
 
+[![DataAgent 交互式架构图](docs/assets/architecture-canvas.png)](https://cwentor.github.io/DataAgent/)
+
 👉 [打开交互式架构图](https://cwentor.github.io/DataAgent/)
 
 ## ✨ 特性
 
-- **受限 DSL 契约**：Pydantic V2 + `extra="forbid"`，字段、操作符、聚合均为受限枚举
-- **确定性编译**：SQL 只由编译器生成，支持聚合/比率/时间/窗口/补零/Top-N/同比环比
-- **纵深安全**：统一认证（JWT + Session）+ 生成前作用域 + 表/列/行级权限守卫（RLS）
-- **受控执行**：只读白名单、执行前审计门（笛卡尔积/只读违规 REJECTED 熔断、无界输出 WARNING）、超时取消、扫描行数熔断、返回行数上限、SQL 自愈
-- **对话式体验**：意图路由、多轮指代继承（"那华南呢？"）、口径澄清与槽位回填、多工具编排
-- **观察驱动重规划**：执行后把调度轨迹喂回规划器继续决策（继续查 / 作答 / 反问 / 终止），受 Max Steps 硬预算约束；对比型问题自动分解为多次单实体查询并跨步对比作答；反思层在调度终止后自检结果充分性（必要时受控追加一次查询）
-- **企业级 Data Agent（core/ 升级层）**：
-  - **图式编排**：LangGraph 单引擎六节点（澄清 HITL → 规划 → 受控取数 → 沙箱分析 → 反思重规划 → 综合报告），计划为步骤 DAG，interrupt 泛化审批门（clarify / plan_review / high_risk——L3 对沙箱执行模型产码二次确认），受控自愈 ≤3 次；重规划时错误上下文注入 Planner——自愈是针对性修正而非盲重试
-  - **GuardrailAgent 执行前审计**：编译产物 SQL 经 sqlglot AST 静态审计——笛卡尔积（逗号/CROSS/无 ON JOIN）与只读结构违规 **REJECTED 执行前熔断**（拒绝原因进入自愈上下文），无界输出 WARNING 审计轨迹；结构化裁决（check/severity/message/suggestion）
-  - **DataQAAgent 结果断言**：空结果 / NULL 率 / 非负指标负值 / 聚合维度组合唯一性四类确定性质检，编排与 web 双取数链路同源；发现随 `ParquetRef.audit` 经 SSE 事件、critic 反思视野、报告"数据质检"小节与结构化日志全链路可见（不误杀不吞错）
-  - **SchemaAgent 动态 profiling**：低基数（≤30）字符串字段实际取值探查并注入规划上下文（"可取值: a|b|c"），Planner 不再臆造过滤字面值；进程级缓存 + 失败降级，离线环境零副作用
-  - **沙箱代码解释器**：AST 静态守卫（黑名单 import/调用/dunder 逃逸）+ 限权 runner（模块白名单 import、workspace 受限 open）+ 可插拔后端（Docker `--net=none --cap-drop=ALL` 强隔离 / 子进程兜底），聚合矩阵 ≤100 行防数据外泄
-  - **归因技能包**：维度熵/信息增益下钻、乘法对数链式指标分解树（GMV=UV×CR×AOV）、加法差额分解、DTW 相似性、Holt-Winters 异常检测、Shapley 值公平归因——全部与已知解析解对拍
-  - **数据交换协议**：DSL 查询结果 PII 脱敏（列名启发式 + 值形态正则，确定性哈希掩码）后物化为 ParquetRef（sha256 可审计），沙箱零网络零 DB socket
-  - **裸 SQL 网关**：字符串载荷 / SQL 键 / 自由文本 SQL 形态在网关层直接拒绝（`GuardrailViolation`），"LLM 永不产出裸 SQL"三重防线
-  - **意图路由收敛与诚实兜底（十八期）**：澄清判定权上收 Planner（支持选项式反问——候选口径 pill 按钮点击即答复）；
-    兜底准入制：诊断 / 基数（有多少个省份）/ 硬锚定指标三类意图确定性直答（附缺省口径说明），其余意图诚实拒答
-    （原因 + 已识别锚点 + 能力清单，全程零 LLM 调用）；L3 意图-DSL 错位守卫执行前拦截"基数意图 + 金额聚合"式错位查询；
-    Grounding 定向重试闭环——LLM 报告数值溯源校验（量纲归一化容差），不可溯源超阈值携修正指令重写 1 次，
-    仍不达标降级确定性渲染；意图词表以 `FieldMeta.aliases` 为单一事实源，兜底接管降级标注全程可见
-  - **枚举预路由确定性渲染（二十期）**：ENUMERATION 意图在编排入口即预路由为确定性渲染路径——全量行清单直答
-    （超过阈值时截断分流），完全绕过 LLM 调用链路，零幻觉零延迟；降级水印区分"枚举预路由直答"与"LLM 故障降级"两种场景，
-    用户侧文案分流可见
-  - **语义单一事实源（二十期 M-P2）**：`config/semantic.json` 是唯一静态业务事实源——字段/标签/别名/连接规则/指标口径/
-    支付口径/缺省窗口/反思概念/枚举值标签/大区映射/维度成员种子一律登记 json，`semantic/catalog.py` import 时 json 直读，
-    严禁在手写代码（heuristic/nodes/glossary/prompts/labels）里新增业务映射
-  - **HTTP 入口**：`POST /api/agent/run`（同步编排，鉴权 + HITL 澄清中断/恢复，resume_token 属主绑定）与
-    `GET /api/v1/agent/chat/stream`（SSE 流式：plan_created / step_start / tool_start / tool_end /
-    reflection / hitl_request / artifact_emit / done / error 九类事件实时推送，异常收敛为 error 事件不崩流）
-  - **Agent 对话流工作台**：中央主对话页以 Agent 对话流承载全过程——用户气泡、
-    任务计划（DAG 步骤清单 + 进度）、工具调用（DSL/沙箱时间线活动行，点击展开契约/代码/输出）、
-    反思自愈节点、HITL 澄清交互卡（候选口径 pill 按钮点击即答复 / 计划审批卡支持批准、
-    拒绝、附带修改指令重规划）、完成/错误摘要，>50 步自动切换窗口化虚拟渲染
-    （事件数据全量保留、DOM 仅渲染可视窗口），底部输入条内置模型选择器随时切换供应商模型；
-    左侧边栏承载视图切换（执行报告 / ECharts 交互图表 / 沙箱代码与输出 / 数据审计表 +
-    Markdown/HTML 导出经侧边栏切换查看）、自主性分级选择（L1 每步确认 / L2 计划确认 /
-    L3 高危确认 / L4 全自动，按会话持久化随流上送）、会话历史、知识目录（`/api/schema/summary`
-    语义目录字段清单）与设置/用户中心，零前端框架（原生 JS + vendored ECharts/PrismJS）
-- **多执行后端（二十一至二十五期，`exec/engine/` + `compiler/dialect/`）**：
-  - **引擎抽象层**：`EngineAdapter` 协议把连接 / 执行 / 取消 / 计划解析 / 异常归一 / 连接加固 / 灌数 / 物理元数据按引擎下沉；`DialectRenderer` 承载方言差异（标识符引号、时间截断与平移、HAVING 别名、补零 spine、字符串转义）。新增后端 = adapter 与 renderer 各登记一行，护栏框架与消费方零改动
-  - **五后端统一**：`DB_BACKEND=duckdb|mysql|postgres|clickhouse|hive`（默认 duckdb，零破坏）；建仓 DDL 复用 DuckDB 版在运行时转译，数据与 DuckDB 版逐行同源
-  - **物理元数据面下沉（二十四期）**：语义目录的物理列一律经 `physical_columns()` 实读——DuckDB/MySQL/PostgreSQL 走 `information_schema.columns`、ClickHouse 走 `system.columns`、Hive 走 `DESCRIBE` 解析；物理类型归一收敛到 `exec/engine/type_map.py`，未知类型 fail-closed 抛错（不静默降级为 `str`）
-  - **Hive 链路（二十五期）**：PyHive HTTP transport（绕开 Windows 无官方 wheel 的 sasl）、`posexplode` spine 补零、CSV staging + `LOAD DATA` 建仓、HiveQL 特有语句族（DFS/MSCK/USE/SHOW/DESCRIBE/LOCK/GRANT…）护栏黑名单
-  - **服务级门禁**：每个非默认后端各有 CI parity job——golden 全量 DSL 双后端一致性 + 周边界 / 5 年递归补零 / comparison 配对 / 连接池复用专项
-- **多模型供应商网关（providers/）**：OpenAI Chat、OpenAI Responses、Anthropic、Gemini
-  四协议适配与 JSON Mode 抹平（控制面支持前三种协议的可视化配置，Gemini 协议适配层就绪）；
-  API Key 落盘加密存储、列表响应零密钥回传，工作台设置页可视化 CRUD + 连通性探测
-  （供应商全部由用户添加，无预置条目），SSE 编排支持请求级 `provider_id` / `model_id`
-  模型切换
-- **可解释交付**：DSL → 中文话术 + 图表自适应推荐，零前端框架
-- **可观测**：全链路审计快照（含 `answered_by` / `planner_llm_error` 编排字段）、结构化 JSON 日志（request_id 贯穿，error=熔断/审计拒绝/额度耗尽、warning=可自愈/降级、info=流程转折；可选 RotatingFileHandler 落盘）、QPS/分位数指标、DataQA 质检发现分级采集
+- **受控 DSL 契约**：Pydantic V2 + `extra="forbid"`，字段、操作符、聚合均为受限枚举，LLM 永不产出裸 SQL
+- **确定性编译**：SQL 只由编译器生成，支持聚合 / 比率 / 时间 / 窗口 / 补零 / Top-N / 同比环比
+- **五后端一契约**：`DB_BACKEND` 切换 DuckDB / MySQL / PostgreSQL / ClickHouse / Hive，护栏框架引擎无关，golden 评测锚定 DuckDB 方言
+- **纵深安全**：统一认证 + 生成前作用域收窄 + 表/列/行级 RLS + 执行前审计门（笛卡尔积 / 只读违规 REJECTED 熔断）+ 超时 / 扫描 / 返回行数三重护栏
+- **图式编排**：LangGraph 六节点（澄清、规划、受控取数、沙箱分析、反思重规划、综合报告），四类 interrupt 审批门 + L1-L4 自主性分级 + 受控自愈
+- **沙箱与归因**：AST 守卫 + 限权 runner + Docker 强隔离；熵下钻 / 指标分解树 / DTW / Shapley 归因技能包
+- **诚实兜底**：意图路由 + 兜底准入制，不虚构、假设透明（assumptions 契约字段），拒答降为最后手段
+- **可解释交付与可观测**：中文话术 + 图表自适应推荐 + SQL 溯源 + 全链路审计、结构化日志与指标
+
+> 完整特性清单（按演进阶段整理，含各期关键决策）见 [特性总览](docs/guides/features.md)。
 
 ## 🚀 快速开始
 
