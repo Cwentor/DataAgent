@@ -27,24 +27,20 @@
 
 ## 🧠 Core pipeline (one diagram)
 
-```text
-🗣️ Natural-language question
-      │
-      ▼
-🧭 Intent routing ──── five-way split: data question / metric definition / clarification / small talk / system action
-      │
-      ▼
-📐 Governed DSL ────── the LLM may only emit in-contract JSON (extra="forbid"); multi-turn reference resolution
-      │
-      ▼
-⚙️ Deterministic compile ── field whitelist + controlled JOIN + table/column/row-level RLS injected
-      │
-      ▼
-🛡️ Governed execution ──── read-only AST check / timeout interrupt / scan-row circuit breaker / result-row cap
-      │
-      ▼
-📊 Explainable delivery ── narrative answer + adaptive chart recommendation + SQL provenance + full-chain audit
+```mermaid
+flowchart TB
+    Q["🗣️ Natural-language question"] --> R["🧭 Intent routing<br>five-way split: data question / metric definition / clarification / small talk / system action"]
+    R --> D["📐 Governed DSL<br>the LLM may only emit in-contract JSON (extra=forbid); multi-turn reference resolution"]
+    D --> C["⚙️ Deterministic compile<br>field whitelist + controlled JOIN + table/column/row-level RLS injected"]
+    C --> E["🛡️ Governed execution<br>read-only AST check / timeout interrupt / scan-row circuit breaker / result-row cap"]
+    E --> O["📊 Explainable delivery<br>narrative answer + adaptive chart recommendation + SQL provenance + full-chain audit"]
 ```
+
+## 🗺️ Interactive architecture diagram
+
+GitHub READMEs do not run scripts, so the interactive canvas is deployed on GitHub Pages (`architecture-ui`, built and deployed automatically by CI). It supports layer visibility toggles, upstream/downstream highlighting and vertical/horizontal layouts.
+
+👉 [Open the interactive architecture diagram](https://cwentor.github.io/DataAgent/)
 
 ## ✨ Features
 
