@@ -31,6 +31,7 @@
 ## 三、稳定指南入口
 
 [快速开始](guides/quickstart.md) · [架构与设计](guides/architecture.md) ·
+[特性总览](guides/features.md)（[EN](guides/features.en.md)） ·
 [环境配置](guides/configuration.md) · [Web UI 与 API](guides/api.md) ·
 [安全模型](guides/security.md) · [质量保障](guides/quality.md) ·
 [演进里程碑](guides/roadmap.md)
