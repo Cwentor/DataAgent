@@ -6,16 +6,16 @@ This is the full DataAgent feature list, organized by evolution phase. The READM
 
 The ChatBI query-engine groundwork; every item below still runs in production today.
 
-- **Semantic layer & contract** (Phases 1, 8): semantic DSL with a field-whitelist catalog; Pydantic V2 + `extra="forbid"` strong contracts — fields, operators and aggregations are closed enums; multi-metric period-over-period, window functions, date gap-filling, grouped Top-N
-- **Agent dual path** (Phase 2): strictly validated LLM path plus a deterministic heuristic fallback; fully usable offline with no API key; safe degradation with a visible `degraded` flag when the LLM fails
-- **Compilation semantics** (Phases 3, 4): dual-window CTEs for period-over-period, multi-fact-table semantic model with cross-table ratio metrics
-- **Permission system** (Phases 5, 10): table / column / row-level RLS; unified auth (JWT + Session); server-side principal binding and pre-generation scope narrowing
-- **Explanation & visualization** (Phase 6): Chinese narrative explanation of the DSL and adaptive chart recommendation
-- **Web service & workspace** (Phases 7, 15): FastAPI + uvicorn service layer with query / orchestration / async-task endpoints; two-pane interactive workspace, nine SSE event types pushed in real time, task-DAG timeline, artifact canvas, HITL clarification interactions
-- **Execution governance** (Phase 11): read-only allowlist, timeout cancellation, scan-row circuit breaker, result-row cap, SQL self-healing, connection pool and query cache
-- **Injection defense & hardening** (Phase 12): read-only AST checks, login rate limiting, SQLite session offload, startup strict validation, observability
-- **Agent capability deepening** (Phase 13): observation-driven replanning (the dispatch trace is fed back to the planner under a hard Max-Steps budget), comparison questions decomposed into per-entity queries answered side by side, a reflection layer self-checking result sufficiency (with one bounded follow-up query when needed)
-- **Observability** (Phases 11, 12): audit snapshots, structured JSON logs (request_id threading, error/warning/info severity discipline), QPS and percentile metrics
+- **Semantic layer & contract (Phases 1, 8)**: semantic DSL with a field-whitelist catalog; Pydantic V2 + `extra="forbid"` strong contracts — fields, operators and aggregations are closed enums; multi-metric period-over-period, window functions, date gap-filling, grouped Top-N
+- **Agent dual path (Phase 2)**: strictly validated LLM path plus a deterministic heuristic fallback; fully usable offline with no API key; safe degradation with a visible `degraded` flag when the LLM fails
+- **Compilation semantics (Phases 3, 4)**: dual-window CTEs for period-over-period, multi-fact-table semantic model with cross-table ratio metrics
+- **Permission system (Phases 5, 10)**: table / column / row-level RLS; unified auth (JWT + Session); server-side principal binding and pre-generation scope narrowing
+- **Explanation & visualization (Phase 6)**: Chinese narrative explanation of the DSL and adaptive chart recommendation
+- **Web service & workspace (Phases 7, 15)**: FastAPI + uvicorn service layer with query / orchestration / async-task endpoints; two-pane interactive workspace, nine SSE event types pushed in real time, task-DAG timeline, artifact canvas, HITL clarification interactions
+- **Execution governance (Phase 11)**: read-only allowlist, timeout cancellation, scan-row circuit breaker, result-row cap, SQL self-healing, connection pool and query cache
+- **Injection defense & hardening (Phase 12)**: read-only AST checks, login rate limiting, SQLite session offload, startup strict validation, observability
+- **Agent capability deepening (Phase 13)**: observation-driven replanning (the dispatch trace is fed back to the planner under a hard Max-Steps budget), comparison questions decomposed into per-entity queries answered side by side, a reflection layer self-checking result sufficiency (with one bounded follow-up query when needed)
+- **Observability (Phases 11, 12)**: audit snapshots, structured JSON logs (request_id threading, error/warning/info severity discipline), QPS and percentile metrics
 
 ## Enterprise upgrade layer (Phase 14, the `core/` packages)
 
@@ -77,12 +77,12 @@ The capability boundary is the governance-pipeline boundary (read-only + RLS + s
 
 - **Engine abstraction layer** (`exec/engine/`): the `EngineAdapter` protocol pushes connection / execution / cancellation / plan parsing / error normalization / connection hardening / bulk load / physical metadata down to each engine; `DialectRenderer` (`compiler/dialect/`) carries dialect differences (identifier quoting, date truncation and shifting, HAVING aliases, gap-filling spine, string escaping). Adding a backend means registering one line in each, with zero changes to the guardrail framework or consumers
 - **Warehouse builds**: all five backends reuse the DuckDB DDL transpiled at runtime with row-identical source data; Hive builds via CSV staging + `LOAD DATA` (PyHive HTTP transport)
-- **Physical metadata plane** (Phase 24): `physical_columns()` reads the catalog's physical columns live per backend (`information_schema.columns` for DuckDB/MySQL/PG, `system.columns` for ClickHouse, per-table `DESCRIBE` parsing for Hive); type normalization converges in `exec/engine/type_map.py`, where unknown types fail closed instead of silently degrading
+- **Physical metadata plane (Phase 24)**: `physical_columns()` reads the catalog's physical columns live per backend (`information_schema.columns` for DuckDB/MySQL/PG, `system.columns` for ClickHouse, per-table `DESCRIBE` parsing for Hive); type normalization converges in `exec/engine/type_map.py`, where unknown types fail closed instead of silently degrading
 - **Per-backend specifics**:
-  - MySQL: three read-only defense lines (read-only account + session READ ONLY + dialect denylist), `max_execution_time` timeouts, EXPLAIN ANALYZE scan breaker, Monday-aligned WEEKDAY weeks
-  - PostgreSQL: `statement_timeout` (SQLSTATE 57014 normalization), `default_transaction_read_only` hardening, native date_trunc / generate_series
-  - ClickHouse: account-profile budgets (readonly=1), verification-style hardening (reads `system.settings` back, fail-closed comparison), `numbers(N)` + addDays/addMonths/addYears spine, text-normalized driver errors
-  - Hive: no session-level read-only / budget / cancel surface — client read timeouts + verification-style harden, `posexplode` gap-filling spine, backtick-quoted internal identifiers, fail-closed DESCRIBE partition parsing
+  - **MySQL**: three read-only defense lines (read-only account + session READ ONLY + dialect denylist), `max_execution_time` timeouts, EXPLAIN ANALYZE scan breaker, Monday-aligned WEEKDAY weeks
+  - **PostgreSQL**: `statement_timeout` (SQLSTATE 57014 normalization), `default_transaction_read_only` hardening, native date_trunc / generate_series
+  - **ClickHouse**: account-profile budgets (readonly=1), verification-style hardening (reads `system.settings` back, fail-closed comparison), `numbers(N)` + addDays/addMonths/addYears spine, text-normalized driver errors
+  - **Hive**: no session-level read-only / budget / cancel surface — client read timeouts + verification-style harden, `posexplode` gap-filling spine, backtick-quoted internal identifiers, fail-closed DESCRIBE partition parsing
 - **Service-level CI gates**: one parity job per non-default backend — full golden-DSL cross-backend parity + week-boundary / recursive gap-filling / comparison pairing / connection-pool reuse cases + warehouse build smoke; golden evaluation stays anchored on the DuckDB dialect regardless of engine
 
 ## Interactive architecture diagram (architecture-ui)

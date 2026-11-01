@@ -6,16 +6,16 @@
 
 ChatBI 问数引擎阶段打下的地基，以下能力贯穿至今。
 
-- **语义层与契约**（一、八期）：语义 DSL 与字段白名单目录，Pydantic V2 + `extra="forbid"` 强契约，字段、操作符、聚合均为受限枚举；多指标同环比、窗口函数、日期补零、分组 Top-N
-- **Agent 双路径**（二期）：LLM 严格校验与确定性启发式兜底，离线零 Key 可用，LLM 失败安全降级（degraded 标志可见）
-- **编译语义**（三、四期）：同比环比双窗口 CTE、多事实表语义模型与跨表比率指标
-- **权限体系**（五、十期）：表级、列级、行级 RLS；统一身份认证（JWT + Session）；principal 服务端绑定与生成前作用域收窄
-- **解释与可视化**（六期）：DSL 中文业务解释与图表自适应推荐
-- **Web 服务与工作台**（七、十五期）：FastAPI + uvicorn 服务层，查询 / 编排 / 异步任务端点；双栏交互式工作台、SSE 九类事件实时推送、任务 DAG 时间线、产物画布、HITL 澄清交互
-- **执行层治理**（十一期）：只读白名单、超时取消、扫描行数熔断、返回行数上限、SQL 自愈、连接池与查询缓存
-- **注入防御与加固**（十二期）：只读 AST 校验、登录限流、SQLite 会话外置、启动强校验、可观测性
-- **Agent 能力深化**（十三期）：观察驱动重规划（调度轨迹喂回规划器继续决策，Max Steps 硬预算）、对比型问题分解为多次单实体查询并跨步对比作答、反思层结果充分性自检（必要时受控追加一次查询）
-- **可观测**（十一、十二期）：审计快照、结构化 JSON 日志（request_id 贯穿、error/warning/info 分级纪律）、QPS 与分位数指标
+- **语义层与契约（一、八期）**：语义 DSL 与字段白名单目录，Pydantic V2 + `extra="forbid"` 强契约，字段、操作符、聚合均为受限枚举；多指标同环比、窗口函数、日期补零、分组 Top-N
+- **Agent 双路径（二期）**：LLM 严格校验与确定性启发式兜底，离线零 Key 可用，LLM 失败安全降级（degraded 标志可见）
+- **编译语义（三、四期）**：同比环比双窗口 CTE、多事实表语义模型与跨表比率指标
+- **权限体系（五、十期）**：表级、列级、行级 RLS；统一身份认证（JWT + Session）；principal 服务端绑定与生成前作用域收窄
+- **解释与可视化（六期）**：DSL 中文业务解释与图表自适应推荐
+- **Web 服务与工作台（七、十五期）**：FastAPI + uvicorn 服务层，查询 / 编排 / 异步任务端点；双栏交互式工作台、SSE 九类事件实时推送、任务 DAG 时间线、产物画布、HITL 澄清交互
+- **执行层治理（十一期）**：只读白名单、超时取消、扫描行数熔断、返回行数上限、SQL 自愈、连接池与查询缓存
+- **注入防御与加固（十二期）**：只读 AST 校验、登录限流、SQLite 会话外置、启动强校验、可观测性
+- **Agent 能力深化（十三期）**：观察驱动重规划（调度轨迹喂回规划器继续决策，Max Steps 硬预算）、对比型问题分解为多次单实体查询并跨步对比作答、反思层结果充分性自检（必要时受控追加一次查询）
+- **可观测（十一、十二期）**：审计快照、结构化 JSON 日志（request_id 贯穿、error/warning/info 分级纪律）、QPS 与分位数指标
 
 ## 企业级升级层（十四期，core/ 四包）
 
@@ -57,8 +57,8 @@ ChatBI 问数引擎阶段打下的地基，以下能力贯穿至今。
 能力边界 = 治理管道边界（只读 + RLS + 敏感数据保护 + 资源上限），不是 DSL 契约表达力。LLM 产出的 SQL 永不直接执行。
 
 - **L1 确定性核**：Planner 直产 DSL 覆盖常规问数
-- **L2 提升闸门**（`core/retrieval/sql_lift.py`，sqlglot）：超契约 SQL 转译回 DSL 契约由确定性编译器重编译；拒升 ≠ 拒答，精确清单喂回自愈 ≤2 次
-- **L3 探索层**（`core/retrieval/exploration.py`）：不可提升 SQL 经第四类审批门（allow_once / allow_session / deny）后在按 principal 生成的安全视图（`security/views.py`，禁列物理投影 + RLS 固化 + 连接加固）上受治理执行，报告醒目标注"探索查询产出"
+- **L2 提升闸门（`core/retrieval/sql_lift.py`，sqlglot）**：超契约 SQL 转译回 DSL 契约由确定性编译器重编译；拒升 ≠ 拒答，精确清单喂回自愈 ≤2 次
+- **L3 探索层（`core/retrieval/exploration.py`）**：不可提升 SQL 经第四类审批门（allow_once / allow_session / deny）后在按 principal 生成的安全视图（`security/views.py`，禁列物理投影 + RLS 固化 + 连接加固）上受治理执行，报告醒目标注"探索查询产出"
 - **DSL 扩容**：纯维度投影 / HAVING / 表达式指标、多维枚举
 - **分级透明作答**：诚实 = 不虚构 + 假设透明（`assumptions` 契约字段，报告头部呈现），二轮歧义转带假设作答，拒答降为最后手段
 - **沙箱 connect 旁路封堵**：`connect/database` 调用永久封死——取数权只在执行层；红线矩阵入 CI（`boundary_eval`）
@@ -75,14 +75,14 @@ ChatBI 问数引擎阶段打下的地基，以下能力贯穿至今。
 
 `DB_BACKEND=duckdb|mysql|postgres|clickhouse|hive`（默认 duckdb 零破坏），五后端一契约。
 
-- **引擎抽象层**（`exec/engine/`）：`EngineAdapter` 协议把连接 / 执行 / 取消 / 计划解析 / 异常归一 / 连接加固 / 灌数 / 物理元数据按引擎下沉；`DialectRenderer`（`compiler/dialect/`）承载方言差异（标识符引号 / 时间截断与平移 / HAVING 别名 / 补零 spine / 字符串转义）。新增后端 = 各登记一行，护栏框架与消费方零改动
+- **引擎抽象层（`exec/engine/`）**：`EngineAdapter` 协议把连接 / 执行 / 取消 / 计划解析 / 异常归一 / 连接加固 / 灌数 / 物理元数据按引擎下沉；`DialectRenderer`（`compiler/dialect/`）承载方言差异（标识符引号 / 时间截断与平移 / HAVING 别名 / 补零 spine / 字符串转义）。新增后端 = 各登记一行，护栏框架与消费方零改动
 - **建仓链路**：五后端复用 DuckDB DDL 运行时转译，源数据行级一致；Hive 走 CSV staging + `LOAD DATA`（PyHive HTTP transport）
-- **物理元数据面**（二十四期）：`physical_columns()` 按当前后端实读目录物理列（duckdb / mysql / pg 走 `information_schema.columns`，CH 走 `system.columns`，Hive 逐表 DESCRIBE 解析）；类型归一收敛 `exec/engine/type_map.py`，未知类型 fail-closed 抛错不静默降级
+- **物理元数据面（二十四期）**：`physical_columns()` 按当前后端实读目录物理列（duckdb / mysql / pg 走 `information_schema.columns`，CH 走 `system.columns`，Hive 逐表 DESCRIBE 解析）；类型归一收敛 `exec/engine/type_map.py`，未知类型 fail-closed 抛错不静默降级
 - **各后端关键差异**：
-  - MySQL：只读三防线（只读账号 + 会话 READ ONLY + 方言增量黑名单）、`max_execution_time` 超时、EXPLAIN ANALYZE 扫描熔断、WEEKDAY 周一对齐
-  - PostgreSQL：`statement_timeout`（SQLSTATE 57014 归一）、`default_transaction_read_only` 加固、date_trunc / generate_series 全原生
-  - ClickHouse：账号 profile 承载预算（readonly=1）、验证式加固（回读 `system.settings` fail-closed 比对）、`numbers(N)` + addDays/addMonths/addYears spine、驱动异常文本归一
-  - Hive：无会话级只读 / 预算 / 取消面，客户端读超时 + 验证式 harden、`posexplode` 补零 spine、裸标识符反引号化、DESCRIBE 分区段 fail-closed
+  - **MySQL**：只读三防线（只读账号 + 会话 READ ONLY + 方言增量黑名单）、`max_execution_time` 超时、EXPLAIN ANALYZE 扫描熔断、WEEKDAY 周一对齐
+  - **PostgreSQL**：`statement_timeout`（SQLSTATE 57014 归一）、`default_transaction_read_only` 加固、date_trunc / generate_series 全原生
+  - **ClickHouse**：账号 profile 承载预算（readonly=1）、验证式加固（回读 `system.settings` fail-closed 比对）、`numbers(N)` + addDays/addMonths/addYears spine、驱动异常文本归一
+  - **Hive**：无会话级只读 / 预算 / 取消面，客户端读超时 + 验证式 harden、`posexplode` 补零 spine、裸标识符反引号化、DESCRIBE 分区段 fail-closed
 - **服务级 CI 门禁**：每个非默认后端一个 parity job——golden 全量跨后端一致性 + 周边界 / 递归补零 / comparison 配对 / 连接池复用用例 + 建仓冒烟；golden 评测锚定 DuckDB 方言不随引擎切换
 
 ## 交互式架构图（architecture-ui）
