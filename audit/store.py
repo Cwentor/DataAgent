@@ -48,6 +48,11 @@ _AUDIT_COLUMN_TYPES: dict[str, str] = {
     # 编排特有字段（P3）：裁决方与 LLM 规划失败原因
     "answered_by": "VARCHAR",
     "planner_llm_error": "VARCHAR",
+    # 查询耗时可观测（#23）：域锚点 / 后端 / 最后一次成功执行耗时 / 执行明细 JSON
+    "query_domain": "VARCHAR",
+    "db_backend": "VARCHAR",
+    "sql_latency_ms": "DOUBLE",
+    "sql_exec": "VARCHAR",
     "created_at": "VARCHAR",
 }
 
@@ -73,6 +78,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
     routing_reason     VARCHAR,
     answered_by        VARCHAR,
     planner_llm_error  VARCHAR,
+    query_domain       VARCHAR,
+    db_backend         VARCHAR,
+    sql_latency_ms     DOUBLE,
+    sql_exec           VARCHAR,
     created_at         VARCHAR
 )
 """
@@ -83,8 +92,9 @@ INSERT INTO audit_log
     (request_id, session_id, user_name, principal, prompt, retrieval_context,
      dsl, sql, latency_ms, row_count, scan_rows, rewrites, error,
      detected_intent, routing_latency_ms, routing_reason,
-     answered_by, planner_llm_error, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     answered_by, planner_llm_error,
+     query_domain, db_backend, sql_latency_ms, sql_exec, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -186,6 +196,10 @@ def _record_params(record: AuditRecord) -> list[Any]:
         record.routing_reason,
         record.answered_by,
         record.planner_llm_error,
+        record.query_domain,
+        record.db_backend,
+        record.sql_latency_ms,
+        _json_dump(record.sql_exec),
         record.created_at,
     ]
 
@@ -350,6 +364,10 @@ class AuditStore:
                 routing_reason     VARCHAR,
                 answered_by        VARCHAR,
                 planner_llm_error  VARCHAR,
+                query_domain       VARCHAR,
+                db_backend         VARCHAR,
+                sql_latency_ms     DOUBLE,
+                sql_exec           VARCHAR,
                 created_at         VARCHAR
             )
             """,

@@ -90,3 +90,32 @@ def test_audit_write_failure_counter_visible_in_snapshot():
     assert reg.record_audit_write_failure() == 1
     assert reg.record_audit_write_failure() == 2
     assert reg.snapshot()["audit_write_failures"] == 2
+
+
+def test_query_latency_aggregation():
+    """#23：SQL 执行耗时按维度聚合，缺失 domain 落 (unspecified) 不丢样本。"""
+    reg = MetricsRegistry()
+    samples = [
+        (10.0, "duckdb", "order_detail"),
+        (20.0, "duckdb", "order_detail"),
+        (100.0, "mysql", None),
+        (5.0, "duckdb", "fact_page_view"),
+    ]
+    for duration, backend, domain in samples:
+        reg.record_sql_exec(duration_ms=duration, backend=backend, domain=domain)
+    ql = reg.snapshot()["query_latency"]
+    assert ql["count"] == 4
+    assert ql["p95"] == 100.0
+    assert ql["by_domain"]["order_detail"]["count"] == 2
+    assert ql["by_domain"]["(unspecified)"]["count"] == 1
+    assert ql["by_backend"]["mysql"]["max"] == 100.0
+    assert ql["by_backend"]["duckdb"]["p50"] == 10.0
+
+
+def test_query_latency_empty_snapshot():
+    """零打点时输出结构化零值（便于前端/告警消费）。"""
+    ql = MetricsRegistry().snapshot()["query_latency"]
+    assert ql["count"] == 0
+    assert ql["p50"] is None
+    assert ql["by_domain"] == {}
+    assert ql["by_backend"] == {}

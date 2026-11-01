@@ -480,3 +480,74 @@ def test_lock_file_open_exhausted_raises(tmp_path, monkeypatch):
     lock = _CrossProcessLock(tmp_path / "audit.duckdb")
     with pytest.raises(PermissionError, match="锁文件打开失败"):
         lock.__enter__()
+
+
+# --------------------------------------------------------------------------- #
+# 查询耗时可观测（#23）：新列写读与旧表幂等迁移
+# --------------------------------------------------------------------------- #
+def test_audit_store_query_duration_columns(tmp_path):
+    """#23：query_domain / db_backend / sql_latency_ms / sql_exec 四列写读。"""
+    store = AuditStore(db_path=tmp_path / "audit.duckdb")
+    store.write(
+        AuditRecord(
+            request_id="q1",
+            prompt="GMV",
+            sql="SELECT 1",
+            query_domain="order_detail",
+            db_backend="duckdb",
+            sql_latency_ms=7.5,
+            sql_exec={
+                "executions": 2,
+                "total_duration_ms": 10.0,
+                "last_duration_ms": 7.5,
+                "executions_detail": [{"duration_ms": 7.5}],
+            },
+        )
+    )
+    store.close()
+
+    conn = duckdb.connect(str(tmp_path / "audit.duckdb"), read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT query_domain, db_backend, sql_latency_ms, sql_exec FROM audit_log"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "order_detail"
+    assert row[1] == "duckdb"
+    assert row[2] == 7.5
+    assert json.loads(row[3])["executions"] == 2
+
+
+def test_migrate_schema_adds_query_duration_columns(tmp_path):
+    """#23：旧版 audit_log（无新四列）写库时幂等迁移自动补列，不丢历史数据。"""
+    db = tmp_path / "audit.duckdb"
+    conn = duckdb.connect(str(db))
+    conn.execute("CREATE TABLE audit_log (request_id VARCHAR, prompt VARCHAR, created_at VARCHAR)")
+    conn.execute("INSERT INTO audit_log VALUES ('old-1', '旧记录', '2026-01-01T00:00:00+00:00')")
+    conn.close()
+
+    store = AuditStore(db_path=db)
+    store.write(
+        AuditRecord(
+            request_id="new-1",
+            prompt="新记录",
+            query_domain="order_detail",
+            db_backend="duckdb",
+            sql_latency_ms=3.0,
+        )
+    )
+    store.close()
+
+    conn = duckdb.connect(str(db), read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT request_id, query_domain, db_backend, sql_latency_ms FROM audit_log "
+            "ORDER BY request_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [
+        ("new-1", "order_detail", "duckdb", 3.0),
+        ("old-1", None, None, None),
+    ]

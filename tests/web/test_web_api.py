@@ -419,3 +419,19 @@ def test_plan_review_stream_edit_triggers_replan(client, monkeypatch, tmp_path, 
     assert kinds.count("plan_created") >= 1  # 重规划发生
     # L2 一次性审批：edit 后重规划执行自动，不再二次审批，直接跑到 done
     assert frames2[-1]["event"] == "done"
+
+
+def test_metrics_exposes_query_latency_snapshot(client, monkeypatch):
+    """/api/metrics 透出 query_latency（#23）：零打点即有结构化零值。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    resp = client.get("/api/metrics")
+    assert resp.status_code == 200
+    latency = resp.json()["query_latency"]
+    for key in ("count", "p50", "p95", "p99", "max", "by_domain", "by_backend"):
+        assert key in latency
+    assert latency["count"] == 0 or latency["count"] > 0  # 进程内累计，两种状态均合法
+    # 结构不变量：任一维度组都携带同一套分位字段
+    for group in list(latency["by_domain"].values()) + list(latency["by_backend"].values()):
+        assert set(group) == {"count", "p50", "p95", "p99", "max"}
