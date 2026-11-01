@@ -1,6 +1,6 @@
 # 特性总览
 
-本文件是 DataAgent 的完整特性清单，按演进阶段整理。README 只保留最关键特色，各期细节在此展开。分期索引与设计文档入口见[演进里程碑](roadmap.md)与 [docs 总索引](../README.md)。
+本文件是 DataAgent 的完整特性清单，按演进阶段整理。README 只保留最关键特色，各期细节在此展开。英文版见 [Feature overview (EN)](features.en.md)。分期索引与设计文档入口见[演进里程碑](roadmap.md)与 [docs 总索引](../README.md)。
 
 ## 基础能力（一至十三期）
 

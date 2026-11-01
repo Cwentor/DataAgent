@@ -55,7 +55,7 @@ GitHub READMEs do not run scripts, so the interactive canvas is deployed on GitH
 - **Honest fallback**: intent routing with admission-based fallback — no fabrication, assumptions made explicit (`assumptions` contract field), refusal as the last resort
 - **Explainable & observable**: narrative answer + adaptive charts + SQL provenance + full-chain audit, structured logs and metrics
 
-> The full feature list, organized by phase with each phase's key decisions, lives in [Feature overview](docs/guides/features.md) (Chinese).
+> The full feature list, organized by phase with each phase's key decisions, lives in [Feature overview](docs/guides/features.en.md).
 
 ## 🚀 Quick start
 
