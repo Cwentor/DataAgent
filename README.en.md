@@ -253,39 +253,7 @@ ruff check --fix .
 
 > The four parity jobs are **service-level** verification: locally those cases are skipped when the engine is absent, so a green PR is the only proof that the backend path was actually executed.
 
-### 9. API examples
-
-**Log in and get a token**:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"analyst","password":"analyst123"}'
-```
-
-**SSE streaming Data Agent session** (each frame is `data: <AgentStreamEvent JSON>`):
-
-```bash
-curl -N "http://127.0.0.1:8000/api/v1/agent/chat/stream?query=GMV%20of%20successful%20orders%20in%20May%202024" \
-  -H "Authorization: Bearer <token>"
-# data: {"turn_id":"t-ab12cd34","timestamp":1725868800000,"event":"plan_created",
-#        "payload":{"plan":[{"id":"s1","title":"...","kind":"query","status":"pending"}]}}
-# data: {..., "event":"tool_start", "payload":{"tool":{"name":"futurebi_dsl_query","input":{...}}}}
-# data: {..., "event":"done", "payload":{"report":"## Analysis report..."}}
-```
-
-**Run a query**:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/query \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"query":"GMV distribution by category for successful orders"}'
-```
-
-The response contains the DSL, the SQL, column metadata, row count, a narrative explanation and visualization suggestions.
-
-### 10. Production deployment notes
+### 9. Production deployment notes
 
 1. **JWT secret**: replace it with a strong random value (`secrets.token_hex(32)`)
 2. **Strict mode**: with `AUTH_STRICT=1`, a weak secret or disabled auth makes startup fail

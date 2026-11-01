@@ -252,39 +252,7 @@ ruff check --fix .
 
 > 四个 parity job 是**服务级**验证：本地不跑这些引擎时对应用例自动跳过，PR 上的绿灯才代表该后端链路被真实执行过。
 
-### 九、API 使用示例
-
-**登录获取 Token**：
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"analyst","password":"analyst123"}'
-```
-
-**SSE 流式 Data Agent 会话**（每帧 `data: <AgentStreamEvent JSON>`）：
-
-```bash
-curl -N "http://127.0.0.1:8000/api/v1/agent/chat/stream?query=2024%E5%B9%B45%E6%9C%88%E6%88%90%E5%8A%9F%E8%AE%A2%E5%8D%95%E7%9A%84GMV" \
-  -H "Authorization: Bearer <token>"
-# data: {"turn_id":"t-ab12cd34","timestamp":1725868800000,"event":"plan_created",
-#        "payload":{"plan":[{"id":"s1","title":"...","kind":"query","status":"pending"}]}}
-# data: {..., "event":"tool_start", "payload":{"tool":{"name":"futurebi_dsl_query","input":{...}}}}
-# data: {..., "event":"done", "payload":{"report":"## 分析报告..."}}
-```
-
-**执行查询**：
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/query \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"query":"各品类成功订单的GMV分布？"}'
-```
-
-响应包含：DSL、SQL、列信息、行数、中文解释、可视化建议。
-
-### 十、生产部署注意事项
+### 九、生产部署注意事项
 
 1. **JWT 密钥**：必须替换为强随机密钥（`secrets.token_hex(32)`）
 2. **启用严格模式**：`AUTH_STRICT=1` 时，弱密钥或关闭鉴权会拒绝启动
