@@ -19,6 +19,12 @@
 - xAxis / yAxis 的 type/name/axisLabel；
 - series 列表（name/type/encode 字段映射到 columns 索引），数据仍由
   columns/rows 独立传递，前端据此渲染，避免大结果重复内嵌数据。
+
+候选集契约（#24）：viz_config 额外输出 candidates 字段——按适配度排序的
+候选类型列表，主推荐（与 chart 一致）居首。每条目含 chart / status
+（recommended / available / excluded）/ reason / echarts（excluded 为 None）。
+不适配类型带排除原因但不出现在前端切换控件中（误导性图表是一种虚构，
+切换必须限制在适配性候选集内）。
 """
 
 from __future__ import annotations
@@ -33,6 +39,14 @@ TIME_DIM_FIELDS = {"order_time", "refund_time", "register_time"}
 
 # pie 基数信号上限：类别基数超过该值时柱状图比饼图更可读
 _PIE_MAX_CATEGORIES = 8
+
+# 候选类型固定评估序（主推荐居首后，其余 available 依此序排列）
+_CANDIDATE_ORDER = ("number", "line", "bar", "pie", "pivot", "table")
+
+# 候选状态枚举（契约值，前端控件只渲染非 excluded 条目）
+_CANDIDATE_RECOMMENDED = "recommended"
+_CANDIDATE_AVAILABLE = "available"
+_CANDIDATE_EXCLUDED = "excluded"
 
 
 def _numeric_share(
@@ -122,6 +136,91 @@ def recommend_viz(
     return "table"
 
 
+def _evaluate_candidates(
+    dsl: QueryDSL,
+    columns: tuple[str, ...] | list[str],
+    rows: tuple[tuple, ...] | list[tuple],
+) -> list[dict[str, Any]]:
+    """逐类型适配评估（#24 候选集契约），输出按适配度排序的候选列表。
+
+    复用既有信号（数值占比 / 时间维度 / 基数 / 正负 / 维度指标数）对六类型
+    逐一判定，主推荐复用 recommend_viz（口径不变）居首，其余 available 候选
+    依 _CANDIDATE_ORDER 排列。排除类型带排除原因，供评测断言与透明度。
+    """
+    dims = [d.alias or d.field for d in dsl.dimensions]
+    metrics = [m.alias for m in dsl.metrics]
+    n_metrics = len(dsl.metrics)
+    n_rows = len(rows)
+    y_col = metrics[0] if metrics else None
+    has_time_dim = any(d in TIME_DIM_FIELDS for d in dims)
+    share = _numeric_share(columns, rows, y_col)
+    positive = _has_positive(columns, rows, y_col)
+    single_dim_single_metric = len(dims) == 1 and n_metrics == 1
+    is_multi = len(dims) >= 2 or n_metrics >= 2
+    numeric_ok = share >= 0.5
+
+    verdict: dict[str, tuple[bool, str]] = {}
+
+    # number：无维度、单指标、单行（单值卡片）
+    if not dims and n_metrics == 1 and n_rows <= 1 and numeric_ok:
+        verdict["number"] = (True, "单指标单值可直接呈现数值")
+    else:
+        verdict["number"] = (False, "存在维度或多行结果，单值卡不适用")
+
+    # line：时间维度（趋势呈现）
+    if not has_time_dim:
+        verdict["line"] = (False, "缺少时间维度")
+    elif numeric_ok:
+        verdict["line"] = (True, "时间维度适合趋势呈现")
+    else:
+        verdict["line"] = (False, "y 列非数值占比过高")
+
+    # bar：有维度有指标（对比呈现）
+    if not dims or not n_metrics:
+        verdict["bar"] = (False, "缺少维度或指标")
+    elif numeric_ok:
+        verdict["bar"] = (True, "维度对比适合柱状呈现")
+    else:
+        verdict["bar"] = (False, "y 列非数值占比过高")
+
+    # pie：单维度单指标、基数受控、存在正数（占比语义成立）
+    if not single_dim_single_metric:
+        verdict["pie"] = (False, "存在多维度或多指标，占比语义不成立")
+    elif n_rows > _PIE_MAX_CATEGORIES:
+        verdict["pie"] = (False, f"类别基数超过 {_PIE_MAX_CATEGORIES}，柱状更可读")
+    elif positive is False:
+        verdict["pie"] = (False, "y 列无正数，占比语义误导")
+    elif numeric_ok:
+        verdict["pie"] = (True, "单维度占比呈现")
+    else:
+        verdict["pie"] = (False, "y 列非数值占比过高")
+
+    # pivot：多维或多指标（透视表）
+    if not is_multi:
+        verdict["pivot"] = (False, "维度与指标数不足，透视表无意义")
+    elif numeric_ok:
+        verdict["pivot"] = (True, "多维或多指标以透视表呈现")
+    else:
+        verdict["pivot"] = (False, "y 列非数值占比过高")
+
+    # table：兜底永远可用
+    verdict["table"] = (True, "明细呈现兜底可用")
+
+    primary = recommend_viz(dsl, columns, rows)
+    ordered = [primary] + [c for c in _CANDIDATE_ORDER if c != primary]
+    candidates: list[dict[str, Any]] = []
+    for chart in ordered:
+        ok, reason = verdict[chart]
+        if chart == primary:
+            status = _CANDIDATE_RECOMMENDED
+        elif ok:
+            status = _CANDIDATE_AVAILABLE
+        else:
+            status = _CANDIDATE_EXCLUDED
+        candidates.append({"chart": chart, "status": status, "reason": reason})
+    return candidates
+
+
 def viz_config(
     dsl: QueryDSL,
     columns: tuple[str, ...] | list[str],
@@ -129,8 +228,10 @@ def viz_config(
 ) -> dict:
     """返回可视化配置：chart/x/y + ECharts option 级渲染契约（echarts 子对象）。
 
-    兼容字段 chart/x/y 保持不变（既有调用方无感）；新增 echarts 字段为
-    前端渲染提供 axis/series/legend/tooltip 结构化指令。
+    兼容字段 chart/x/y 保持不变（既有调用方无感）；echarts 字段为前端渲染
+    提供 axis/series/legend/tooltip 结构化指令；candidates 字段（#24）为按
+    适配度排序的候选列表，非 excluded 候选携带预生成 echarts option（数据
+    外置，前端切换零请求），excluded 候选 echarts 为 None 不进切换控件。
     """
     chart = recommend_viz(dsl, columns, rows)
     dims = [d.alias or d.field for d in dsl.dimensions]
@@ -138,11 +239,20 @@ def viz_config(
     x = dims[0] if dims else None
     y = metrics[0] if metrics else None
 
+    candidates = _evaluate_candidates(dsl, columns, rows)
+    for cand in candidates:
+        cand["echarts"] = (
+            _echarts_option(cand["chart"], dsl, columns, rows)
+            if cand["status"] != _CANDIDATE_EXCLUDED
+            else None
+        )
+
     return {
         "chart": chart,
         "x": x,
         "y": y,
         "echarts": _echarts_option(chart, dsl, columns, rows),
+        "candidates": candidates,
     }
 
 
@@ -228,15 +338,21 @@ class ChartSpec:
     columns: list[str] | None = None
     rows: list[list[Any]] | None = field(default=None)
     echarts: dict[str, Any] = field(default_factory=dict)
+    candidates: list[dict[str, Any]] | None = None
 
     def to_dict(self, include_data: bool = True) -> dict[str, Any]:
-        """序列化图表指令；include_data=False 时仅输出类型 / 轴 / ECharts option。"""
+        """序列化图表指令；include_data=False 时仅输出类型 / 轴 / ECharts option。
+
+        candidates 随两种模式均输出（#24 切换控件不依赖数据字段）。
+        """
         payload: dict[str, Any] = {
             "chart": self.chart,
             "x": self.x,
             "y": self.y,
             "echarts": self.echarts,
         }
+        if self.candidates is not None:
+            payload["candidates"] = self.candidates
         if include_data and self.columns is not None:
             payload["columns"] = self.columns
             payload["rows"] = self.rows if self.rows is not None else []
@@ -257,6 +373,7 @@ def build_chart_spec(
         x=cfg["x"],
         y=cfg["y"],
         echarts=cfg["echarts"],
+        candidates=cfg["candidates"],
         columns=list(columns) if data else None,
         rows=[list(r) for r in rows] if data else None,
     )

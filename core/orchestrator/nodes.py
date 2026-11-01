@@ -1445,6 +1445,17 @@ def _run_query_step(state: AgentState, step: PlanStep) -> tuple[AgentState, Tool
             },
         )
 
+        # 推荐图表 artifact（#24 候选集）：主推荐为图形类时发射，前端切换
+        # 控件消费 candidates；复用 T14 同规格去重，反思重规划不重复发射
+        viz_artifact = _viz_artifact_for_dataset(name, ref, workspace)
+        if viz_artifact is not None and not _has_same_echarts(
+            state.artifacts, viz_artifact["content"]
+        ):
+            state.artifacts.append(
+                Artifact(kind="echarts", name=f"{name}_viz", payload=viz_artifact["content"])
+            )
+            events.emit_event(events.EVENT_ARTIFACT_EMIT, {"artifact": viz_artifact})
+
     # 数据集经 state.datasets 传递（ParquetRef 契约），parquet 产物在 synthesize 汇总
     all_blocked = (bool(blocked_windows) or bool(guard_blocked)) and not produced
     if guard_blocked and not produced:
@@ -1948,6 +1959,77 @@ def _has_same_echarts(artifacts: list[Artifact], spec: dict[str, Any]) -> bool:
         if a.kind == "echarts" and _chart_key(a.payload) == key:
             return True
     return False
+
+
+# --------------------------------------------------------------------------- #
+# 取数推荐图表（#24 候选集）：主推荐为图形类时发射带候选集的图表 artifact
+# --------------------------------------------------------------------------- #
+# 数据行上限：聚合组数天然有界，超限诚实不发射、严禁截断画图（截断图表失真
+# 即误导）；明细查询本就推荐 table，不进图形发射。
+_VIZ_CHART_MAX_ROWS = 200
+
+# 发射与切换控件仅覆盖可绘制图形类：pivot/table 已由数据审计 Tab 表格承载，
+# number 由对话流 answer 呈现单值；契约层 viz_config.candidates 仍含全部六类型。
+_VIZ_EMITTABLE_CHARTS = ("line", "bar", "pie")
+
+# 候选类型前端文案（切换按钮标签）
+_VIZ_CHART_LABELS = {"line": "折线图", "bar": "柱状图", "pie": "饼图", "number": "数值卡"}
+
+
+def _viz_artifact_for_dataset(name: str, ref: Any, workspace: Any) -> dict[str, Any] | None:
+    """取数数据集的确定性推荐图表 artifact（#24 候选集，前端切换控件消费）。
+
+    发射条件为 DSL 含聚合指标、行数不超上限、主推荐为图形类且可用候选
+    不少于 2；数据以 dataset.source 自包含注入（与沙箱图同构，前端渲染
+    零逻辑），每个可用候选同样预生成自包含 option，切换零请求。
+    """
+    from pydantic import ValidationError
+
+    from present.viz import viz_config
+    from semantic.dsl_schema import QueryDSL
+
+    dsl_payload = ref.dsl or {}
+    if not dsl_payload.get("metrics"):
+        return None  # 明细查询不画图
+    if int(ref.rows) > _VIZ_CHART_MAX_ROWS:
+        return None  # 超限不发射不截断（诚实边界）
+    try:
+        dsl = QueryDSL.model_validate(dsl_payload)
+    except ValidationError:
+        return None  # 溯源 DSL 非法：图表能力降级，不影响取数主链路
+    rows = _preview_rows(str(workspace / "inputs" / ref.path), limit=_VIZ_CHART_MAX_ROWS)
+    cfg = viz_config(dsl, ref.columns, rows)
+    if cfg["chart"] not in _VIZ_EMITTABLE_CHARTS:
+        return None  # 主推荐 pivot/table/number：已有各自呈现终点
+    # 隐式图内标题：不渲染（show=False），仅参与 T14 同规格去重键，避免
+    # 同指标不同过滤条件的两张图被误判为同规格
+    title_text = f"{name} 可视化"
+    source = [list(ref.columns)] + [list(r) for r in rows]
+    content = dict(cfg["echarts"])
+    content["title"] = {"text": title_text, "show": False}
+    content["dataset"] = {"source": source}
+    candidates: list[dict[str, Any]] = []
+    for cand in cfg["candidates"]:
+        if cand["status"] == "excluded" or cand["chart"] not in _VIZ_EMITTABLE_CHARTS:
+            continue
+        option = dict(cand["echarts"] or {})
+        option["title"] = {"text": title_text, "show": False}
+        option["dataset"] = {"source": source}
+        candidates.append(
+            {
+                "chart": cand["chart"],
+                "label": _VIZ_CHART_LABELS.get(cand["chart"], cand["chart"]),
+                "echarts": option,
+            }
+        )
+    if len(candidates) < 2:
+        return None  # 无切换空间（仅主推荐可用）不发射，保持现状
+    return {
+        "type": "echarts",
+        "title": title_text,
+        "content": content,
+        "candidates": candidates,
+    }
 
 
 def code_exec_node(state: AgentState) -> AgentState:

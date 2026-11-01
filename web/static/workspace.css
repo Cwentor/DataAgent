@@ -553,6 +553,8 @@ button.act-head:hover .act-label { color: var(--accent-dark); }
 }
 .chart-block-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
 .chart-host { width: 100%; height: 340px; }
+.chart-switch-row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.chart-type-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .chart-export-row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 
 /* 代码沙箱视图 */
