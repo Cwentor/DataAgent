@@ -39,6 +39,27 @@ def test_metrics_requires_auth(client):
     assert client.get("/api/metrics").status_code == 401
 
 
+def test_metrics_exposes_llm_tokens_snapshot(client, monkeypatch):
+    """/api/metrics 透出 llm_tokens（#22）：零打点即有结构化零值。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    resp = client.get("/api/metrics")
+    assert resp.status_code == 200
+    tokens = resp.json()["llm_tokens"]
+    for key in (
+        "calls",
+        "missing_usage",
+        "missing_rate",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "by_model",
+        "by_role",
+    ):
+        assert key in tokens
+
+
 def test_unknown_route_matches_stdlib_error_body(client):
     # stdlib 未匹配路由统一 {"error": "not found"} 404，而非 FastAPI 默认 {"detail": "Not Found"}
     resp = client.get("/api/definitely/not/exist")

@@ -32,6 +32,7 @@ from auth.tokens import create_token
 from config import settings
 from core.orchestrator.agent import run_agent
 from exec.usage import ExecUsageLedger, pop_exec_ledger, set_exec_ledger
+from providers.usage import UsageLedger, set_usage_ledger
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
 from web import providers_api
 from web.server import (
@@ -550,6 +551,11 @@ async def post_agent_run(request: Request) -> Response:
     pop_exec_ledger()
     exec_ledger = ExecUsageLedger()
     set_exec_ledger(exec_ledger)
+    # Token 用量收集器（#22）：绑定时传入 run_in_threadpool 的 context 副本，
+    # 子线程内所有 LLM 调用（Planner/Critic/Synthesizer/自愈）共享同一 ledger
+    # 引用登记；async 端点运行于请求 Task 的独立 context，无跨请求泄漏
+    ledger = UsageLedger()
+    set_usage_ledger(ledger)
     result = await run_in_threadpool(
         run_agent,
         query,
@@ -630,6 +636,8 @@ async def post_agent_run(request: Request) -> Response:
                 db_backend=last_exec["backend"] if last_exec else None,
                 sql_latency_ms=exec_snapshot["last_duration_ms"] if exec_snapshot else None,
                 sql_exec=exec_snapshot,
+                # LLM token 用量（#22）：编排链路全部 LLM 调用的汇总与 per-call 明细
+                llm_usage=ledger.snapshot(),
             ),
         )
     # default=str：结果行含 DECIMAL 金额，裸 dumps 抛 TypeError

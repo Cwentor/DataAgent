@@ -63,6 +63,7 @@ from core.sandbox.api import run_code
 from core.sandbox.ast_guard import static_check
 from core.skills.decomposition import multiplicative_decomposition
 from core.skills.drilldown import drilldown_by_information_gain
+from providers.usage import llm_call_role
 from semantic import catalog
 from semantic.catalog import DRILLDOWN_DIM_FIELDS as DRILLDOWN_DIM_FIELDS
 from semantic.catalog import REGION_PROVINCE_MAPPING as REGION_PROVINCE_MAPPING
@@ -695,19 +696,20 @@ def _lift_plan_sql(
             )
             notes.append(f"[planner] sql-pending-exploration: {'；'.join(rejections[:6])}")
             return steps, notes
-        retry_payload = _llm_json(
-            llm,
-            PLANNER_SYSTEM,
-            planner_prompt(
-                state.user_query,
-                schema_digest(profile_enum_values()),
-                error_context=(
-                    "SQL 提升闸门拒升清单（你的上一版计划含不可提升构造，必须据此改写）：\n"
-                    + "\n".join(rejections)
+        with llm_call_role("orchestrator.lift_heal"):
+            retry_payload = _llm_json(
+                llm,
+                PLANNER_SYSTEM,
+                planner_prompt(
+                    state.user_query,
+                    schema_digest(profile_enum_values()),
+                    error_context=(
+                        "SQL 提升闸门拒升清单（你的上一版计划含不可提升构造，必须据此改写）：\n"
+                        + "\n".join(rejections)
+                    ),
+                    history_context=state.history_digest or None,
                 ),
-                history_context=state.history_digest or None,
-            ),
-        )
+            )
         if not retry_payload:
             events.emit_event(
                 "lift_reject", {"rejections": rejections[:6], "reason": "retry_call_failed"}
@@ -795,21 +797,22 @@ def planner_node(state: AgentState) -> AgentState:
         if state.plan_edit_instruction:
             user_edit = f"用户修改指令：{state.plan_edit_instruction}"
             error_context = f"{error_context}\n{user_edit}" if error_context else user_edit
-        payload = _llm_json(
-            llm,
-            PLANNER_SYSTEM,
-            planner_prompt(
-                state.user_query,
-                schema_digest(profile_enum_values()),
-                error_context=error_context,
-                history_context=state.history_digest or None,
-                clarify_context=(
-                    f"已澄清轮次：{state.clarification_rounds}"
-                    if state.clarification_rounds >= 1
-                    else None
+        with llm_call_role("orchestrator.planner"):
+            payload = _llm_json(
+                llm,
+                PLANNER_SYSTEM,
+                planner_prompt(
+                    state.user_query,
+                    schema_digest(profile_enum_values()),
+                    error_context=error_context,
+                    history_context=state.history_digest or None,
+                    clarify_context=(
+                        f"已澄清轮次：{state.clarification_rounds}"
+                        if state.clarification_rounds >= 1
+                        else None
+                    ),
                 ),
-            ),
-        )
+            )
         if not payload:
             # LLM 调用/解析失败标记（十九期 M1）：拒答建议按成因分流；
             # 该标记仅在 blocked 路径存续（plan 产出时 scratchpad 被整体替换）
@@ -2221,13 +2224,14 @@ def critic_node(state: AgentState) -> AgentState:
         if state.error_context.errors:
             # 反思层必须看见失败历史（行动项 3：与 Planner 同一断裂点修复）
             trace_digest += "\n自愈错误记录：" + "；".join(state.error_context.errors[-3:])
-        verdict = _llm_json(
-            llm,
-            REFLECTOR_SYSTEM,
-            f"用户问题：{state.user_query}\n"
-            f"{_reflector_available_scope()}\n"
-            f"执行轨迹：\n{trace_digest}",
-        )
+        with llm_call_role("orchestrator.critic"):
+            verdict = _llm_json(
+                llm,
+                REFLECTOR_SYSTEM,
+                f"用户问题：{state.user_query}\n"
+                f"{_reflector_available_scope()}\n"
+                f"执行轨迹：\n{trace_digest}",
+            )
         if verdict and verdict.get("verdict") == "insufficient":
             reasons = verdict.get("reasons")
             # 确定性护栏（回归锚点）：反思不得把"数仓未覆盖的维度"当数据缺口。
@@ -2733,15 +2737,16 @@ def _synthesize_with_llm(
         from agent.agent import extract_json
         from providers import chat_text
 
-        text = chat_text(
-            llm,
-            [
-                {"role": "system", "content": SYNTHESIZER_SYSTEM},
-                {"role": "user", "content": user_prompt},
-            ],
-            json_mode=False,
-            timeout=settings.SYNTHESIZER_TIMEOUT,
-        )
+        with llm_call_role("orchestrator.synthesizer"):
+            text = chat_text(
+                llm,
+                [
+                    {"role": "system", "content": SYNTHESIZER_SYSTEM},
+                    {"role": "user", "content": user_prompt},
+                ],
+                json_mode=False,
+                timeout=settings.SYNTHESIZER_TIMEOUT,
+            )
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"[:200]
         logger.warning(
@@ -2785,15 +2790,16 @@ def _degraded_report(state: AgentState) -> str:
             from config import settings
             from providers import chat_text
 
-            text = chat_text(
-                llm,
-                [
-                    {"role": "system", "content": DEGRADED_SUMMARIZER_SYSTEM},
-                    {"role": "user", "content": user_prompt},
-                ],
-                json_mode=False,
-                timeout=settings.SYNTHESIZER_TIMEOUT,
-            )
+            with llm_call_role("orchestrator.degraded_summary"):
+                text = chat_text(
+                    llm,
+                    [
+                        {"role": "system", "content": DEGRADED_SUMMARIZER_SYSTEM},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    json_mode=False,
+                    timeout=settings.SYNTHESIZER_TIMEOUT,
+                )
             stripped = (text or "").strip()
             if stripped and not (
                 (stripped.startswith("{") or stripped.startswith("["))

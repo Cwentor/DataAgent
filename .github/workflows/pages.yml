@@ -1,0 +1,53 @@
+name: Pages
+
+# 交互式架构图（architecture-ui）构建并部署到 GitHub Pages。
+# 首次启用需在仓库 Settings -> Pages -> Source 选择 GitHub Actions。
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'architecture-ui/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: architecture-ui/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+        working-directory: architecture-ui
+
+      - name: 构建
+        run: npm run build
+        working-directory: architecture-ui
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: architecture-ui/dist
+
+      - name: 部署到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

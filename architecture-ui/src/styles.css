@@ -1,0 +1,302 @@
+/* DataAgent 架构图样式（浅色主题，分层分组画布） */
+
+:root {
+  --text-main: #0f172a;
+  --text-sub: #64748b;
+  --line: #e2e8f0;
+  --bg-page: #f8fafc;
+  --bg-panel: #ffffff;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  color: var(--text-main);
+  background: var(--bg-page);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ── 顶部工具栏 ─────────────────────────────── */
+
+.toolbar {
+  padding: 12px 20px 10px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
+  z-index: 5;
+}
+
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.5px;
+}
+
+.brand-sub {
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+.direction-switch {
+  display: flex;
+  gap: 6px;
+}
+
+.direction-switch button,
+.layer-chip {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text-main);
+  border-radius: 8px;
+  padding: 5px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.direction-switch button.on {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+  color: #fff;
+}
+
+.toolbar-row-filters {
+  margin-top: 10px;
+}
+
+.layer-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.layer-chip.off {
+  opacity: 0.38;
+  text-decoration: line-through;
+}
+
+.layer-chip:hover {
+  border-color: #93c5fd;
+}
+
+.legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-item i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.legend-item.kind-comp i { background: #60a5fa; }
+.legend-item.kind-llm i { background: #fbbf24; }
+.legend-item.kind-gate i { background: #fb7185; }
+.legend-item.kind-guard i { background: #34d399; }
+.legend-item.kind-store i { background: #a78bfa; }
+.legend-item.kind-ext i { background: #94a3b8; }
+
+.toolbar-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+/* ── 画布区 ─────────────────────────────────── */
+
+.flow-wrap {
+  flex: 1;
+  min-height: 0;
+}
+
+.flow-wrap .react-flow__attribution {
+  display: none;
+}
+
+/* 层分组容器 */
+.layer-group {
+  width: 100%;
+  height: 100%;
+  border: 1.5px dashed #cbd5e1;
+  border-radius: 16px;
+  background: rgba(241, 245, 249, 0.55);
+  box-sizing: border-box;
+}
+
+.layer-group-head {
+  padding: 10px 18px 0;
+}
+
+.layer-group-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.layer-group-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-sub);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}
+
+/* 节点卡片 */
+.data-card {
+  width: 100%;
+  height: 100%;
+  background: #fff;
+  border: 1.5px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 10px;
+  box-sizing: border-box;
+  padding: 8px 10px 6px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+  cursor: pointer;
+  transition:
+    opacity 0.2s ease,
+    box-shadow 0.2s ease,
+    border-color 0.2s ease;
+  overflow: hidden;
+}
+
+.data-card.is-dimmed {
+  opacity: 0.22;
+}
+
+.data-card.is-active {
+  box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.28), 0 4px 10px rgba(15, 23, 42, 0.12);
+}
+
+.kind-comp { border-left-color: #60a5fa; }
+.kind-llm { border-left-color: #fbbf24; }
+.kind-gate { border-left-color: #fb7185; }
+.kind-guard { border-left-color: #34d399; }
+.kind-store { border-left-color: #a78bfa; }
+.kind-ext { border-left-color: #94a3b8; }
+
+.kind-comp .data-card-badge { background: #dbeafe; color: #1d4ed8; }
+.kind-llm .data-card-badge { background: #fef3c7; color: #b45309; }
+.kind-gate .data-card-badge { background: #ffe4e6; color: #be123c; }
+.kind-guard .data-card-badge { background: #d1fae5; color: #047857; }
+.kind-store .data-card-badge { background: #ede9fe; color: #6d28d9; }
+.kind-ext .data-card-badge { background: #e2e8f0; color: #475569; }
+
+.data-card-badge {
+  display: inline-block;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.data-card-label {
+  margin-top: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.data-card-path {
+  margin-top: 2px;
+  font-size: 10px;
+  color: #7c8db5;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.data-card-note {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Handle 默认隐藏为小点 */
+.card-handle {
+  width: 6px;
+  height: 6px;
+  border: none;
+  background: transparent;
+  pointer-events: none;
+}
+
+/* 边与标签 */
+.flow-edge path.react-flow__edge-path {
+  stroke: #94a3b8;
+  stroke-width: 1.6;
+  transition: opacity 0.2s ease, stroke 0.2s ease;
+}
+
+.flow-edge.is-dashed path.react-flow__edge-path {
+  stroke: #b6c2d4;
+}
+
+.flow-edge.is-dimmed {
+  opacity: 0.12;
+}
+
+.flow-edge.is-active path.react-flow__edge-path {
+  stroke: #2563eb;
+  stroke-width: 2.4;
+}
+
+.flow-edge .react-flow__edge-text {
+  font-size: 11px;
+  fill: #475569;
+}
+
+.flow-edge .react-flow__edge-textbg {
+  fill: rgba(255, 255, 255, 0.92);
+}
+
+/* ── 底部状态栏 ─────────────────────────────── */
+
+.statusbar {
+  padding: 6px 20px;
+  font-size: 12px;
+  color: var(--text-sub);
+  background: var(--bg-panel);
+  border-top: 1px solid var(--line);
+}

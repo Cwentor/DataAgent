@@ -119,3 +119,89 @@ def test_query_latency_empty_snapshot():
     assert ql["p50"] is None
     assert ql["by_domain"] == {}
     assert ql["by_backend"] == {}
+
+
+def test_llm_tokens_empty_snapshot_is_structured_zero():
+    """零打点时 llm_tokens 输出结构化零值（便于前端/告警消费）。"""
+    reg = MetricsRegistry()
+    snap = reg.snapshot()["llm_tokens"]
+    assert snap["calls"] == 0
+    assert snap["missing_usage"] == 0
+    assert snap["missing_rate"] is None
+    assert snap["prompt_tokens"] == 0
+    assert snap["completion_tokens"] == 0
+    assert snap["total_tokens"] == 0
+    assert snap["by_model"] == {}
+    assert snap["by_role"] == {}
+
+
+def test_record_llm_usage_aggregates_by_model_and_role():
+    """token 按模型（流式维度并入键）与调用点归集，全局汇总一致。"""
+    reg = MetricsRegistry()
+    reg.record_llm_usage(
+        role="orchestrator.planner",
+        provider_id="aiaa",
+        model_id="doubao-pro",
+        streamed=True,
+        prompt_tokens=100,
+        completion_tokens=20,
+        total_tokens=120,
+        missing=False,
+    )
+    reg.record_llm_usage(
+        role="agent.nl2dsl",
+        provider_id="aiaa",
+        model_id="doubao-pro",
+        streamed=False,
+        prompt_tokens=50,
+        completion_tokens=10,
+        total_tokens=60,
+        missing=False,
+    )
+    snap = reg.snapshot()["llm_tokens"]
+    assert snap["calls"] == 2
+    assert snap["prompt_tokens"] == 150
+    assert snap["completion_tokens"] == 30
+    assert snap["total_tokens"] == 180
+    assert snap["missing_usage"] == 0
+    # 流式与非流式分键（同一模型两个维度单元）
+    assert snap["by_model"]["aiaa/doubao-pro/stream"]["calls"] == 1
+    assert snap["by_model"]["aiaa/doubao-pro/stream"]["total_tokens"] == 120
+    assert snap["by_model"]["aiaa/doubao-pro/batch"]["total_tokens"] == 60
+    assert snap["by_role"]["orchestrator.planner"]["total_tokens"] == 120
+    assert snap["by_role"]["agent.nl2dsl"]["total_tokens"] == 60
+
+
+def test_record_llm_usage_missing_not_fabricated():
+    """usage 缺失（missing=True）只计次数不虚构 token（不虚构红线），丢失率可见。"""
+    reg = MetricsRegistry()
+    reg.record_llm_usage(
+        role="orchestrator.planner",
+        provider_id="aiaa",
+        model_id="doubao-pro",
+        streamed=True,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        missing=True,
+    )
+    reg.record_llm_usage(
+        role="orchestrator.planner",
+        provider_id="aiaa",
+        model_id="doubao-pro",
+        streamed=True,
+        prompt_tokens=100,
+        completion_tokens=20,
+        total_tokens=120,
+        missing=False,
+    )
+    snap = reg.snapshot()["llm_tokens"]
+    assert snap["calls"] == 2
+    assert snap["missing_usage"] == 1
+    assert snap["missing_rate"] == 0.5
+    # 缺失调用的 token 不计入（严禁估算补齐）
+    assert snap["total_tokens"] == 120
+    cell = snap["by_role"]["orchestrator.planner"]
+    assert cell["calls"] == 2
+    assert cell["missing_usage"] == 1
+    assert cell["total_tokens"] == 120
