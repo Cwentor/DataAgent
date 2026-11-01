@@ -48,6 +48,8 @@ _AUDIT_COLUMN_TYPES: dict[str, str] = {
     # 编排特有字段（P3）：裁决方与 LLM 规划失败原因
     "answered_by": "VARCHAR",
     "planner_llm_error": "VARCHAR",
+    # LLM token 用量（#22）：汇总 + per-call 明细（JSON 文本，与 retrieval_context 同形态）
+    "llm_usage": "VARCHAR",
     "created_at": "VARCHAR",
 }
 
@@ -73,6 +75,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     routing_reason     VARCHAR,
     answered_by        VARCHAR,
     planner_llm_error  VARCHAR,
+    llm_usage          VARCHAR,
     created_at         VARCHAR
 )
 """
@@ -83,8 +86,8 @@ INSERT INTO audit_log
     (request_id, session_id, user_name, principal, prompt, retrieval_context,
      dsl, sql, latency_ms, row_count, scan_rows, rewrites, error,
      detected_intent, routing_latency_ms, routing_reason,
-     answered_by, planner_llm_error, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     answered_by, planner_llm_error, llm_usage, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -186,6 +189,7 @@ def _record_params(record: AuditRecord) -> list[Any]:
         record.routing_reason,
         record.answered_by,
         record.planner_llm_error,
+        _json_dump(record.llm_usage),
         record.created_at,
     ]
 
@@ -350,6 +354,7 @@ class AuditStore:
                 routing_reason     VARCHAR,
                 answered_by        VARCHAR,
                 planner_llm_error  VARCHAR,
+                llm_usage          VARCHAR,
                 created_at         VARCHAR
             )
             """,

@@ -46,6 +46,7 @@ from agent.router import (
 from audit.logging import get_logger
 from config import settings
 from providers import chat_text
+from providers.usage import llm_call_role
 from semantic import catalog
 from semantic.dsl_schema import QueryDSL
 from tools.base import ToolContext, ToolResult
@@ -589,7 +590,8 @@ class LLMPlanner(Planner):
         """共享决策核：调 LLM -> 解析校验 -> 非法输出反馈重试（plan/plan_next 共用）。"""
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
-            raw = chat_text(self.client, messages)
+            with llm_call_role("agent.tool_planner"):
+                raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "answer" in obj:
@@ -701,7 +703,8 @@ class LLMPlanner(Planner):
             },
         ]
         try:
-            raw = chat_text(self.client, messages)
+            with llm_call_role("agent.tool_heal"):
+                raw = chat_text(self.client, messages)
             obj = extract_json(raw)
             name = str(obj.get("tool", ""))
             args = obj.get("args") or {}
@@ -1052,7 +1055,8 @@ class LLMSynthesizer(Synthesizer):
             },
         ]
         try:
-            raw = chat_text(self.client, messages)
+            with llm_call_role("agent.tool_synthesizer"):
+                raw = chat_text(self.client, messages)
             obj = extract_json(raw)
             result.answer = str(obj.get("answer", ""))
             if obj.get("chart") and result.chart_spec is None:
@@ -1193,7 +1197,8 @@ class LLMReflector(Reflector):
         ]
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
-            raw = chat_text(self.client, messages)
+            with llm_call_role("agent.tool_reflector"):
+                raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 sufficient = bool(obj.get("sufficient"))

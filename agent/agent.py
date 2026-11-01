@@ -27,6 +27,7 @@ from agent.semantic_check import (
     validate_semantics,
 )
 from providers import chat_text
+from providers.usage import llm_call_role
 from semantic.dsl_schema import QueryDSL
 
 BT = chr(96)  # backtick
@@ -79,7 +80,8 @@ class LLMNL2DSL:
         last_error: Exception | None = None
         messages = build_messages(query, principal)
         for _ in range(self.max_retries + 1):
-            raw = chat_text(self.client, messages)
+            with llm_call_role("agent.nl2dsl"):
+                raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "error" in obj and obj.get("error"):
@@ -118,7 +120,8 @@ class LLMNL2DSL:
         last_error: Exception | None = None
         messages = build_rewrite_messages(query, dsl.model_dump(mode="json"), error, principal)
         for _ in range(max(attempts, 1)):
-            raw = chat_text(self.client, messages)
+            with llm_call_role("agent.self_heal"):
+                raw = chat_text(self.client, messages)
             try:
                 obj = extract_json(raw)
                 if "error" in obj and obj.get("error"):

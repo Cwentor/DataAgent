@@ -49,6 +49,7 @@ from providers.models import (
     UnifiedChatResponse,
     Usage,
 )
+from providers.usage import register_llm_usage
 
 BT = chr(96)  # backtick
 FENCE = BT * 3
@@ -484,6 +485,10 @@ class BaseAdapter(ABC):
         （eval_runner._lock_determinism）才能真正落到请求层。
 
         timeout：本次调用读超时覆盖（秒），None 时由适配器回退网关默认。
+
+        token 用量登记（#22）：响应返回后经 ``_register_usage`` 收口——
+        内存指标聚合 + 请求级收集器（若绑定）；用量在此处原本被丢弃，
+        现为全仓唯一登记点（429 重试每次真实调用各计一次）。
         """
         from config import settings
 
@@ -496,7 +501,27 @@ class BaseAdapter(ABC):
                 timeout=timeout,
             )
         )
+        self._register_usage(resp)
         return resp.content
+
+    # -- 内部工具 -------------------------------------------------------- #
+    def _register_usage(self, resp: UnifiedChatResponse) -> None:
+        """Token 用量登记（#22）：调用 providers.usage 唯一登记入口。
+
+        打点失败绝不影响主链路（与 web.service 的 metrics 打点同约定）。
+        探测 ``test_connection`` 不走 chat_text，其极小 ping 消耗不记账。
+        """
+        try:
+            register_llm_usage(
+                provider_id=self.provider.id,
+                model_id=self.model_id,
+                streamed=bool(self.provider.stream),
+                usage=resp.usage,
+            )
+        except Exception as exc:
+            logger.warning(
+                "llm_usage_register_failed", extra={"error": f"{type(exc).__name__}: {exc}"}
+            )
 
     # -- 内部工具 -------------------------------------------------------- #
     def _split_messages(
