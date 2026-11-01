@@ -43,6 +43,9 @@ class AuditRecord:
     # 编排特有字段（P3）：编排裁决方与 LLM 规划失败原因
     answered_by: str | None = None
     planner_llm_error: str | None = None
+    # LLM token 用量（#22）：本次请求内全部 LLM 调用的汇总与 per-call 明细
+    # （providers.usage.UsageLedger.snapshot 同源产出）；None = 本请求无 LLM 调用
+    llm_usage: dict[str, Any] | None = None
     created_at: str = field(default_factory=_utcnow_iso)
 
     def to_dict(self) -> dict[str, Any]:

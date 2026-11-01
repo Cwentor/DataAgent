@@ -50,6 +50,7 @@ from exec.guards import (
 from exec.pool import default_pool
 from providers.context import pop_request_model, set_request_model
 from providers.errors import ERROR_MESSAGES, ProviderError
+from providers.usage import UsageLedger, pop_usage_ledger, set_usage_ledger
 from security.errors import SecurityError
 from security.guard import referenced_fields
 from semantic import catalog
@@ -316,6 +317,13 @@ def run_query(
     pop_request_model()
     if provider_id or model_id:
         set_request_model(provider_id or "", model_id or "")
+
+    # Token 用量收集器（#22）：同"先清残留再绑定"模式，本查询内所有 LLM
+    # 调用经 providers.usage.register 收口登记；出口取出汇总写入 AuditRecord
+    # （run_query 函数体在线程池 worker 内同步执行到底，绑定与读取同 context）
+    pop_usage_ledger()
+    ledger = UsageLedger()
+    set_usage_ledger(ledger)
 
     started = time.perf_counter()
     result: dict[str, Any] = {
@@ -636,6 +644,8 @@ def run_query(
         detected_intent=result.get("detected_intent"),
         routing_latency_ms=result.get(ROUTING_LATENCY_MS),
         routing_reason=result.get("routing_reason"),
+        # LLM token 用量（#22）：与 /api/metrics 的 llm_tokens 同源（同一登记动作）
+        llm_usage=ledger.snapshot(),
     )
 
     store = audit_store if audit_store is not None else _default_audit_store()
@@ -644,6 +654,7 @@ def run_query(
 
     # 请求级模型切换上下文清理（正常 / 异常路径共用此出口）
     pop_request_model()
+    pop_usage_ledger()
 
     if error:
         logger.warning(

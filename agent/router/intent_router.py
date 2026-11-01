@@ -46,6 +46,7 @@ from agent.llm import LLMError, resolve_default_client
 from audit.logging import get_logger
 from config import settings
 from providers import ProviderError, chat_text
+from providers.usage import llm_call_role
 from semantic import catalog
 
 logger = get_logger("agent.router.intent")
@@ -533,7 +534,8 @@ class IntentRouter:
         try:
             # 经 providers.chat_text 统一流转：适配器（UnifiedChatRequest）与
             # 旧形态 client（chat(messages)->str）两种客户端透明兼容
-            raw = chat_text(self._llm, messages)
+            with llm_call_role("agent.intent_router"):
+                raw = chat_text(self._llm, messages)
             data = extract_json(raw)
         except (
             LLMError,
