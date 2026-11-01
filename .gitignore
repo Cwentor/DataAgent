@@ -86,3 +86,7 @@ logs/
 # --- 本地工作记录目录（不应入库）---
 .workbuddy/
 .workbuddy-ai/
+
+# --- 前端子项目（architecture-ui 交互式架构图） ---
+node_modules/
+architecture-ui/dist/
