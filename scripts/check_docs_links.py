@@ -28,6 +28,7 @@ from urllib.parse import unquote
 # 不参与扫描的目录（构建产物 / 运行期日志 / 工具缓存 / 代理工作区）
 EXCLUDE_DIRS = {
     ".git",
+    ".worktrees",
     ".workbuddy",
     ".workbuddy-ai",
     ".pytest_cache",

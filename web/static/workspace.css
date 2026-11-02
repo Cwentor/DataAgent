@@ -653,3 +653,48 @@ button.act-head:hover .act-label { color: var(--accent-dark); }
     print-color-adjust: exact !important;
   }
 }
+
+/* ------------------------------------------------------------------------ */
+/* 语义目录管理面板（issue #27）：分节卡片 + JSON 编辑 + 试校验/保存          */
+/* ------------------------------------------------------------------------ */
+.catalog-modal { width: min(860px, 92vw); max-height: 88vh; }
+.catalog-body { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+.catalog-meta {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--card); font-size: 12.5px; color: var(--muted);
+}
+.catalog-meta code { color: var(--accent-dark); font-weight: 600; }
+.catalog-sections { display: flex; flex-direction: column; gap: 8px; }
+.cat-card { border: 1px solid var(--border); border-radius: 10px; background: var(--card); overflow: hidden; }
+.cat-card.editable { border-color: var(--accent); }
+.cat-card-head {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  cursor: pointer; user-select: none; list-style: none; font-size: 13px;
+}
+.cat-card-head::-webkit-details-marker { display: none; }
+.cat-card-head:hover { background: var(--bg-wash); }
+.cat-name { font-weight: 700; color: var(--text); font-family: ui-monospace, monospace; font-size: 12.5px; }
+.cat-label { color: var(--muted); flex: 1; }
+.cat-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border);
+}
+.cat-badge.ok { color: var(--accent-dark); border-color: var(--accent); background: transparent; }
+.cat-badge.ro { color: var(--faint); }
+.cat-card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.cat-json {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 120px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.55;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text);
+}
+.cat-json:focus { outline: none; border-color: var(--accent); }
+.cat-json.ro { min-height: 0; margin: 0; white-space: pre-wrap; }
+.cat-actions { display: flex; gap: 8px; }
+.cat-result { font-size: 12.5px; display: flex; flex-direction: column; gap: 6px; }
+.cat-result:empty { display: none; }
+.cat-ok { color: var(--accent-dark); font-weight: 600; }
+.cat-err { color: #c0392b; }
+.cat-err ul { margin: 4px 0 0 18px; padding: 0; }
+.cat-diff { color: var(--muted); }
+.cat-impact { color: var(--muted); font-style: italic; }

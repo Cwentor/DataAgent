@@ -671,3 +671,33 @@ def test_migrate_schema_adds_query_duration_columns(tmp_path):
         ("new-1", "order_detail", "duckdb", 3.0),
         ("old-1", None, None, None),
     ]
+
+
+def test_audit_store_catalog_change_roundtrip(tmp_path):
+    """语义目录变更审计（#27）：catalog_change 经 JSONL + DuckDB 双写回读一致。"""
+    change = {
+        "action": "patch",
+        "user": "admin",
+        "version_before": "a" * 12,
+        "version_after": "b" * 12,
+        "sections": [
+            {"section": "table_labels", "added": [], "updated": ["order_detail"], "removed": []}
+        ],
+    }
+    store = AuditStore(jsonl_path=tmp_path / "audit.jsonl", db_path=tmp_path / "audit.duckdb")
+    store.write(
+        AuditRecord(request_id="r-cat", prompt="语义目录变更（patch）", catalog_change=change)
+    )
+    store.close()
+
+    line = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert line["catalog_change"] == change
+
+    conn = duckdb.connect(str(tmp_path / "audit.duckdb"), read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT catalog_change FROM audit_log WHERE request_id = 'r-cat'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert json.loads(rows[0][0]) == change

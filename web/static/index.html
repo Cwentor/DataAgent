@@ -105,6 +105,9 @@
             <button type="button" class="menu-item" id="menu-model-settings" role="menuitem">
               <span class="mi-icon" aria-hidden="true">⚙</span>模型供应商设置
             </button>
+            <button type="button" class="menu-item" id="menu-catalog-settings" role="menuitem">
+              <span class="mi-icon" aria-hidden="true">📚</span>语义目录管理
+            </button>
             <div class="menu-sep"></div>
             <button type="button" class="menu-item danger" id="menu-logout" role="menuitem">
               <span class="mi-icon" aria-hidden="true">⏻</span>退出登录
@@ -283,6 +286,19 @@
     </div>
   </div>
 
+  <div id="catalog-modal" class="modal-backdrop hidden">
+    <div class="modal catalog-modal">
+      <div class="modal-head">
+        <h2>语义目录管理</h2>
+        <button type="button" id="catalog-close" class="ghost-btn" title="关闭">✕</button>
+      </div>
+      <div class="modal-body catalog-body">
+        <div id="catalog-meta" class="catalog-meta"></div>
+        <div id="catalog-sections" class="catalog-sections"><div class="hp-empty">加载中…</div></div>
+      </div>
+    </div>
+  </div>
+
   <div id="toast-box" class="toast-box"></div>
 
   <script src="/static/vendor/echarts.min.js"></script>
@@ -298,6 +314,7 @@
   <script src="/static/js/stream-ui.js"></script>
   <script src="/static/js/canvas.js"></script>
   <script src="/static/js/sidebar-ui.js"></script>
+  <script src="/static/js/catalog-ui.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -13,6 +13,7 @@ from semantic.catalog_loader import (
     build_catalog,
     refresh_catalog,
     reset_defaults,
+    validate_overlay,
 )
 from semantic.dsl_schema import AggFunc, AggregateMetric, Dimension, QueryDSL
 
@@ -648,3 +649,57 @@ def test_epoch_cache_clear_forces_rebuild():
     cache.clear()
     cache.get(lambda: builds.append(1) or (1,))
     assert len(builds) == 2
+
+
+# --------------------------------------------------------------------------- #
+# validate_overlay（#27 语义目录 API 写入链路的校验入口）
+# --------------------------------------------------------------------------- #
+def _physical_from_overlay(overlay: dict) -> dict:
+    """由 fields 声明合成物理元数据（不依赖库文件，单测确定性）。"""
+    physical: dict[str, dict[str, str]] = {}
+    for spec in overlay["fields"].values():
+        physical.setdefault(str(spec["table"]), {})[str(spec["column"])] = "str"
+    return physical
+
+
+def _current_overlay() -> dict:
+    from semantic.catalog_loader import DEFAULT_OVERLAY_PATH
+
+    return json.loads(DEFAULT_OVERLAY_PATH.read_text(encoding="utf-8"))
+
+
+def test_validate_overlay_accepts_current_config():
+    overlay = _current_overlay()
+    assert validate_overlay(overlay, physical=_physical_from_overlay(overlay)) == []
+
+
+def test_validate_overlay_rejects_unknown_field_table():
+    import copy
+
+    overlay = copy.deepcopy(_current_overlay())
+    physical = _physical_from_overlay(overlay)  # 物理面取自原始配置
+    overlay["fields"]["ghost"] = {"table": "no_such_table", "column": "x"}
+    errors = validate_overlay(overlay, physical=physical)
+    assert errors and "no_such_table" in errors[0]
+
+
+def test_validate_overlay_rejects_bad_metric_section_type():
+    import copy
+
+    overlay = copy.deepcopy(_current_overlay())
+    overlay["metrics"] = "not-a-list"
+    errors = validate_overlay(overlay, physical=_physical_from_overlay(overlay))
+    assert errors and "metrics" in errors[0]
+
+
+def test_validate_overlay_rejects_alias_pointing_to_undeclared_table():
+    import copy
+
+    overlay = copy.deepcopy(_current_overlay())
+    overlay["aliases"]["ghost_table"] = "g"
+    errors = validate_overlay(overlay, physical=_physical_from_overlay(overlay))
+    assert errors and "ghost_table" in errors[0]
+
+
+def test_validate_overlay_rejects_non_dict_top_level():
+    assert validate_overlay(["not", "a", "dict"]) == ["overlay 顶层必须是 JSON 对象"]
