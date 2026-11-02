@@ -112,6 +112,10 @@ python scripts/backend_matrix.py
 
 # 启动 Web 可视化 UI（默认 8000）
 python -m web.server 8000
+
+# 风险巡检报告（issue #26 最小闭环；确定性零 LLM，供外部 cron 调度；
+# 退出码 0 无红项 / 1 有红项 / 2 执行失败，报告落 logs/risk_reports/）
+python -m risk --date 2025-12-31
 ```
 
 ## 目录结构
@@ -134,6 +138,13 @@ mock/       确定性 Gmall 电商 mock 数仓（DuckDB）：mock/init_duckdb.py
             mock/gmall/ 生成器（种子表提取 / 会话行为链模拟 / 埋点 JSON 日志 /
             日志解析入仓；反向解析规格见 docs/designs/2026-10-06-gmall-mock-reverse-design.md）
 present/    展示层（解释 + 可视化推荐）
+risk/       风险巡检与风险报表（issue #26 最小闭环）：rules.py 判定规则契约
+            （config/risk_rules.json 独立登记，fail-closed loader）+ executor.py
+            确定性巡检执行器（规则引用语义目录指标 shape 直产 DSL，经
+            execute_dsl_query 全护栏取数，零 LLM 不进 LangGraph）+ report.py
+            报告确定性渲染（红黄绿/异常清单/结论前置/证据链）+ CLI 入口
+            python -m risk（外部 cron 调度，退出码三态）；订阅/调度器/投递渠道
+            后置（见 docs/designs/2026-11-03-risk-report-mvp-design.md §9）
 security/   权限控制（表级/列级/行级 RLS + 生成前作用域收窄 + views.py 会话级
             安全视图：禁列物理投影 / RLS 固化 / 连接加固）
 auth/       统一身份认证（JWT + Session + 登录限流）
