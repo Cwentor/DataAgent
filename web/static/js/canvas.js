@@ -224,6 +224,40 @@
   }
 
   // ------------------------------------------------------------ 图表 Tab
+  // 类型切换（#24 候选集）：仅在候选集内切换（后端已过滤不适配类型，
+  // 候选外类型不可达）；切换按预生成 option 重绘（notMerge 防残留），
+  // 数据与口径不变（候选 option 由同一份 columns/rows 生成）。
+  function renderChartSwitcher(block, artifact, host) {
+    var cands = (artifact.candidates || []).filter(function (c) { return c && c.echarts; });
+    if (cands.length < 2) { return; }
+    var row = document.createElement("div");
+    row.className = "chart-switch-row";
+    var current = cands[0];
+    cands.forEach(function (cand, i) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "mini-btn chart-type-btn" + (i === 0 ? " active" : "");
+      btn.textContent = cand.label || cand.chart;
+      btn.addEventListener("click", function () {
+        if (current === cand) { return; }
+        current = cand;
+        row.querySelectorAll(".chart-type-btn.active").forEach(function (b) {
+          b.classList.remove("active");
+        });
+        btn.classList.add("active");
+        var entry = charts.find(function (c) { return c.el === host; });
+        if (entry) {
+          var opt = cand.echarts;
+          if (!opt.color) { opt.color = COLORS; }
+          entry.instance.setOption(opt, true);
+        }
+      });
+      row.appendChild(btn);
+    });
+    var exportRow = block.querySelector(".chart-export-row");
+    block.insertBefore(row, exportRow);
+  }
+
   function renderCharts(arts) {
     var box = $("charts-content");
     var empty = $("charts-empty");
@@ -259,6 +293,7 @@
           if (!option.color) { option.color = COLORS; }
           instance.setOption(option);
           charts.push({ instance: instance, el: host });
+          renderChartSwitcher(block, artifact, host);
         }
       });
       box.appendChild(g.wrap);

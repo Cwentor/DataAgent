@@ -2407,3 +2407,116 @@ def test_exploration_approval_graph_e2e_pause_and_resume(monkeypatch, tmp_path):
     dataset = final.datasets.get("s1")
     assert dataset is not None
     assert (dataset.get("audit") or {}).get("exploration") is True
+
+
+# --------------------------------------------------------------------------- #
+# 取数推荐图表（#24 候选集）：发射条件 / 候选集自包含 / 诚实边界 / 端到端接线
+# --------------------------------------------------------------------------- #
+def _viz_ref(tmp_path, *, rows=5, dsl=None, columns=("category1_name", "gmv")):
+    """构造带溯源 DSL 的 ParquetRef（数据落在 workspace/inputs/）。"""
+    import pandas as pd
+
+    from core.retrieval.parquet_ref import ParquetRef
+
+    rel = "viz_ref.parquet"  # ParquetRef.path 约定相对 workspace/inputs/
+    (tmp_path / "inputs").mkdir(parents=True, exist_ok=True)
+    frame = {col: [10.0 + i for i in range(rows)] for col in columns}
+    frame[columns[0]] = [f"c{i}" for i in range(rows)]
+    pd.DataFrame(frame).to_parquet(tmp_path / "inputs" / rel)
+    payload = (
+        dsl
+        if dsl is not None
+        else {
+            "metrics": [
+                {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+            ],
+            "dimensions": [{"field": "category1_name"}],
+        }
+    )
+    return ParquetRef(
+        name="viz_ref",
+        path=rel,
+        rows=rows,
+        columns=list(columns),
+        dsl=payload,
+    )
+
+
+def test_viz_artifact_for_dataset_emits_candidates(tmp_path):
+    """聚合数据集：发射主推荐图表，candidates 自包含 dataset 且主推荐居首。"""
+    from core.orchestrator import nodes as nodes_mod
+
+    nodes_mod.clear_preview_cache()
+    ref = _viz_ref(tmp_path, rows=5)
+    artifact = nodes_mod._viz_artifact_for_dataset("ds", ref, tmp_path)
+    assert artifact is not None
+    assert artifact["type"] == "echarts"
+    source = artifact["content"]["dataset"]["source"]
+    assert source[0] == ["category1_name", "gmv"]
+    assert len(source) == 6  # 表头 + 5 行
+    cands = artifact["candidates"]
+    assert len(cands) >= 2
+    assert cands[0]["chart"] == artifact["content"]["series"][0]["type"]
+    for cand in cands:
+        assert cand["echarts"]["dataset"]["source"] == source
+
+
+def test_viz_artifact_skips_detail_and_oversize(tmp_path):
+    """明细查询与超行数上限：诚实不发射、严禁截断画图。"""
+    from core.orchestrator import nodes as nodes_mod
+
+    nodes_mod.clear_preview_cache()
+    detail = _viz_ref(tmp_path, rows=3, dsl={"metrics": []})
+    assert nodes_mod._viz_artifact_for_dataset("ds", detail, tmp_path) is None
+
+    over = _viz_ref(tmp_path, rows=nodes_mod._VIZ_CHART_MAX_ROWS + 1)
+    assert nodes_mod._viz_artifact_for_dataset("ds", over, tmp_path) is None
+
+
+def test_viz_artifact_skips_pivot_primary(tmp_path):
+    """主推荐为透视表（多维）：数据审计 Tab 已承载表格视图，不发射图形。"""
+    from core.orchestrator import nodes as nodes_mod
+
+    nodes_mod.clear_preview_cache()
+    multi_dsl = {
+        "metrics": [
+            {"kind": "aggregate", "field": "split_total_amount", "agg": "sum", "alias": "gmv"}
+        ],
+        "dimensions": [{"field": "category1_name"}, {"field": "tm_name"}],
+    }
+    ref = _viz_ref(tmp_path, rows=2, dsl=multi_dsl, columns=("category1_name", "tm_name", "gmv"))
+    assert nodes_mod._viz_artifact_for_dataset("ds", ref, tmp_path) is None
+
+
+def test_viz_artifact_invalid_dsl_degrades(tmp_path):
+    """溯源 DSL 非法：图表能力降级返回 None，不影响取数主链路。"""
+    from core.orchestrator import nodes as nodes_mod
+
+    nodes_mod.clear_preview_cache()
+    ref = _viz_ref(tmp_path, rows=3, dsl={"metrics": "bad"})
+    assert nodes_mod._viz_artifact_for_dataset("ds", ref, tmp_path) is None
+
+
+def test_run_agent_emits_viz_artifact_with_candidates(tmp_path, monkeypatch):
+    """端到端接线：维度聚合取数成功后 artifact_emit 携带候选集（#24 闭环）。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    events: list[dict] = []
+    trace = run_agent(
+        "2024 年 6 月各品类成功订单的 GMV 分布是多少？",
+        session_id="vizcand",
+        on_event=events.append,
+    )
+    assert trace.phase == "done"
+    viz_events = [
+        e
+        for e in events
+        if e["event"] == "artifact_emit" and e["payload"]["artifact"]["type"] == "echarts"
+    ]
+    assert viz_events, "维度聚合查询应发射推荐图表"
+    artifact = viz_events[0]["payload"]["artifact"]
+    assert len(artifact["candidates"]) >= 2
+    assert artifact["candidates"][0]["chart"] == artifact["content"]["series"][0]["type"]
+    # 产物登记进 state.artifacts（参与 T14 去重与报告渲染）
+    assert any(a["kind"] == "echarts" and a["name"].endswith("_viz") for a in trace.artifacts)
