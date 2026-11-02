@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "key": "refund_rate_daily",
+      "title": "退款率日巡检",
+      "metric": "refund_rate",
+      "query_domain": "trade",
+      "window": {"grain": "day", "current": "2025-12-31", "baseline": "previous"},
+      "dimension": null,
+      "thresholds": {"red": 0.05, "yellow": 0.03},
+      "comparison": null
+    },
+    {
+      "key": "refund_rate_by_province",
+      "title": "分省退款率日巡检",
+      "metric": "refund_rate",
+      "query_domain": "trade",
+      "window": {"grain": "day", "current": "2025-12-31", "baseline": "previous"},
+      "dimension": "province",
+      "thresholds": {"red": 0.08, "yellow": 0.05},
+      "comparison": null
+    },
+    {
+      "key": "gmv_dod_drop",
+      "title": "GMV 日环比异动",
+      "metric": "gmv",
+      "query_domain": "trade",
+      "window": {"grain": "day", "current": "2025-12-31", "baseline": "previous"},
+      "dimension": null,
+      "thresholds": null,
+      "comparison": {"direction": "drop", "red": 0.3, "yellow": 0.15}
+    }
+  ]
+}

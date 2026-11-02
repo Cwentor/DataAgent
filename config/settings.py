@@ -311,3 +311,13 @@ AUTH_SESSION_DB: str | None = os.getenv("AUTH_SESSION_DB") or None
 # 配置为 SQLite 文件路径时，SessionStore / ClarifySlotStore / LoginRateLimiter
 # 通过统一持久化后端落盘，使多 worker / 重启后状态一致；留空则进程内存储。
 STATE_STORE_DB: str | None = os.getenv("STATE_STORE_DB") or None
+
+# --------------------------------------------------------------------------- #
+# 风险巡检与风险报表（issue #26 最小闭环）
+# --------------------------------------------------------------------------- #
+# 判定规则契约文件（调整走 json 变更流程，参照 semantic.json 契约登记纪律）
+RISK_RULES_PATH: Path = PROJECT_ROOT / "config" / "risk_rules.json"
+# 报告产物目录（python -m risk 输出 risk_report_YYYYMMDD.md）
+RISK_REPORT_DIR: Path = PROJECT_ROOT / "logs" / "risk_reports"
+# 巡检索 Parquet 产物工作区（execute_dsl_query 物化落点，供证据链引用）
+RISK_WORKSPACE_DIR: Path = PROJECT_ROOT / "logs" / "risk_workspace"
