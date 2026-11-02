@@ -53,6 +53,9 @@ class AuditRecord:
     # LLM token 用量（#22）：本次请求内全部 LLM 调用的汇总与 per-call 明细
     # （providers.usage.UsageLedger.snapshot 同源产出）；None = 本请求无 LLM 调用
     llm_usage: dict[str, Any] | None = None
+    # 语义目录变更审计（#27）：API 受控写入的 diff 快照（action / user /
+    # version_before / version_after / sections 逐节增删改清单）；None = 非目录变更
+    catalog_change: dict[str, Any] | None = None
     created_at: str = field(default_factory=_utcnow_iso)
 
     def to_dict(self) -> dict[str, Any]:

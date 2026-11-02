@@ -200,6 +200,10 @@
       closeUserMenu();
       openSettings();
     });
+    $("menu-catalog-settings").addEventListener("click", function () {
+      closeUserMenu();
+      if (window.CatalogUI) { window.CatalogUI.open(); }
+    });
     $("menu-logout").addEventListener("click", function () {
       closeUserMenu();
       logout();

@@ -55,6 +55,8 @@ _AUDIT_COLUMN_TYPES: dict[str, str] = {
     "sql_exec": "VARCHAR",
     # LLM token 用量（#22）：汇总 + per-call 明细（JSON 文本，与 retrieval_context 同形态）
     "llm_usage": "VARCHAR",
+    # 语义目录变更（#27）：API 受控写入 diff 快照（JSON 文本）
+    "catalog_change": "VARCHAR",
     "created_at": "VARCHAR",
 }
 
@@ -85,6 +87,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     sql_latency_ms     DOUBLE,
     sql_exec           VARCHAR,
     llm_usage          VARCHAR,
+    catalog_change     VARCHAR,
     created_at         VARCHAR
 )
 """
@@ -96,8 +99,9 @@ INSERT INTO audit_log
      dsl, sql, latency_ms, row_count, scan_rows, rewrites, error,
      detected_intent, routing_latency_ms, routing_reason,
      answered_by, planner_llm_error,
-     query_domain, db_backend, sql_latency_ms, sql_exec, llm_usage, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     query_domain, db_backend, sql_latency_ms, sql_exec, llm_usage,
+     catalog_change, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -204,6 +208,7 @@ def _record_params(record: AuditRecord) -> list[Any]:
         record.sql_latency_ms,
         _json_dump(record.sql_exec),
         _json_dump(record.llm_usage),
+        _json_dump(record.catalog_change),
         record.created_at,
     ]
 

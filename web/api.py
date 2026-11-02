@@ -34,7 +34,7 @@ from core.orchestrator.agent import run_agent
 from exec.usage import ExecUsageLedger, pop_exec_ledger, set_exec_ledger
 from providers.usage import UsageLedger, set_usage_ledger
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
-from web import providers_api
+from web import catalog_api, providers_api
 from web.server import (
     MIME,
     STATIC_DIR,
@@ -89,6 +89,12 @@ def _require_auth(request: Request) -> AuthContext:
     except AuthenticationError as exc:
         _auth_logger.warning("auth_failed", extra={"event": "auth_failed", "error": str(exc)})
         raise HTTPException(status_code=401, detail="unauthorized") from exc
+
+
+def _require_admin(ctx: AuthContext) -> None:
+    """管理动作角色门（#27 语义目录写入/试校验）：非 admin 一律 403。"""
+    if "admin" not in ctx.roles:
+        raise HTTPException(status_code=403, detail="forbidden: admin role required")
 
 
 async def _read_json_body(request: Request) -> dict:
@@ -429,6 +435,64 @@ async def schema_summary(request: Request) -> dict:
             for name, fields in sorted(tables.items())
         ],
     }
+
+
+# --------------------------------------------------------------------------- #
+# 受保护：/api/catalog（语义目录管理，issue #27）
+# GET 登录即可；validate/write 要求 admin。高压线：semantic.json 唯一事实源，
+# API 为受控写入界面（读 -> 版本校验 -> 合并 -> 校验 -> 原子写 -> 热重载 -> 审计）
+# --------------------------------------------------------------------------- #
+@app.get("/api/catalog")
+async def get_catalog(request: Request) -> Response:
+    """全量语义目录 + 版本哈希 + 分节可写性元数据（浏览不设限，与 schema/summary 同级）。"""
+    ctx = _require_auth(request)
+    set_request_context(request_id=get_request_id(), user=ctx.username)
+    code, payload = await run_in_threadpool(catalog_api.read_catalog)
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False),
+        status_code=code,
+        media_type="application/json; charset=utf-8",
+    )
+
+
+@app.post("/api/catalog/validate")
+async def validate_catalog(request: Request) -> Response:
+    """试校验（不落盘）：返回校验结果 / 逐节 diff / 影响面提示。"""
+    ctx = _require_auth(request)
+    _require_admin(ctx)
+    body = await _read_json_body(request)
+    set_request_context(request_id=get_request_id(), user=ctx.username)
+    code, payload = await run_in_threadpool(
+        catalog_api.validate_catalog, body, user=ctx.username, principal=ctx.principal
+    )
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False),
+        status_code=code,
+        media_type="application/json; charset=utf-8",
+    )
+
+
+@app.put("/api/catalog")
+@app.patch("/api/catalog")
+async def write_catalog(request: Request) -> Response:
+    """受控写入：PUT 节整体替换 / PATCH deep merge（null 删键），乐观锁版本必填。"""
+    ctx = _require_auth(request)
+    _require_admin(ctx)
+    body = await _read_json_body(request)
+    set_request_context(request_id=get_request_id(), user=ctx.username)
+    action = "patch" if request.method == "PATCH" else "put"
+    code, payload = await run_in_threadpool(
+        catalog_api.write_catalog,
+        body,
+        user=ctx.username,
+        principal=ctx.principal,
+        action=action,
+    )
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False),
+        status_code=code,
+        media_type="application/json; charset=utf-8",
+    )
 
 
 @app.get("/api/export/{export_id}")

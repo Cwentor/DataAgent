@@ -70,6 +70,7 @@
 | 穿插特性（issue #24） | 图表类型候选集与用户切换控件（推荐契约扩展，确定性规则不变） | [design](designs/2026-11-02-viz-candidate-set-design.md) | — | — |
 | Issue #28 | 真 xlsx 导出（openpyxl 序列化终点）与 PDF 打印样式（CSV 伪装 excel 收口） | [design](designs/2026-11-02-issue28-xlsx-export-design.md) | — | — |
 | Issue #26 | 定时化风险报表最小闭环（判定规则契约 + 确定性巡检执行器 + 报告渲染 + CLI，订阅调度渠道后置） | [design](designs/2026-11-03-risk-report-mvp-design.md) | — | — |
+| Issue #27 | 语义目录 Web API（json 唯一事实源不变，API 为受控写入界面） | [design](designs/2026-11-03-semantic-catalog-web-api-design.md) | [plan](plans/2026-11-03-semantic-catalog-web-api-plan.md) | — |
 
 > 评审归档清单见 [reviews/README.md](reviews/README.md)。
 > 运行期产物（`logs/`、根目录 `analytics_sandbox.duckdb`）不入 docs 分类体系。

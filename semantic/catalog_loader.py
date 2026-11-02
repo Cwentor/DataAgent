@@ -482,6 +482,74 @@ def build_catalog(
             own_conn.close()
 
 
+def validate_overlay(
+    overlay: dict[str, Any],
+    *,
+    adapter: Any | None = None,
+    physical: dict[str, dict[str, str]] | None = None,
+) -> list[str]:
+    """全量校验一份 overlay 配置（#27 语义目录 API 写入链路复用）。
+
+    纯函数，不改任何全局状态：内部复用 `_build_from_overlay` 试构建——fields
+    物理引用 / 必要业务节 / 节类型 / 连接声明检查全部走既有解析器，严禁在本
+    模块之外另立第二份校验事实（设计 docs/designs/2026-11-03-semantic-catalog-
+    web-api-design.md §3 D3）。
+
+    参数：
+    - overlay：待校验的覆写配置（顶层对象）；
+    - adapter / physical：物理元数据来源；缺省按 `settings.DB_BACKEND` 取适配器。
+      duckdb 库文件缺失时 physical=None 走离线宽松语义（与 build_catalog 回退
+      语义一致，fields 不做物理存在性校验）；非 duckdb 后端读不到物理元数据
+      直接报错（fail-closed，不静默宽松）。
+
+    返回错误信息清单（空列表 = 合法）。每次只报告首个构建错误——校验链是
+    fail-fast 的，运营者按提示逐项修复即可。
+    """
+    if not isinstance(overlay, dict):
+        return ["overlay 顶层必须是 JSON 对象"]
+
+    if physical is None:
+        if adapter is None:
+            from exec.engine import get_adapter
+
+            adapter = get_adapter()
+        backend = getattr(adapter, "name", None)
+        if backend == "duckdb":
+            if settings.DB_PATH.is_file():
+                own_conn = adapter.connect_readonly()
+                try:
+                    physical = adapter.physical_columns(own_conn)
+                finally:
+                    own_conn.close()
+            # duckdb 库缺失：physical 保持 None（离线宽松，与 build_catalog 一致）
+        else:
+            physical = adapter.physical_columns()
+            if not physical:
+                return [
+                    f"后端 {backend} 未读到任何物理元数据，拒绝校验；"
+                    "请确认库已建表且连接配置（DSN / 库名 / schema）正确"
+                ]
+
+    try:
+        cat = _build_from_overlay(overlay, physical)
+    except ValueError as exc:
+        return [str(exc)]
+    except Exception as exc:  # 结构异常统一收集，绝不让校验请求 500
+        return [f"{type(exc).__name__}: {exc}"]
+
+    # aliases 自检：键必须落在已声明表全集内（防新增别名指向未知表导致
+    # 编译器渲染失配）。全集 = 事实表 + 三类受控连接键 + fields 引用表。
+    declared: set[str] = set(cat.fact_tables) | set(cat.join_rules) | set(cat.fact_join_rules)
+    for anchor, rules in (cat.query_domains or {}).items():
+        declared.add(anchor)
+        declared.update(rules)
+    declared.update(meta.table for meta in cat.columns.values())
+    unknown = sorted(set(cat.aliases) - declared)
+    if unknown:
+        return ["aliases 指向未声明表: " + "、".join(unknown)]
+    return []
+
+
 def refresh_catalog(
     db_path: Path | str | None = None,
     conn: duckdb.DuckDBPyConnection | None = None,
