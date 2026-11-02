@@ -621,3 +621,35 @@ button.act-head:hover .act-label { color: var(--accent-dark); }
   .view-tabs { padding: 0 10px; }
   .view-tab { padding: 10px 9px; font-size: 13px; }
 }
+
+/* ================================================================== 打印输出（#28） */
+/* 浏览器 Ctrl+P 即 PDF（后端不产 PDF）：应用壳层与交互控件一律不入打印输出，
+   仅保留当前激活视图的内容主体，取消滚动与限宽，完整分页。 */
+@media print {
+  .sidebar,
+  .main-header,
+  .view-tabs,
+  .composer-wrap,
+  #report-tabs,
+  .report-link-btn,
+  .chart-type-btn,
+  .chart-export-row {
+    display: none !important;
+  }
+
+  .app-shell { display: block; }
+  .main-area { display: block; overflow: visible; }
+  .main-view { display: none !important; }
+  .main-view.active { display: block !important; }
+  .artifact-view .canvas-scroll {
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  /* 打印底色与表格边框保真（浏览器默认丢弃背景色） */
+  body { background: #fff !important; }
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
