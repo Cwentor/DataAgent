@@ -170,6 +170,13 @@ def test_run_query_export_produces_download_url(conn):
     assert all(s["success"] for s in result["steps"])
 
 
+def test_mime_table_covers_xlsx():
+    """xlsx 下载端点 media_type（#28）：MIME 表必须覆盖 .xlsx，否则退化为 octet-stream。"""
+    from web.server import MIME
+
+    assert MIME[".xlsx"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 def test_run_query_glossary_returns_steps_and_documents(conn):
     """口径问题走 explain_glossary：steps + documents，不触达 SQL 引擎。"""
     result = run_query("GMV 是怎么算的", conn=conn)

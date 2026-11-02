@@ -6,6 +6,8 @@ ruff>=0.4
 numpy>=1.26
 pandas>=2.2
 pyarrow>=15.0
+# 真 xlsx 导出序列化（#28；纯 Python 零系统依赖，导出工具延迟 import）
+openpyxl>=3.1
 # Agent harness evolution (M0): orchestration & serving layer only —
 # domain kernel deps in requirements.txt unchanged. 0.x/快速迭代生态一律精确 pin，
 # 升级走独立 PR + 全量回归门（设计文档 §9）。
