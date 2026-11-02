@@ -41,6 +41,25 @@ def test_agent_run_writes_audit_record(client, monkeypatch, tmp_path):
     assert rec["prompt"] == "列举全部省份"
 
 
+def test_agent_run_audit_record_has_llm_usage_field(client, monkeypatch, tmp_path):
+    """编排审计带 llm_usage（#22）：枚举直答路径无 LLM 调用，诚实留 None（不写空结构）。"""
+    from audit.store import AuditStore
+    from config import settings
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    monkeypatch.setattr(settings, "WORKSPACE_ROOT", tmp_path)
+    jsonl = tmp_path / "audit.jsonl"
+    monkeypatch.setattr("web.api._default_audit_store", lambda: AuditStore(jsonl_path=jsonl))
+
+    resp = client.post("/api/agent/run", json={"query": "列举全部省份"})
+    assert resp.status_code == 200
+    assert resp.json()["phase"] == "done"
+
+    rec = json.loads(jsonl.read_text(encoding="utf-8").strip().splitlines()[0])
+    # 字段贯通（ledger -> AuditRecord -> jsonl）；无 LLM 调用 => None 而非空结构
+    assert rec["llm_usage"] is None
+
+
 def test_agent_run_audit_failure_does_not_break_main(client, monkeypatch):
     """RF4：审计写入失败时 /api/agent/run 仍返回 200，不影响主链路。"""
     from audit.store import AuditStore

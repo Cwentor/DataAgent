@@ -48,8 +48,10 @@ from exec.guards import (
     execute_sql,
 )
 from exec.pool import default_pool
+from exec.usage import ExecUsageLedger, pop_exec_ledger, set_exec_ledger
 from providers.context import pop_request_model, set_request_model
 from providers.errors import ERROR_MESSAGES, ProviderError
+from providers.usage import UsageLedger, pop_usage_ledger, set_usage_ledger
 from security.errors import SecurityError
 from security.guard import referenced_fields
 from semantic import catalog
@@ -316,6 +318,18 @@ def run_query(
     pop_request_model()
     if provider_id or model_id:
         set_request_model(provider_id or "", model_id or "")
+
+    # SQL 执行耗时收集器（#23）：同"先清残留再绑定"模式，本查询内全部成功
+    # 执行（含自愈重试）逐次留痕；出口取出统一打点与审计落盘
+    pop_exec_ledger()
+    exec_ledger = ExecUsageLedger()
+    set_exec_ledger(exec_ledger)
+    # Token 用量收集器（#22）：同"先清残留再绑定"模式，本查询内所有 LLM
+    # 调用经 providers.usage.register 收口登记；出口取出汇总写入 AuditRecord
+    # （run_query 函数体在线程池 worker 内同步执行到底，绑定与读取同 context）
+    pop_usage_ledger()
+    ledger = UsageLedger()
+    set_usage_ledger(ledger)
 
     started = time.perf_counter()
     result: dict[str, Any] = {
@@ -617,6 +631,22 @@ def run_query(
     except Exception:  # 指标打点失败绝不影响主链路
         logger.exception("metrics_record_failed", extra={"event": "metrics_record_failed"})
 
+    # SQL 执行耗时可观测（#23）：出口取出收集器明细，/api/metrics 打点与
+    # AuditRecord 落盘同源（同一份明细双落）；domain 为执行点标注的域锚点
+    popped_exec_ledger = pop_exec_ledger()
+    exec_snapshot = popped_exec_ledger.snapshot() if popped_exec_ledger is not None else None
+    last_exec = exec_snapshot["executions_detail"][-1] if exec_snapshot else None
+    if exec_snapshot:
+        try:
+            for _detail in exec_snapshot["executions_detail"]:
+                default_registry().record_sql_exec(
+                    duration_ms=_detail["duration_ms"],
+                    backend=_detail["backend"],
+                    domain=_detail["domain"],
+                )
+        except Exception:  # 指标打点失败绝不影响主链路
+            logger.exception("metrics_record_failed", extra={"event": "metrics_record_failed"})
+
     record = AuditRecord(
         request_id=rid,
         session_id=session_id,
@@ -636,6 +666,13 @@ def run_query(
         detected_intent=result.get("detected_intent"),
         routing_latency_ms=result.get(ROUTING_LATENCY_MS),
         routing_reason=result.get("routing_reason"),
+        # 查询耗时可观测（#23）：域锚点 / 后端 / 最后一次成功执行耗时与全量明细
+        query_domain=last_exec["domain"] if last_exec else None,
+        db_backend=last_exec["backend"] if last_exec else None,
+        sql_latency_ms=exec_snapshot["last_duration_ms"] if exec_snapshot else None,
+        sql_exec=exec_snapshot,
+        # LLM token 用量（#22）：与 /api/metrics 的 llm_tokens 同源（同一登记动作）
+        llm_usage=ledger.snapshot(),
     )
 
     store = audit_store if audit_store is not None else _default_audit_store()
@@ -644,6 +681,7 @@ def run_query(
 
     # 请求级模型切换上下文清理（正常 / 异常路径共用此出口）
     pop_request_model()
+    pop_usage_ledger()
 
     if error:
         logger.warning(

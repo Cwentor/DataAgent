@@ -174,6 +174,69 @@ def test_run_query_audits_error(conn, tmp_path):
     assert line["row_count"] is None
 
 
+def test_run_query_audits_llm_usage(conn, tmp_path, monkeypatch):
+    """run_query 期间的 LLM 调用经请求级收集器进 audit.jsonl（#22 集成链路）。
+
+    路由判决替身内做一次真实 chat_text（走 BaseAdapter.chat_text 统一挂点
+    登记，与生产 intent_router 同形态），主链路走 CHITCHAT 干净结束——
+    验证 ledger -> AuditRecord.llm_usage -> JSONL 全链贯通与 per-call 明细。
+    """
+    from agent.router import IntentType, RouteDecision
+    from providers.adapters import BaseAdapter
+    from providers.models import ModelItem, ProviderConfig, UnifiedChatResponse, Usage
+    from providers.usage import llm_call_role
+
+    class _FakeAdapter(BaseAdapter):
+        """假适配器：固定响应，用于触发用量登记（不发起真实 HTTP）。"""
+
+        def __init__(self) -> None:
+            super().__init__(
+                ProviderConfig(
+                    id="aiaa",
+                    name="测试供应商",
+                    base_url="http://localhost:1/v1",
+                    models=[ModelItem(id="doubao-pro")],
+                ),
+                "doubao-pro",
+            )
+
+        def chat(self, request) -> UnifiedChatResponse:
+            return UnifiedChatResponse(
+                content="ok", usage=Usage(prompt_tokens=10, completion_tokens=2, total_tokens=12)
+            )
+
+        def test_connection(self):
+            raise AssertionError("本测试不触达探测路径")
+
+    fake = _FakeAdapter()
+
+    def _fake_route(query, history=None, last_dsl=None, principal=None):
+        with llm_call_role("agent.intent_router"):
+            fake.chat_text([{"role": "user", "content": query}])
+        return RouteDecision(
+            intent=IntentType.CHITCHAT, confidence=1.0, reason="test:llm-route-simulated"
+        )
+
+    monkeypatch.setattr("web.service.route_decision", _fake_route)
+
+    store = AuditStore(jsonl_path=tmp_path / "audit.jsonl")
+    run_query("你好呀", conn=conn, session_id="s1", audit_store=store)
+
+    line = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8"))
+    usage = line["llm_usage"]
+    assert usage is not None
+    assert usage["calls"] == 1
+    assert usage["prompt_tokens"] == 10
+    assert usage["total_tokens"] == 12
+    assert usage["missing_usage"] == 0
+    detail = usage["calls_detail"][0]
+    assert detail["role"] == "agent.intent_router"
+    assert detail["provider_id"] == "aiaa"
+    assert detail["model_id"] == "doubao-pro"
+    assert detail["streamed"] is False
+    assert detail["missing"] is False
+
+
 # --------------------------------------------------------------------------- #
 # 结构化日志：request_id 贯穿
 # --------------------------------------------------------------------------- #
@@ -342,6 +405,7 @@ def test_audit_columns_ddl_consistent_after_extension():
     assert set(_AUDIT_COLUMN_TYPES) == ddl_cols
     assert "answered_by" in _AUDIT_COLUMN_TYPES
     assert "planner_llm_error" in _AUDIT_COLUMN_TYPES
+    assert "llm_usage" in _AUDIT_COLUMN_TYPES
 
     # _INSERT_SQL：列名清单与占位符数量一致（第三处同步守卫）
     from audit.store import _INSERT_SQL
@@ -386,6 +450,62 @@ def test_audit_store_db_orchestration_fields(tmp_path):
     finally:
         conn.close()
     assert rows == [("r1", "enumeration", None)]
+
+
+def test_audit_store_llm_usage_roundtrip(tmp_path):
+    """llm_usage（#22）双通道落盘：JSONL 原样 JSON、DuckDB 列存 JSON 文本可回读。"""
+    import json as _json
+
+    usage = {
+        "calls": 2,
+        "missing_usage": 1,
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+        "calls_detail": [
+            {
+                "role": "orchestrator.planner",
+                "provider_id": "aiaa",
+                "model_id": "doubao-pro",
+                "streamed": True,
+                "missing": False,
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+            {
+                "role": "orchestrator.critic",
+                "provider_id": "aiaa",
+                "model_id": "doubao-pro",
+                "streamed": True,
+                "missing": True,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        ],
+    }
+    jsonl = tmp_path / "audit.jsonl"
+    store = AuditStore(jsonl_path=jsonl, db_path=tmp_path / "audit.duckdb")
+    store.write(
+        AuditRecord(request_id="r1", prompt="上月销量", llm_usage=usage),
+    )
+    store.write(AuditRecord(request_id="r2", prompt="无 LLM 调用", llm_usage=None))
+    store.close()
+
+    lines = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").strip().splitlines()]
+    assert lines[0]["llm_usage"] == usage
+    assert lines[1]["llm_usage"] is None
+
+    conn = duckdb.connect(str(tmp_path / "audit.duckdb"), read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT request_id, llm_usage FROM audit_log ORDER BY request_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows[0] == ("r1", _json.dumps(usage, ensure_ascii=False))
+    assert rows[1] == ("r2", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -480,3 +600,74 @@ def test_lock_file_open_exhausted_raises(tmp_path, monkeypatch):
     lock = _CrossProcessLock(tmp_path / "audit.duckdb")
     with pytest.raises(PermissionError, match="锁文件打开失败"):
         lock.__enter__()
+
+
+# --------------------------------------------------------------------------- #
+# 查询耗时可观测（#23）：新列写读与旧表幂等迁移
+# --------------------------------------------------------------------------- #
+def test_audit_store_query_duration_columns(tmp_path):
+    """#23：query_domain / db_backend / sql_latency_ms / sql_exec 四列写读。"""
+    store = AuditStore(db_path=tmp_path / "audit.duckdb")
+    store.write(
+        AuditRecord(
+            request_id="q1",
+            prompt="GMV",
+            sql="SELECT 1",
+            query_domain="order_detail",
+            db_backend="duckdb",
+            sql_latency_ms=7.5,
+            sql_exec={
+                "executions": 2,
+                "total_duration_ms": 10.0,
+                "last_duration_ms": 7.5,
+                "executions_detail": [{"duration_ms": 7.5}],
+            },
+        )
+    )
+    store.close()
+
+    conn = duckdb.connect(str(tmp_path / "audit.duckdb"), read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT query_domain, db_backend, sql_latency_ms, sql_exec FROM audit_log"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "order_detail"
+    assert row[1] == "duckdb"
+    assert row[2] == 7.5
+    assert json.loads(row[3])["executions"] == 2
+
+
+def test_migrate_schema_adds_query_duration_columns(tmp_path):
+    """#23：旧版 audit_log（无新四列）写库时幂等迁移自动补列，不丢历史数据。"""
+    db = tmp_path / "audit.duckdb"
+    conn = duckdb.connect(str(db))
+    conn.execute("CREATE TABLE audit_log (request_id VARCHAR, prompt VARCHAR, created_at VARCHAR)")
+    conn.execute("INSERT INTO audit_log VALUES ('old-1', '旧记录', '2026-01-01T00:00:00+00:00')")
+    conn.close()
+
+    store = AuditStore(db_path=db)
+    store.write(
+        AuditRecord(
+            request_id="new-1",
+            prompt="新记录",
+            query_domain="order_detail",
+            db_backend="duckdb",
+            sql_latency_ms=3.0,
+        )
+    )
+    store.close()
+
+    conn = duckdb.connect(str(db), read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT request_id, query_domain, db_backend, sql_latency_ms FROM audit_log "
+            "ORDER BY request_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [
+        ("new-1", "order_detail", "duckdb", 3.0),
+        ("old-1", None, None, None),
+    ]

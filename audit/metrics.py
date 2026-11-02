@@ -1,5 +1,6 @@
 """进程内可观测性指标（P0 / §4 项5）：QPS、P50/P95 耗时、意图/动作分布、
-自愈成功率、熔断次数、澄清触发率、降级次数。线程安全，零外部依赖。
+自愈成功率、熔断次数、澄清触发率、降级次数、LLM token 用量（#22）。
+线程安全，零外部依赖。
 
 统一由 web.service.run_query 打点（一次问答一条记录），GET /api/metrics 暴露。
 窗口语义：计数器为进程启动以来的累计值；latency 保留最近 N 条用于分位数。
@@ -11,7 +12,43 @@ import statistics
 import threading
 import time
 from collections import Counter, deque
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass
+class _TokenCell:
+    """Token 用量维度聚合单元（#22）。
+
+    missing_usage 单独计数：usage 缺失的调用只有次数、没有 token 数——
+    严禁按估算值虚构补齐（项目「不虚构」红线），丢失率由 snapshot 透出。
+    """
+
+    calls: int = 0
+    missing_usage: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def bump(self, *, missing: bool, prompt: int, completion: int, total: int) -> None:
+        """累计一次调用：missing 时只计次数，token 数保持不变。"""
+        self.calls += 1
+        if missing:
+            self.missing_usage += 1
+        else:
+            self.prompt_tokens += prompt
+            self.completion_tokens += completion
+            self.total_tokens += total
+
+    def to_dict(self) -> dict[str, Any]:
+        """导出聚合单元（snapshot 字段顺序即展示顺序）。"""
+        return {
+            "calls": self.calls,
+            "missing_usage": self.missing_usage,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
 
 
 class MetricsRegistry:
@@ -37,12 +74,22 @@ class MetricsRegistry:
         # LLM 流式握手重试事件（2026-10）：handshake_timeout=握手期超时发生 /
         # retry_success=重试救回 / retry_fail=重试后仍失败
         self._llm_handshake: Counter[str] = Counter()
+        # LLM token 用量（#22，2026-11）：全局 + 按模型（流式维度并入键）+ 按调用点。
+        # 会话与时间维度不进内存聚合（键无界），由 audit.jsonl 的 per-call 明细承载
+        self._llm_tokens = _TokenCell()
+        self._llm_tokens_by_model: dict[str, _TokenCell] = {}
+        self._llm_tokens_by_role: dict[str, _TokenCell] = {}
         # Multi-Tool Agent：工具调用次数与失败次数
         self._tools_called = 0
         self._tool_errors = 0
         # 审计落库失败次数（2026-10-27 审计 P2）：审计写失败被刻意设计为
         # 「不影响主链路」，代价是静默丢审计——必须有可观测计数兜住。
         self._audit_write_failures = 0
+        # SQL 执行耗时（#23，2026-11）：成功执行明细 (duration_ms, domain, backend)。
+        # 打点发生在 web 出口（从 exec 收集器 snapshot 统一登记，query_domain 由
+        # 写侧 DSL 推导），与 AuditRecord.sql_exec 同源；维度键均为有界集合
+        # （表锚点 × 后端），内存安全
+        self._sql_execs: deque[tuple[float, str | None, str]] = deque(maxlen=latency_window)
         self._latencies: deque[float] = deque(maxlen=latency_window)
 
     # ------------------------------------------------------------------ #
@@ -94,6 +141,41 @@ class MetricsRegistry:
         with self._lock:
             self._llm_handshake[kind] += 1
 
+    def record_llm_usage(
+        self,
+        *,
+        role: str,
+        provider_id: str,
+        model_id: str,
+        streamed: bool,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        missing: bool,
+    ) -> None:
+        """登记一次 LLM 调用的 token 用量（#22）：全局 + 按模型 + 按调用点。
+
+        missing=True 表示上游未返回 usage（典型：中转站不支持 stream_options
+        的流式路径）——calls 计数但 token 数不计入，丢失率由 snapshot 的
+        missing_rate 透出。参数由调用方从 providers Usage 对象解包（audit
+        不 import providers，保持叶子包依赖方向）。
+        """
+        with self._lock:
+
+            def _bump(cell: _TokenCell) -> None:
+                cell.bump(
+                    missing=missing,
+                    prompt=prompt_tokens,
+                    completion=completion_tokens,
+                    total=total_tokens,
+                )
+
+            _bump(self._llm_tokens)
+            # 流式维度并入模型键（provider/model/stream|batch），不单设维度
+            model_key = f"{provider_id}/{model_id}/{'stream' if streamed else 'batch'}"
+            _bump(self._llm_tokens_by_model.setdefault(model_key, _TokenCell()))
+            _bump(self._llm_tokens_by_role.setdefault(role, _TokenCell()))
+
     def record_self_heal_failure(self) -> None:
         """登记一次自愈失败（Record a self-heal failure）。"""
         with self._lock:
@@ -115,6 +197,17 @@ class MetricsRegistry:
         with self._lock:
             self._audit_write_failures += 1
             return self._audit_write_failures
+
+    def record_sql_exec(self, *, duration_ms: float, backend: str, domain: str | None) -> None:
+        """登记一次成功执行的 SQL 耗时（#23）。
+
+        口径：duration_ms 为 exec.guards 的 ExecutionResult.duration_ms（扫描
+        预检段 + 执行段合计，预检属治理开销）；失败执行（超时/熔断）不登记。
+        domain 为写侧 DSL 推导的查询域锚点表名，None（探索层 SQL 等）在
+        snapshot 的 by_domain 落 "(unspecified)" 键，不静默丢弃样本。
+        """
+        with self._lock:
+            self._sql_execs.append((duration_ms, domain, backend))
 
     # ------------------------------------------------------------------ #
     # 聚合
@@ -140,6 +233,21 @@ class MetricsRegistry:
                 "circuit_breakers": dict(self._circuit_breakers),
                 "degrade_outcomes": dict(self._degrade_outcomes),
                 "llm_handshake": dict(self._llm_handshake),
+                # Token 用量（#22）：零打点时也输出结构化零值（便于前端/告警消费）
+                "llm_tokens": {
+                    **self._llm_tokens.to_dict(),
+                    "missing_rate": (
+                        round(self._llm_tokens.missing_usage / self._llm_tokens.calls, 4)
+                        if self._llm_tokens.calls
+                        else None
+                    ),
+                    "by_model": {
+                        key: cell.to_dict() for key, cell in self._llm_tokens_by_model.items()
+                    },
+                    "by_role": {
+                        key: cell.to_dict() for key, cell in self._llm_tokens_by_role.items()
+                    },
+                },
                 "tools": {
                     "called": self._tools_called,
                     "errors": self._tool_errors,
@@ -161,6 +269,14 @@ class MetricsRegistry:
                 # 审计落库失败累计：非零即代表审计链路有真实缺陷（JSONL 有、
                 # 库无），运维应据此告警而非等到查历史时才发现缺数据
                 "audit_write_failures": self._audit_write_failures,
+                # SQL 执行耗时（#23）：与 AuditRecord.sql_exec 同源（同一份
+                # 收集器明细），零打点时也输出结构化零值（便于前端/告警消费）
+                "query_latency": _query_latency_snapshot(
+                    [
+                        (d, dom if dom is not None else "(unspecified)", be)
+                        for d, dom, be in self._sql_execs
+                    ]
+                ),
                 "latency_ms": {
                     "p50": round(statistics.median(latencies), 3) if latencies else None,
                     "p95": _percentile(latencies, 0.95),
@@ -177,6 +293,39 @@ def _percentile(values: list[float], p: float) -> float | None:
     ordered = sorted(values)
     idx = min(len(ordered) - 1, int(p * len(ordered)))
     return round(ordered[idx], 3)
+
+
+def _latency_cell(values: list[float]) -> dict[str, Any]:
+    """单维度组的耗时分位聚合（count / p50 / p95 / p99 / max）。"""
+    if not values:
+        return {"count": 0, "p50": None, "p95": None, "p99": None, "max": None}
+    return {
+        "count": len(values),
+        "p50": round(statistics.median(values), 3),
+        "p95": _percentile(values, 0.95),
+        "p99": _percentile(values, 0.99),
+        "max": round(max(values), 3),
+    }
+
+
+def _query_latency_snapshot(
+    execs: list[tuple[float, str, str]],
+) -> dict[str, Any]:
+    """SQL 执行耗时聚合（#23）：全局 + by_domain + by_backend。
+
+    execs 为 (duration_ms, domain, backend) 明细（domain 缺省已落
+    "(unspecified)" 占位键，与 analysis 的 _UNROUTED 同风格，不静默丢样本）。
+    """
+    by_domain: dict[str, list[float]] = {}
+    by_backend: dict[str, list[float]] = {}
+    for duration, domain, backend in execs:
+        by_domain.setdefault(domain, []).append(duration)
+        by_backend.setdefault(backend, []).append(duration)
+    return {
+        **_latency_cell([d for d, _, _ in execs]),
+        "by_domain": {key: _latency_cell(vals) for key, vals in sorted(by_domain.items())},
+        "by_backend": {key: _latency_cell(vals) for key, vals in sorted(by_backend.items())},
+    }
 
 
 _default_registry = MetricsRegistry()

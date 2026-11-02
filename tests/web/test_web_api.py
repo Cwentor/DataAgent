@@ -39,6 +39,27 @@ def test_metrics_requires_auth(client):
     assert client.get("/api/metrics").status_code == 401
 
 
+def test_metrics_exposes_llm_tokens_snapshot(client, monkeypatch):
+    """/api/metrics 透出 llm_tokens（#22）：零打点即有结构化零值。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    resp = client.get("/api/metrics")
+    assert resp.status_code == 200
+    tokens = resp.json()["llm_tokens"]
+    for key in (
+        "calls",
+        "missing_usage",
+        "missing_rate",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "by_model",
+        "by_role",
+    ):
+        assert key in tokens
+
+
 def test_unknown_route_matches_stdlib_error_body(client):
     # stdlib 未匹配路由统一 {"error": "not found"} 404，而非 FastAPI 默认 {"detail": "Not Found"}
     resp = client.get("/api/definitely/not/exist")
@@ -419,3 +440,19 @@ def test_plan_review_stream_edit_triggers_replan(client, monkeypatch, tmp_path, 
     assert kinds.count("plan_created") >= 1  # 重规划发生
     # L2 一次性审批：edit 后重规划执行自动，不再二次审批，直接跑到 done
     assert frames2[-1]["event"] == "done"
+
+
+def test_metrics_exposes_query_latency_snapshot(client, monkeypatch):
+    """/api/metrics 透出 query_latency（#23）：零打点即有结构化零值。"""
+    from config import settings
+
+    monkeypatch.setattr(settings, "AUTH_ENABLED", False)
+    resp = client.get("/api/metrics")
+    assert resp.status_code == 200
+    latency = resp.json()["query_latency"]
+    for key in ("count", "p50", "p95", "p99", "max", "by_domain", "by_backend"):
+        assert key in latency
+    assert latency["count"] == 0 or latency["count"] > 0  # 进程内累计，两种状态均合法
+    # 结构不变量：任一维度组都携带同一套分位字段
+    for group in list(latency["by_domain"].values()) + list(latency["by_backend"].values()):
+        assert set(group) == {"count", "p50", "p95", "p99", "max"}

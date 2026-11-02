@@ -27,78 +27,35 @@
 
 ## 🧠 Core pipeline (one diagram)
 
-```text
-🗣️ Natural-language question
-      │
-      ▼
-🧭 Intent routing ──── five-way split: data question / metric definition / clarification / small talk / system action
-      │
-      ▼
-📐 Governed DSL ────── the LLM may only emit in-contract JSON (extra="forbid"); multi-turn reference resolution
-      │
-      ▼
-⚙️ Deterministic compile ── field whitelist + controlled JOIN + table/column/row-level RLS injected
-      │
-      ▼
-🛡️ Governed execution ──── read-only AST check / timeout interrupt / scan-row circuit breaker / result-row cap
-      │
-      ▼
-📊 Explainable delivery ── narrative answer + adaptive chart recommendation + SQL provenance + full-chain audit
+```mermaid
+flowchart TB
+    Q["🗣️ Natural-language question"] --> R["🧭 Intent routing<br>five-way split: data question / metric definition / clarification / small talk / system action"]
+    R --> D["📐 Governed DSL<br>the LLM may only emit in-contract JSON (extra=forbid); multi-turn reference resolution"]
+    D --> C["⚙️ Deterministic compile<br>field whitelist + controlled JOIN + table/column/row-level RLS injected"]
+    C --> E["🛡️ Governed execution<br>read-only AST check / timeout interrupt / scan-row circuit breaker / result-row cap"]
+    E --> O["📊 Explainable delivery<br>narrative answer + adaptive chart recommendation + SQL provenance + full-chain audit"]
 ```
+
+## 🗺️ Interactive architecture diagram
+
+GitHub READMEs do not run scripts, so the interactive canvas is deployed on GitHub Pages (`architecture-ui`, built and deployed automatically by CI). It supports layer visibility toggles, upstream/downstream highlighting and vertical/horizontal layouts.
+
+[![DataAgent interactive architecture](docs/assets/architecture-canvas.png)](https://cwentor.github.io/DataAgent/)
+
+👉 [Open the interactive architecture diagram](https://cwentor.github.io/DataAgent/)
 
 ## ✨ Features
 
-- **Governed DSL contract**: Pydantic V2 with `extra="forbid"`; fields, operators and aggregations are closed enums
+- **Governed DSL contract**: Pydantic V2 with `extra="forbid"`; fields, operators and aggregations are closed enums — the LLM never emits raw SQL
 - **Deterministic compilation**: SQL is produced only by the compiler — aggregation / ratio / time / window / gap-filling / Top-N / period-over-period
-- **Defense in depth**: unified auth (JWT + Session) + pre-generation scope narrowing + table/column/row-level guards (RLS)
-- **Governed execution**: read-only allowlist, pre-execution audit gate (cartesian product / read-only violations → REJECTED circuit break; unbounded output → WARNING), timeout cancellation, scan-row breaker, result-row cap, SQL self-healing
-- **Conversational UX**: intent routing, multi-turn reference inheritance ("and South China?"), metric clarification with slot filling, multi-tool orchestration
-- **Observation-driven replanning**: the dispatch trace is fed back to the planner to keep deciding (continue querying / answer / ask back / stop) under a hard Max-Steps budget; comparison questions are decomposed into per-entity queries answered side by side; a reflection layer self-checks result sufficiency after the loop terminates (and may append one bounded query)
-- **Enterprise Data Agent (the `core/` upgrade layer)**:
-  - **Graph orchestration**: a single LangGraph engine with six nodes (clarify HITL → plan → governed retrieval → sandbox analysis → reflection/replan → synthesis). The plan is a step DAG; interrupts generalize approval gates (clarify / plan_review / high_risk — L3 double-confirms model-authored sandbox code); bounded self-healing (≤3). On replanning the failure context is injected into the planner, so healing is targeted correction rather than blind retry
-  - **GuardrailAgent pre-execution audit**: compiled SQL goes through a sqlglot AST audit — cartesian products (comma / CROSS / JOIN without ON) and read-only violations are **REJECTED before execution** (the rejection reason feeds the self-healing context); unbounded output produces WARNING audit trails; verdicts are structured (check/severity/message/suggestion)
-  - **DataQAAgent result assertions**: four deterministic checks — empty result / NULL rate / negative values on non-negative metrics / uniqueness of aggregation dimension combinations — shared by both the orchestrator and the web retrieval paths; findings surface through `ParquetRef.audit` via SSE events, the critic's reflection view, a "data quality" section in the report, and structured logs (no false kills, no swallowed errors)
-  - **SchemaAgent dynamic profiling**: low-cardinality (≤30) string columns are probed for actual values and injected into the planning context ("allowed values: a|b|c"), so the planner stops inventing filter literals; process-level cache with graceful degradation, zero side effects offline
-  - **Sandbox code interpreter**: AST static guard (denylisted imports/calls/dunder escapes) + privilege-limited runner (module allowlist imports, workspace-restricted `open`) + pluggable backends (Docker `--net=none --cap-drop=ALL` for strong isolation, subprocess fallback); aggregation matrices capped at ≤100 rows to prevent data exfiltration
-  - **Attribution skill pack**: dimension entropy / information-gain drill-down, multiplicative log-chain metric decomposition trees (GMV = UV × CR × AOV), additive gap decomposition, DTW similarity, Holt-Winters anomaly detection, Shapley-value fair attribution — all cross-checked against known closed-form solutions
-  - **Data exchange protocol**: DSL results are PII-masked (column-name heuristics + value-shape regex, deterministic hash masking) and materialized as a `ParquetRef` (sha256-auditable); the sandbox has no network and no DB socket
-  - **Raw-SQL gateway**: string payloads / SQL keys / free-form SQL shapes are rejected at the gateway (`GuardrailViolation`) — the third line of the "the LLM never emits raw SQL" defense
-  - **Intent-routing convergence and honest fallback (phase 18)**: clarification authority moves up to the Planner (option-style clarifications — clicking a metric pill answers it);
-    fallback is admission-based: diagnostics / cardinality ("how many provinces are there") / hard-anchored metrics are answered deterministically (with a note on the default definition), all other intents get an honest refusal
-    (reason + recognized anchors + capability list, zero LLM calls); an L3 intent-DSL mismatch guard blocks "cardinality intent + amount aggregation" style mismatches before execution;
-    a grounding retry loop — reported numbers are verified against source values (unit-normalized tolerance); non-traceable values above threshold trigger one rewrite with correction instructions,
-    otherwise rendering degrades deterministically; the intent vocabulary has `FieldMeta.aliases` as its single source of truth, and fallback takeover / degradation is always visible
-  - **Enumeration pre-routing with deterministic rendering (phase 20)**: ENUMERATION intents are pre-routed at the orchestration entry into a deterministic rendering path — a full row listing
-    (truncated with a split when above threshold), bypassing the LLM entirely: zero hallucination, zero latency; a degradation watermark distinguishes "enumeration pre-routed" from "LLM failure fallback",
-    and the user-facing wording reflects which one happened
-  - **Single source of semantic truth (phase 20 M-P2)**: `config/semantic.json` is the only static source of business facts — fields / labels / aliases / join rules / metric definitions /
-    paid filter / default windows / reflection concepts / enum labels / region mapping / dimension member seeds all live in that JSON; `semantic/catalog.py` reads it directly at import time,
-    and adding business mappings in hand-written code (heuristic / nodes / glossary / prompts / labels) is forbidden
-  - **HTTP entrypoints**: `POST /api/agent/run` (synchronous orchestration, auth + HITL clarify interrupt/resume, owner-bound resume_token) and
-    `GET /api/v1/agent/chat/stream` (SSE: nine event types — plan_created / step_start / tool_start / tool_end /
-    reflection / hitl_request / artifact_emit / done / error — pushed in real time; exceptions converge into an error event instead of breaking the stream)
-  - **Agent conversation workspace**: the central chat page carries the whole process as a conversation stream — user bubbles,
-    task plan (DAG step list + progress), tool calls (DSL/sandbox activity rows with expandable contract/code/output),
-    reflection and self-healing nodes, HITL cards (metric pills answer on click; plan approval supports approve /
-    reject / reject-with-instructions replanning), completion and error summaries; beyond 50 steps it switches to windowed virtual rendering
-    (all event data retained, only the visible window in the DOM); the composer has a built-in model selector to switch provider models on the fly;
-    the left sidebar hosts view switching (execution report / interactive ECharts charts / sandbox code and output / data audit table +
-    Markdown/HTML export), autonomy level selection (L1 per-step confirm / L2 plan confirm /
-    L3 high-risk confirm / L4 fully autonomous, persisted per session and sent with the stream), session history, the knowledge catalog (`/api/schema/summary`
-    semantic field listing), and settings / user center — no frontend framework (vanilla JS + vendored ECharts/PrismJS)
-- **Multiple execution backends (phases 21–25, `exec/engine/` + `compiler/dialect/`)**:
-  - **Engine abstraction**: the `EngineAdapter` protocol pushes connection / execution / cancellation / plan parsing / error normalization / connection hardening / bulk load / physical metadata down to each engine; `DialectRenderer` carries dialect differences (identifier quoting, date truncation and shifting, HAVING aliases, gap-filling spine, string escaping). Adding a backend means registering one line in each, with zero changes to the guardrail framework or consumers
-  - **Five backends, one contract**: `DB_BACKEND=duckdb|mysql|postgres|clickhouse|hive` (duckdb by default, zero breakage); warehouse DDL is reused from the DuckDB version and transpiled at runtime, with row-identical source data
-  - **Physical metadata pushed down (phase 24)**: catalog physical columns are always read live via `physical_columns()` — `information_schema.columns` for DuckDB/MySQL/PostgreSQL, `system.columns` for ClickHouse, `DESCRIBE` parsing for Hive; type normalization converges in `exec/engine/type_map.py`, where unknown types fail closed (never silently degraded to `str`)
-  - **Hive path (phase 25)**: PyHive HTTP transport (sidestepping `sasl`, which has no Windows wheel), `posexplode` spine for gap filling, CSV staging + `LOAD DATA` for warehouse builds, and a guardrail denylist for HiveQL-specific statements (DFS/MSCK/USE/SHOW/DESCRIBE/LOCK/GRANT…)
-  - **Service-level gates**: every non-default backend has its own CI parity job — full golden-DSL cross-backend parity plus week-boundary / five-year recursive gap filling / comparison pairing / connection-pool reuse cases
-- **Multi-provider gateway (`providers/`)**: four protocol adapters — OpenAI Chat, OpenAI Responses, Anthropic, Gemini —
-  with JSON-Mode smoothing (the control plane exposes visual configuration for the first three; the Gemini adapter is ready);
-  API keys are encrypted at rest, list responses never echo secrets, and the workspace settings page offers visual CRUD plus connectivity probes
-  (all providers are user-added, nothing preset); SSE orchestration supports request-level `provider_id` / `model_id`
-  model switching
-- **Explainable delivery**: DSL → narrative answer + adaptive chart recommendation, no frontend framework
-- **Observability**: full-chain audit snapshots (including orchestration fields `answered_by` / `planner_llm_error`), structured JSON logs (request_id threading: error = circuit break / audit rejection / quota exhausted, warning = self-healable / degraded, info = flow transitions; optional RotatingFileHandler), QPS / percentile metrics, and severity-tiered collection of DataQA findings
+- **Five backends, one contract**: `DB_BACKEND` switches DuckDB / MySQL / PostgreSQL / ClickHouse / Hive; the guardrail framework is engine-agnostic; golden evaluation stays anchored on the DuckDB dialect
+- **Defense in depth**: unified auth + pre-generation scope narrowing + table/column/row-level RLS + pre-execution audit gate (cartesian / read-only violations REJECTED) + timeout / scan / result-row guardrails
+- **Graph orchestration**: a single LangGraph engine with six nodes (clarify, plan, governed retrieval, sandbox analysis, reflection/replan, synthesis), four interrupt approval gates, L1-L4 autonomy levels and bounded self-healing
+- **Sandbox & attribution**: AST guard + privilege-limited runner + Docker isolation; entropy drill-down / decomposition trees / DTW / Shapley skill pack
+- **Honest fallback**: intent routing with admission-based fallback — no fabrication, assumptions made explicit (`assumptions` contract field), refusal as the last resort
+- **Explainable & observable**: narrative answer + adaptive charts + SQL provenance + full-chain audit, structured logs and metrics
+
+> The full feature list, organized by phase with each phase's key decisions, lives in [Feature overview](docs/guides/features.en.md).
 
 ## 🚀 Quick start
 
@@ -296,39 +253,7 @@ ruff check --fix .
 
 > The four parity jobs are **service-level** verification: locally those cases are skipped when the engine is absent, so a green PR is the only proof that the backend path was actually executed.
 
-### 9. API examples
-
-**Log in and get a token**:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"analyst","password":"analyst123"}'
-```
-
-**SSE streaming Data Agent session** (each frame is `data: <AgentStreamEvent JSON>`):
-
-```bash
-curl -N "http://127.0.0.1:8000/api/v1/agent/chat/stream?query=GMV%20of%20successful%20orders%20in%20May%202024" \
-  -H "Authorization: Bearer <token>"
-# data: {"turn_id":"t-ab12cd34","timestamp":1725868800000,"event":"plan_created",
-#        "payload":{"plan":[{"id":"s1","title":"...","kind":"query","status":"pending"}]}}
-# data: {..., "event":"tool_start", "payload":{"tool":{"name":"futurebi_dsl_query","input":{...}}}}
-# data: {..., "event":"done", "payload":{"report":"## Analysis report..."}}
-```
-
-**Run a query**:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/query \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"query":"GMV distribution by category for successful orders"}'
-```
-
-The response contains the DSL, the SQL, column metadata, row count, a narrative explanation and visualization suggestions.
-
-### 10. Production deployment notes
+### 9. Production deployment notes
 
 1. **JWT secret**: replace it with a strong random value (`secrets.token_hex(32)`)
 2. **Strict mode**: with `AUTH_STRICT=1`, a weak secret or disabled auth makes startup fail

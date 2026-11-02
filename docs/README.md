@@ -31,6 +31,7 @@
 ## 三、稳定指南入口
 
 [快速开始](guides/quickstart.md) · [架构与设计](guides/architecture.md) ·
+[特性总览](guides/features.md)（[EN](guides/features.en.md)） ·
 [环境配置](guides/configuration.md) · [Web UI 与 API](guides/api.md) ·
 [安全模型](guides/security.md) · [质量保障](guides/quality.md) ·
 [演进里程碑](guides/roadmap.md)
@@ -65,6 +66,7 @@
 | 二十六期（已实施） | 扫描行预检两段式（duckdb 先行；审计 §9.3「预检开销」收口） | [design](designs/2026-10-27-scan-precheck-two-stage-design.md) | [plan](plans/2026-10-27-scan-precheck-two-stage-plan.md) | [tasks](tasks/2026-10-27-scan-precheck-two-stage-tasks.md)（T1-T7 完成）· [评审](reviews/2026-10-27-design-review-scan-precheck-two-stage.md)（P0 已全部闭合） |
 | 设计分析 | RAG 知识库引入决策（暂不立项，目录规模触发再评估） | [analysis](designs/2026-11-01-rag-adoption-decision-analysis.md) | — | — |
 | 设计分析 | 数据层四项能力边界（DWS / CDC / 定时调度 / 物化预聚合，域外决策） | [analysis](designs/2026-11-01-data-layer-scope-boundary-analysis.md) | — | — |
+| Issue #23 | 查询耗时可观测与慢案例回流评测（生成质量治理，非 DBA 域慢查询优化） | [design](designs/2026-11-02-query-duration-observability-design.md) | — | — |
 | 穿插特性（issue #24） | 图表类型候选集与用户切换控件（推荐契约扩展，确定性规则不变） | [design](designs/2026-11-02-viz-candidate-set-design.md) | — | — |
 
 > 评审归档清单见 [reviews/README.md](reviews/README.md)。

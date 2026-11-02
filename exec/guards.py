@@ -61,6 +61,7 @@ from exec.errors import (
     SqlExecutionError,
     UnsafeSqlError,
 )
+from exec.usage import register_sql_exec
 
 logger = get_logger("exec.guards")
 
@@ -858,6 +859,15 @@ def execute_sql(
         )
 
     duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
+    # 执行耗时登记（#23）：成功路径自登记进请求级收集器（未绑定时零负担）。
+    # 失败执行（超时/扫描熔断/返回熔断）不登记——到熔断为止的时长有偏，
+    # 熔断事件已由 metrics 的 circuit_breakers 计数覆盖
+    register_sql_exec(
+        duration_ms=duration_ms,
+        scan_rows=scan_rows,
+        row_count=len(rows),
+        backend=str(getattr(adapter, "name", "unknown")),
+    )
     return ExecutionResult(
         columns=columns,
         rows=rows,

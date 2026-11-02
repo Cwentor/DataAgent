@@ -445,7 +445,7 @@ def _from_clause(dsl: QueryDSL, anchor: str | None = None) -> str:
     QUERY_DOMAINS[anchor] 声明的维度连接。
     """
     if anchor is None:
-        anchor = _resolve_anchor(dsl)
+        anchor = resolve_anchor(dsl)
     _validate_time_field_domain(dsl, anchor)
     tables = _collect_tables(dsl)
     fact_alias = catalog.ALIASES.get(anchor, anchor)
@@ -470,8 +470,8 @@ def _from_clause(dsl: QueryDSL, anchor: str | None = None) -> str:
     return sql
 
 
-def _resolve_anchor(dsl: QueryDSL) -> str:
-    """按 DSL 引用字段解析查询域锚点。
+def resolve_anchor(dsl: QueryDSL) -> str:
+    """按 DSL 引用字段解析查询域锚点（公开函数，#23 起供写侧推导 query_domain）。
 
     - 全部引用字段落在交易域（主事实表 + JOIN_RULES/FACT_JOIN_RULES 涉及表）
       -> 返回 FACT_TABLE；
@@ -509,6 +509,18 @@ def _validate_time_field_domain(dsl: QueryDSL, anchor: str) -> None:
             f"time_field={tf.time_field!r} 不属于当前查询域（锚点 {anchor}），"
             "请改用该域注册的时间字段"
         )
+
+
+def resolve_anchor_or_none(dsl: QueryDSL) -> str | None:
+    """resolve_anchor 的观测面安全版（#23）：解析失败返回 None 而非抛错。
+
+    供执行点打 query_domain 标注使用——标注缺失只影响耗时维度聚合的归组，
+    绝不因推导失败阻断取数主链路（宁缺勿错）。
+    """
+    try:
+        return resolve_anchor(dsl)
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- #
