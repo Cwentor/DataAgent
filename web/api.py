@@ -31,6 +31,7 @@ from auth.session import default_session_store
 from auth.tokens import create_token
 from config import settings
 from core.orchestrator.agent import run_agent
+from exec.usage import ExecUsageLedger, pop_exec_ledger, set_exec_ledger
 from providers.usage import UsageLedger, set_usage_ledger
 from tools.builtins._export_store import ExportNotFoundError, default_export_store
 from web import providers_api
@@ -543,6 +544,13 @@ async def post_agent_run(request: Request) -> Response:
         resume_state = AgentState.model_validate(paused["state"])
         resume_state = resume_state.model_copy(update={"human_reply": human_reply})
 
+    # SQL 执行耗时收集器（#23）：先清残留再绑定，编排链路内全部成功执行
+    # （取数节点可多步骤）逐次留痕；done 路径出口取出统一打点与审计落盘。
+    # HITL 挂起轮次不收尾，明细随下次请求入口清残留丢弃——与挂起轮次不落
+    # 审计记录的既有行为一致
+    pop_exec_ledger()
+    exec_ledger = ExecUsageLedger()
+    set_exec_ledger(exec_ledger)
     # Token 用量收集器（#22）：绑定时传入 run_in_threadpool 的 context 副本，
     # 子线程内所有 LLM 调用（Planner/Critic/Synthesizer/自愈）共享同一 ledger
     # 引用登记；async 端点运行于请求 Task 的独立 context，无跨请求泄漏
@@ -597,6 +605,21 @@ async def post_agent_run(request: Request) -> Response:
     # 编排审计（P3）：done 路径落 audit.jsonl，记录裁决方与 LLM 规划失败原因；
     # 审计写入失败绝不影响主链路（RF4）
     store = _default_audit_store()
+    # SQL 执行耗时可观测（#23）：出口取出收集器明细，/api/metrics 打点与
+    # AuditRecord 落盘同源（同一份明细双落）；domain 为执行点标注的域锚点
+    popped_exec_ledger = pop_exec_ledger()
+    exec_snapshot = popped_exec_ledger.snapshot() if popped_exec_ledger is not None else None
+    last_exec = exec_snapshot["executions_detail"][-1] if exec_snapshot else None
+    if exec_snapshot:
+        try:
+            for _detail in exec_snapshot["executions_detail"]:
+                metrics_registry().record_sql_exec(
+                    duration_ms=_detail["duration_ms"],
+                    backend=_detail["backend"],
+                    domain=_detail["domain"],
+                )
+        except Exception:  # 指标打点失败绝不影响主链路
+            logger.exception("metrics_record_failed", extra={"event": "metrics_record_failed"})
     if store is not None:
         write_audit_safely(
             store,
@@ -608,6 +631,11 @@ async def post_agent_run(request: Request) -> Response:
                 detected_intent=result.detected_intent,
                 answered_by=result.answered_by or None,
                 planner_llm_error=result.planner_llm_error,
+                # 查询耗时可观测（#23）：域锚点 / 后端 / 最后一次成功执行耗时与明细
+                query_domain=last_exec["domain"] if last_exec else None,
+                db_backend=last_exec["backend"] if last_exec else None,
+                sql_latency_ms=exec_snapshot["last_duration_ms"] if exec_snapshot else None,
+                sql_exec=exec_snapshot,
                 # LLM token 用量（#22）：编排链路全部 LLM 调用的汇总与 per-call 明细
                 llm_usage=ledger.snapshot(),
             ),

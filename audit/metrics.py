@@ -85,6 +85,11 @@ class MetricsRegistry:
         # 审计落库失败次数（2026-10-27 审计 P2）：审计写失败被刻意设计为
         # 「不影响主链路」，代价是静默丢审计——必须有可观测计数兜住。
         self._audit_write_failures = 0
+        # SQL 执行耗时（#23，2026-11）：成功执行明细 (duration_ms, domain, backend)。
+        # 打点发生在 web 出口（从 exec 收集器 snapshot 统一登记，query_domain 由
+        # 写侧 DSL 推导），与 AuditRecord.sql_exec 同源；维度键均为有界集合
+        # （表锚点 × 后端），内存安全
+        self._sql_execs: deque[tuple[float, str | None, str]] = deque(maxlen=latency_window)
         self._latencies: deque[float] = deque(maxlen=latency_window)
 
     # ------------------------------------------------------------------ #
@@ -193,6 +198,17 @@ class MetricsRegistry:
             self._audit_write_failures += 1
             return self._audit_write_failures
 
+    def record_sql_exec(self, *, duration_ms: float, backend: str, domain: str | None) -> None:
+        """登记一次成功执行的 SQL 耗时（#23）。
+
+        口径：duration_ms 为 exec.guards 的 ExecutionResult.duration_ms（扫描
+        预检段 + 执行段合计，预检属治理开销）；失败执行（超时/熔断）不登记。
+        domain 为写侧 DSL 推导的查询域锚点表名，None（探索层 SQL 等）在
+        snapshot 的 by_domain 落 "(unspecified)" 键，不静默丢弃样本。
+        """
+        with self._lock:
+            self._sql_execs.append((duration_ms, domain, backend))
+
     # ------------------------------------------------------------------ #
     # 聚合
     # ------------------------------------------------------------------ #
@@ -253,6 +269,14 @@ class MetricsRegistry:
                 # 审计落库失败累计：非零即代表审计链路有真实缺陷（JSONL 有、
                 # 库无），运维应据此告警而非等到查历史时才发现缺数据
                 "audit_write_failures": self._audit_write_failures,
+                # SQL 执行耗时（#23）：与 AuditRecord.sql_exec 同源（同一份
+                # 收集器明细），零打点时也输出结构化零值（便于前端/告警消费）
+                "query_latency": _query_latency_snapshot(
+                    [
+                        (d, dom if dom is not None else "(unspecified)", be)
+                        for d, dom, be in self._sql_execs
+                    ]
+                ),
                 "latency_ms": {
                     "p50": round(statistics.median(latencies), 3) if latencies else None,
                     "p95": _percentile(latencies, 0.95),
@@ -269,6 +293,39 @@ def _percentile(values: list[float], p: float) -> float | None:
     ordered = sorted(values)
     idx = min(len(ordered) - 1, int(p * len(ordered)))
     return round(ordered[idx], 3)
+
+
+def _latency_cell(values: list[float]) -> dict[str, Any]:
+    """单维度组的耗时分位聚合（count / p50 / p95 / p99 / max）。"""
+    if not values:
+        return {"count": 0, "p50": None, "p95": None, "p99": None, "max": None}
+    return {
+        "count": len(values),
+        "p50": round(statistics.median(values), 3),
+        "p95": _percentile(values, 0.95),
+        "p99": _percentile(values, 0.99),
+        "max": round(max(values), 3),
+    }
+
+
+def _query_latency_snapshot(
+    execs: list[tuple[float, str, str]],
+) -> dict[str, Any]:
+    """SQL 执行耗时聚合（#23）：全局 + by_domain + by_backend。
+
+    execs 为 (duration_ms, domain, backend) 明细（domain 缺省已落
+    "(unspecified)" 占位键，与 analysis 的 _UNROUTED 同风格，不静默丢样本）。
+    """
+    by_domain: dict[str, list[float]] = {}
+    by_backend: dict[str, list[float]] = {}
+    for duration, domain, backend in execs:
+        by_domain.setdefault(domain, []).append(duration)
+        by_backend.setdefault(backend, []).append(duration)
+    return {
+        **_latency_cell([d for d, _, _ in execs]),
+        "by_domain": {key: _latency_cell(vals) for key, vals in sorted(by_domain.items())},
+        "by_backend": {key: _latency_cell(vals) for key, vals in sorted(by_backend.items())},
+    }
 
 
 _default_registry = MetricsRegistry()

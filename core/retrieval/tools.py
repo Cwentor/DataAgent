@@ -23,11 +23,12 @@ from typing import Any
 import duckdb
 
 from audit.logging import get_logger
-from compiler.sql_compiler import compile_sql
+from compiler.sql_compiler import compile_sql, resolve_anchor_or_none
 from core.retrieval.export import DEFAULT_MAX_EXPORT_ROWS, export_to_parquet
 from core.retrieval.guardrails import GuardrailViolation, validate_dsl_payload
 from core.retrieval.parquet_ref import ParquetRef
 from exec.guards import execute_sql
+from exec.usage import sql_exec_domain
 from security.guard import apply_policy
 from semantic.dsl_schema import QueryDSL
 
@@ -88,13 +89,15 @@ def execute_dsl_query(
     if own_conn:
         conn = _acquire_conn()
     try:
-        exec_result = execute_sql(
-            conn,
-            sql,
-            statement_timeout_ms=timeout_ms or settings.QUERY_TIMEOUT_MS,
-            max_scan_rows=settings.MAX_SCAN_ROWS,
-            max_result_rows=max_rows,
-        )
+        # query_domain 标注（#23）：执行点包裹，编排链路的执行明细自动带域锚点
+        with sql_exec_domain(resolve_anchor_or_none(guarded_dsl)):
+            exec_result = execute_sql(
+                conn,
+                sql,
+                statement_timeout_ms=timeout_ms or settings.QUERY_TIMEOUT_MS,
+                max_scan_rows=settings.MAX_SCAN_ROWS,
+                max_result_rows=max_rows,
+            )
     finally:
         if own_conn:
             from exec.pool import default_pool

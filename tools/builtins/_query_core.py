@@ -32,10 +32,11 @@ import duckdb
 from agent.pipeline import rewrite_dsl, run_pipeline_with_status
 from audit.logging import get_logger
 from audit.metrics import default_registry
-from compiler.sql_compiler import CompileError, compile_sql
+from compiler.sql_compiler import CompileError, compile_sql, resolve_anchor_or_none
 from config import settings
 from core.retrieval.quality import run_quality_assertions
 from exec.guards import ExecutionResult, SqlExecutionError, execute_sql
+from exec.usage import sql_exec_domain
 from security.guard import apply_policy
 from semantic.dsl_schema import QueryDSL
 
@@ -149,13 +150,16 @@ def _run_guarded(
                 )
                 _cached_flag = True
                 break
-            exec_result = executor(
-                conn,
-                sql,
-                statement_timeout_ms=settings.QUERY_TIMEOUT_MS,
-                max_scan_rows=settings.MAX_SCAN_ROWS,
-                max_result_rows=settings.MAX_RESULT_ROWS,
-            )
+            # query_domain 标注（#23）：执行点包裹（每次循环按 current_dsl 重推导，
+            # 自愈重写后的 DSL 域变化也如实反映）；推导失败落 None 不阻断主链路
+            with sql_exec_domain(resolve_anchor_or_none(current_dsl)):
+                exec_result = executor(
+                    conn,
+                    sql,
+                    statement_timeout_ms=settings.QUERY_TIMEOUT_MS,
+                    max_scan_rows=settings.MAX_SCAN_ROWS,
+                    max_result_rows=settings.MAX_RESULT_ROWS,
+                )
             if cache_key is not None:
                 _cache_put(cache_key, exec_result)
             break

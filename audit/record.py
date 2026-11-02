@@ -43,6 +43,13 @@ class AuditRecord:
     # 编排特有字段（P3）：编排裁决方与 LLM 规划失败原因
     answered_by: str | None = None
     planner_llm_error: str | None = None
+    # 查询耗时可观测（#23，2026-11）：写侧推导的查询域锚点表名（无 DSL 落 None）、
+    # 执行后端名、最后一次成功执行的 SQL 耗时（与最终 SQL 对应）、全部成功执行
+    # 明细（自愈重试逐次留痕，结构见 exec.usage.ExecUsageLedger.snapshot）
+    query_domain: str | None = None
+    db_backend: str | None = None
+    sql_latency_ms: float | None = None
+    sql_exec: dict[str, Any] | None = None
     # LLM token 用量（#22）：本次请求内全部 LLM 调用的汇总与 per-call 明细
     # （providers.usage.UsageLedger.snapshot 同源产出）；None = 本请求无 LLM 调用
     llm_usage: dict[str, Any] | None = None
